@@ -1,8 +1,15 @@
 """
 ScrapedPost Model - Individual posts/videos scraped from competitors
+
+SURVIVOR BIAS FIX (2026-01):
+Added fields for balanced sampling to collect both viral posts AND flops:
+- is_viral: Binary classification (1=viral, 0=flop, NULL=middle)
+- engagement_ratio: Engagement / Followers ratio
+- performance_tier: top, middle, bottom
+- performance_percentile: Position in engagement ranking
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Text, Float
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Text, Float, Boolean
 from sqlalchemy.orm import relationship
 import enum
 from app.core.database import Base
@@ -16,6 +23,13 @@ class ContentFormat(str, enum.Enum):
     TIKTOK_VIDEO = "tiktok_video"
     LINKEDIN_POST = "linkedin_post"
     LINKEDIN_CAROUSEL = "linkedin_carousel"
+
+
+class PerformanceTier(str, enum.Enum):
+    """Performance tier based on engagement ranking"""
+    TOP = "top"         # Top 20% - viral content
+    MIDDLE = "middle"   # Middle 60% - average content
+    BOTTOM = "bottom"   # Bottom 20% - flop content
 
 
 class ScrapedPost(Base):
@@ -53,6 +67,24 @@ class ScrapedPost(Base):
     engagement_score = Column(Float, default=0.0)
     engagement_rate = Column(Float, default=0.0)  # (likes+comments) / followers * 100
 
+    # === SURVIVOR BIAS FIX: New fields for balanced sampling ===
+    # Binary viral classification for ML training
+    # 1 = Top 20% (viral/success), 0 = Bottom 20% (flop/failure), NULL = Middle 60%
+    is_viral = Column(Boolean, nullable=True, index=True)
+
+    # Engagement ratio: (weighted_engagement / followers) * 100
+    # This normalizes engagement across accounts of different sizes
+    engagement_ratio = Column(Float, default=0.0)
+
+    # Performance classification
+    performance_tier = Column(Enum(PerformanceTier), nullable=True)
+    performance_percentile = Column(Float, nullable=True)  # 0-100, higher = better
+
+    # Sampling metadata
+    sampling_strategy = Column(String(50), nullable=True)  # balanced, top_only, etc.
+    is_augmented = Column(Boolean, default=False)  # True if synthetically generated
+    # === END SURVIVOR BIAS FIX ===
+
     # Timing
     posted_at = Column(DateTime, nullable=True)
     day_of_week = Column(String(20), nullable=True)
@@ -73,6 +105,29 @@ class ScrapedPost(Base):
 
     # Relationships
     competitor = relationship("Competitor", back_populates="scraped_posts")
+
+    def calculate_engagement_ratio(self, follower_count: int = 1) -> float:
+        """
+        Calculate engagement ratio normalized by followers.
+
+        SURVIVOR BIAS FIX: This ratio allows comparing engagement
+        across accounts of different sizes.
+
+        Formula: (weighted_engagement / followers) * 100
+
+        Returns:
+            Engagement ratio as percentage (can exceed 100 for viral content)
+        """
+        weighted_engagement = (
+            self.likes_count +
+            (self.comments_count * 3) +
+            (self.shares_count * 4) +
+            (self.saves_count * 5)
+        )
+
+        if follower_count > 0:
+            return (weighted_engagement / follower_count) * 100
+        return 0.0
 
     def calculate_engagement_score(self, follower_count: int = 1) -> float:
         """Calculate normalized engagement score 0-100"""

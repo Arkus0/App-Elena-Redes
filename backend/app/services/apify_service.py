@@ -1,14 +1,27 @@
 """
 Apify Service - Instagram & TikTok scraping
 Primary data source for competitor analysis
+
+SURVIVOR BIAS FIX (2026-01):
+This service now supports Balanced Sampling to collect both top performers
+(viral posts) AND bottom performers (flops) to eliminate Survivor Bias
+in ML model training.
+
+See: backend/app/services/scraper/balanced_scraper.py
 """
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
+from app.services.scraper.balanced_scraper import (
+    BalancedScraper,
+    SamplingStrategy,
+    SamplingConfig,
+    create_balanced_scraper,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +30,34 @@ class ApifyService:
     """
     Service for scraping social media data via Apify API
     Supports Instagram, TikTok, and LinkedIn
+
+    SURVIVOR BIAS FIX:
+    Now includes BalancedScraper to collect both viral posts AND flops.
+    This enables the ML model to learn discriminative features for both
+    success and failure patterns.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        sampling_strategy: SamplingStrategy = SamplingStrategy.BALANCED,
+        top_n: int = 25,
+        bottom_n: int = 5
+    ):
         self.api_key = settings.APIFY_API_KEY
         self.client = None
         self._initialize_client()
+
+        # Initialize balanced scraper for survivor bias fix
+        self.balanced_scraper = create_balanced_scraper(
+            top_n=top_n,
+            bottom_n=bottom_n,
+            strategy=sampling_strategy
+        )
+        self.sampling_strategy = sampling_strategy
+        logger.info(
+            f"ApifyService initialized with {sampling_strategy.value} sampling "
+            f"(top={top_n}, bottom={bottom_n})"
+        )
 
     def _initialize_client(self):
         """Initialize Apify client if API key is available"""
@@ -184,8 +219,27 @@ class ApifyService:
             logger.error(f"Error searching trending {platform} content for '{keyword}': {e}")
             return self._get_mock_trending_data(keyword, platform)
 
-    def _process_instagram_data(self, items: List[Dict], username: str) -> Dict[str, Any]:
-        """Process raw Instagram data into structured format"""
+    def _process_instagram_data(
+        self,
+        items: List[Dict],
+        username: str,
+        use_balanced_sampling: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Process raw Instagram data into structured format.
+
+        SURVIVOR BIAS FIX:
+        Now applies balanced sampling to collect both top performers AND flops.
+        This ensures the ML model learns from both success and failure patterns.
+
+        Args:
+            items: Raw items from Apify
+            username: Instagram username
+            use_balanced_sampling: If True, apply balanced sampling (default: True)
+
+        Returns:
+            Dict with profile, posts (balanced), and sampling metadata
+        """
         profile_data = None
         posts = []
 
@@ -231,17 +285,50 @@ class ApifyService:
 
             posts.append(post)
 
-        # Sort by engagement
-        posts.sort(key=lambda x: x["engagement_score"], reverse=True)
+        # Get follower count for balanced sampling
+        follower_count = profile_data.get("followers", 1) if profile_data else 1
+
+        # SURVIVOR BIAS FIX: Apply balanced sampling
+        if use_balanced_sampling and self.sampling_strategy != SamplingStrategy.TOP_ONLY:
+            balanced_posts, sampling_meta = self.balanced_scraper.apply_balanced_sampling(
+                posts=posts,
+                follower_count=follower_count,
+                sort_key="engagement_score"
+            )
+            logger.info(
+                f"Instagram balanced sampling for @{username}: "
+                f"{sampling_meta.get('top_posts_count', 0)} top + "
+                f"{sampling_meta.get('bottom_posts_count', 0)} bottom = "
+                f"{sampling_meta.get('final_count', 0)} total"
+            )
+        else:
+            # Legacy behavior (causes Survivor Bias - not recommended)
+            posts.sort(key=lambda x: x["engagement_score"], reverse=True)
+            balanced_posts = posts[:30]
+            sampling_meta = {
+                "strategy": "top_only_legacy",
+                "warning": "SURVIVOR_BIAS: Only top posts collected. Consider using balanced sampling."
+            }
 
         return {
             "profile": profile_data or {"username": username},
-            "posts": posts[:30],  # Top 30
+            "posts": balanced_posts,
+            "sampling_metadata": sampling_meta,
             "scraped_at": datetime.utcnow().isoformat(),
         }
 
-    def _process_tiktok_data(self, items: List[Dict], username: str) -> Dict[str, Any]:
-        """Process raw TikTok data into structured format"""
+    def _process_tiktok_data(
+        self,
+        items: List[Dict],
+        username: str,
+        use_balanced_sampling: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Process raw TikTok data into structured format.
+
+        SURVIVOR BIAS FIX:
+        Now applies balanced sampling to collect both viral videos AND flops.
+        """
         profile_data = None
         videos = []
 
@@ -289,16 +376,49 @@ class ApifyService:
 
             videos.append(video)
 
-        videos.sort(key=lambda x: x["engagement_score"], reverse=True)
+        # Get follower count for balanced sampling
+        follower_count = profile_data.get("followers", 1) if profile_data else 1
+
+        # SURVIVOR BIAS FIX: Apply balanced sampling
+        if use_balanced_sampling and self.sampling_strategy != SamplingStrategy.TOP_ONLY:
+            balanced_videos, sampling_meta = self.balanced_scraper.apply_balanced_sampling(
+                posts=videos,
+                follower_count=follower_count,
+                sort_key="engagement_score"
+            )
+            logger.info(
+                f"TikTok balanced sampling for @{username}: "
+                f"{sampling_meta.get('top_posts_count', 0)} top + "
+                f"{sampling_meta.get('bottom_posts_count', 0)} bottom = "
+                f"{sampling_meta.get('final_count', 0)} total"
+            )
+        else:
+            videos.sort(key=lambda x: x["engagement_score"], reverse=True)
+            balanced_videos = videos[:30]
+            sampling_meta = {
+                "strategy": "top_only_legacy",
+                "warning": "SURVIVOR_BIAS: Only top videos collected."
+            }
 
         return {
             "profile": profile_data or {"username": username},
-            "posts": videos[:30],
+            "posts": balanced_videos,
+            "sampling_metadata": sampling_meta,
             "scraped_at": datetime.utcnow().isoformat(),
         }
 
-    def _process_linkedin_data(self, items: List[Dict], username: str) -> Dict[str, Any]:
-        """Process raw LinkedIn data"""
+    def _process_linkedin_data(
+        self,
+        items: List[Dict],
+        username: str,
+        use_balanced_sampling: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Process raw LinkedIn data.
+
+        SURVIVOR BIAS FIX:
+        Now applies balanced sampling to collect both viral posts AND flops.
+        """
         profile_data = None
         posts = []
 
@@ -328,11 +448,34 @@ class ApifyService:
 
             posts.append(post)
 
-        posts.sort(key=lambda x: x["engagement_score"], reverse=True)
+        # Get follower count for balanced sampling
+        follower_count = profile_data.get("followers", 1) if profile_data else 1
+
+        # SURVIVOR BIAS FIX: Apply balanced sampling
+        if use_balanced_sampling and self.sampling_strategy != SamplingStrategy.TOP_ONLY:
+            balanced_posts, sampling_meta = self.balanced_scraper.apply_balanced_sampling(
+                posts=posts,
+                follower_count=follower_count,
+                sort_key="engagement_score"
+            )
+            logger.info(
+                f"LinkedIn balanced sampling for @{username}: "
+                f"{sampling_meta.get('top_posts_count', 0)} top + "
+                f"{sampling_meta.get('bottom_posts_count', 0)} bottom = "
+                f"{sampling_meta.get('final_count', 0)} total"
+            )
+        else:
+            posts.sort(key=lambda x: x["engagement_score"], reverse=True)
+            balanced_posts = posts[:20]
+            sampling_meta = {
+                "strategy": "top_only_legacy",
+                "warning": "SURVIVOR_BIAS: Only top posts collected."
+            }
 
         return {
             "profile": profile_data or {"username": username},
-            "posts": posts[:20],
+            "posts": balanced_posts,
+            "sampling_metadata": sampling_meta,
             "scraped_at": datetime.utcnow().isoformat(),
         }
 
@@ -582,6 +725,99 @@ class ApifyService:
                 "engagement_score": 75 - (i * 3),
             })
 
+        # === SURVIVOR BIAS FIX: Add FLOP posts (low engagement) ===
+        # These posts demonstrate characteristics that typically cause failure
+        flop_posts = [
+            {
+                "platform_id": "ig_flop_001",
+                "url": f"https://instagram.com/p/flop001",
+                "type": "static_image",
+                "caption": "Nuevo ramo disponible",  # No hook, no CTA, boring
+                "hashtags": ["flores"],  # Too few hashtags
+                "mentions": [],
+                "thumbnail": "https://example.com/flop1.jpg",
+                "video_duration": None,
+                "likes": 45,  # Very low engagement
+                "comments": 2,
+                "video_views": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=50)).isoformat(),
+                "audio_name": None,
+                "engagement_score": 5.2,  # Low score
+                "_is_flop": True,  # Marked as flop for ML
+            },
+            {
+                "platform_id": "ig_flop_002",
+                "url": f"https://instagram.com/p/flop002",
+                "type": "static_image",
+                "caption": "Horario de atencion: Lunes a Viernes 9-18h",  # Purely informational, no value
+                "hashtags": [],  # No hashtags
+                "mentions": [],
+                "thumbnail": "https://example.com/flop2.jpg",
+                "video_duration": None,
+                "likes": 23,
+                "comments": 0,  # Zero comments
+                "video_views": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=55)).isoformat(),
+                "audio_name": None,
+                "engagement_score": 2.8,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "ig_flop_003",
+                "url": f"https://instagram.com/p/flop003",
+                "type": "reel",
+                "caption": "Flores frescas todos los dias en nuestra tienda ubicada en Calle Mayor 123 Barcelona abierto de lunes a sabado",  # No line breaks, no emojis, wall of text
+                "hashtags": ["tienda", "barcelona"],
+                "mentions": [],
+                "thumbnail": "https://example.com/flop3.jpg",
+                "video_duration": 120,  # Too long (2 minutes)
+                "likes": 78,
+                "comments": 3,
+                "video_views": 1500,  # Low views for a reel
+                "posted_at": (datetime.utcnow() - timedelta(days=60)).isoformat(),
+                "audio_name": None,  # No audio on reel
+                "engagement_score": 8.5,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "ig_flop_004",
+                "url": f"https://instagram.com/p/flop004",
+                "type": "carousel",
+                "caption": "Catalogo completo de nuestros productos disponibles para pedidos al por mayor contactanos por telefono",  # Sales pitch, no storytelling
+                "hashtags": ["ventas", "catalogo", "pedidos"],
+                "mentions": [],
+                "thumbnail": "https://example.com/flop4.jpg",
+                "video_duration": None,
+                "likes": 34,
+                "comments": 1,
+                "video_views": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=65)).isoformat(),
+                "audio_name": None,
+                "engagement_score": 4.1,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "ig_flop_005",
+                "url": f"https://instagram.com/p/flop005",
+                "type": "static_image",
+                "caption": "Feliz lunes a todos! Que tengan buen inicio de semana",  # Generic, no value, no originality
+                "hashtags": ["lunes", "buensemana", "felizlunes"],
+                "mentions": [],
+                "thumbnail": "https://example.com/flop5.jpg",
+                "video_duration": None,
+                "likes": 89,
+                "comments": 5,
+                "video_views": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=70)).isoformat(),
+                "audio_name": None,
+                "engagement_score": 9.2,
+                "_is_flop": True,
+            },
+        ]
+
+        posts.extend(flop_posts)
+        # === END SURVIVOR BIAS FIX ===
+
         return posts
 
     def _generate_mock_tiktok_videos(self, username: str) -> List[Dict[str, Any]]:
@@ -646,11 +882,118 @@ class ApifyService:
             },
         ]
 
+        # === SURVIVOR BIAS FIX: Add FLOP TikTok videos ===
+        flop_videos = [
+            {
+                "platform_id": "tt_flop_001",
+                "url": f"https://tiktok.com/@{username}/video/flop001",
+                "type": "tiktok_video",
+                "caption": "Nuevo arreglo floral disponible en tienda",  # Boring, no hook
+                "hashtags": ["flores"],  # Only 1 hashtag
+                "mentions": [],
+                "thumbnail": "https://example.com/tt_flop1.jpg",
+                "video_duration": 180,  # Way too long (3 min)
+                "likes": 45,
+                "comments": 2,
+                "shares": 0,
+                "plays": 2100,  # Very low plays
+                "saves": 1,
+                "posted_at": (datetime.utcnow() - timedelta(days=30)).isoformat(),
+                "audio_name": None,  # No audio
+                "audio_original": True,
+                "engagement_score": 3.2,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "tt_flop_002",
+                "url": f"https://tiktok.com/@{username}/video/flop002",
+                "type": "tiktok_video",
+                "caption": "Siguenos para mas contenido",  # Generic CTA without value
+                "hashtags": ["followme", "foryou"],
+                "mentions": [],
+                "thumbnail": "https://example.com/tt_flop2.jpg",
+                "video_duration": 8,  # Too short, no value
+                "likes": 23,
+                "comments": 0,
+                "shares": 0,
+                "plays": 890,
+                "saves": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=35)).isoformat(),
+                "audio_name": "original sound",
+                "audio_original": True,
+                "engagement_score": 2.1,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "tt_flop_003",
+                "url": f"https://tiktok.com/@{username}/video/flop003",
+                "type": "tiktok_video",
+                "caption": "COMPRA AHORA OFERTA LIMITADA 50% DESCUENTO LINK EN BIO",  # Spammy, all caps
+                "hashtags": ["oferta", "descuento", "promocion", "compra", "tienda"],
+                "mentions": [],
+                "thumbnail": "https://example.com/tt_flop3.jpg",
+                "video_duration": 15,
+                "likes": 12,
+                "comments": 1,
+                "shares": 0,
+                "plays": 450,  # Extremely low
+                "saves": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=40)).isoformat(),
+                "audio_name": None,
+                "audio_original": True,
+                "engagement_score": 1.8,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "tt_flop_004",
+                "url": f"https://tiktok.com/@{username}/video/flop004",
+                "type": "tiktok_video",
+                "caption": "Video de prueba probando la camara nueva",  # No value for audience
+                "hashtags": [],  # No hashtags at all
+                "mentions": [],
+                "thumbnail": "https://example.com/tt_flop4.jpg",
+                "video_duration": 45,
+                "likes": 8,
+                "comments": 0,
+                "shares": 0,
+                "plays": 234,
+                "saves": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=45)).isoformat(),
+                "audio_name": None,
+                "audio_original": True,
+                "engagement_score": 1.2,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "tt_flop_005",
+                "url": f"https://tiktok.com/@{username}/video/flop005",
+                "type": "tiktok_video",
+                "caption": "Gracias por los 100 seguidores!! 🎉",  # Milestone post, no value
+                "hashtags": ["gracias", "100seguidores"],
+                "mentions": [],
+                "thumbnail": "https://example.com/tt_flop5.jpg",
+                "video_duration": 12,
+                "likes": 34,
+                "comments": 5,
+                "shares": 0,
+                "plays": 678,
+                "saves": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=50)).isoformat(),
+                "audio_name": "Celebration - Kool & The Gang",
+                "audio_original": False,
+                "engagement_score": 4.5,
+                "_is_flop": True,
+            },
+        ]
+
+        videos.extend(flop_videos)
+        # === END SURVIVOR BIAS FIX ===
+
         return videos
 
     def _generate_mock_linkedin_posts(self, username: str) -> List[Dict[str, Any]]:
         """Generate realistic LinkedIn posts for demo"""
-        return [
+        posts = [
             {
                 "platform_id": "li_001",
                 "url": f"https://linkedin.com/posts/{username}_001",
@@ -662,4 +1005,84 @@ class ApifyService:
                 "posted_at": (datetime.utcnow() - timedelta(days=10)).isoformat(),
                 "engagement_score": 82.5,
             },
+            {
+                "platform_id": "li_002",
+                "url": f"https://linkedin.com/posts/{username}_002",
+                "type": "linkedin_post",
+                "caption": "Emocionado de compartir que hemos llegado a nuestro tercer año en el negocio! 🎉\n\nGracias a todo el equipo y a nuestros clientes que nos han acompañado en este viaje.\n\nEl crecimiento ha sido increíble:\n- 2023: 500 pedidos\n- 2024: 2,000 pedidos\n- 2025: 5,000+ pedidos\n\n¿Qué consejo le darías a alguien empezando su negocio hoy?\n\n#emprendimiento #milestone #floristeria #crecimiento",
+                "likes": 1850,
+                "comments": 234,
+                "shares": 67,
+                "posted_at": (datetime.utcnow() - timedelta(days=25)).isoformat(),
+                "engagement_score": 78.3,
+            },
         ]
+
+        # === SURVIVOR BIAS FIX: Add FLOP LinkedIn posts ===
+        flop_posts = [
+            {
+                "platform_id": "li_flop_001",
+                "url": f"https://linkedin.com/posts/{username}_flop001",
+                "type": "linkedin_post",
+                "caption": "Estamos contratando! Busca el puesto en nuestra pagina web.",  # Vague, no details
+                "likes": 12,
+                "comments": 0,
+                "shares": 1,
+                "posted_at": (datetime.utcnow() - timedelta(days=40)).isoformat(),
+                "engagement_score": 3.2,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "li_flop_002",
+                "url": f"https://linkedin.com/posts/{username}_flop002",
+                "type": "linkedin_post",
+                "caption": "Feliz viernes a toda mi red! 🙌",  # Generic, no value
+                "likes": 34,
+                "comments": 2,
+                "shares": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=45)).isoformat(),
+                "engagement_score": 5.8,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "li_flop_003",
+                "url": f"https://linkedin.com/posts/{username}_flop003",
+                "type": "linkedin_post",
+                "caption": "Check out our new products at www.floristeria-ejemplo.com #floristeria #flores #tienda #barcelona #compra #productos #nuevos",  # English on Spanish account, too many hashtags
+                "likes": 8,
+                "comments": 0,
+                "shares": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=50)).isoformat(),
+                "engagement_score": 1.4,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "li_flop_004",
+                "url": f"https://linkedin.com/posts/{username}_flop004",
+                "type": "linkedin_post",
+                "caption": "Hoy no tengo nada que compartir pero queria mantener activo el perfil. Que tal su semana?",  # Admits no value
+                "likes": 15,
+                "comments": 1,
+                "shares": 0,
+                "posted_at": (datetime.utcnow() - timedelta(days=55)).isoformat(),
+                "engagement_score": 2.9,
+                "_is_flop": True,
+            },
+            {
+                "platform_id": "li_flop_005",
+                "url": f"https://linkedin.com/posts/{username}_flop005",
+                "type": "linkedin_carousel",
+                "caption": "Catalogo de productos temporada primavera 2026",  # No context, no story, just catalog
+                "likes": 23,
+                "comments": 0,
+                "shares": 2,
+                "posted_at": (datetime.utcnow() - timedelta(days=60)).isoformat(),
+                "engagement_score": 4.5,
+                "_is_flop": True,
+            },
+        ]
+
+        posts.extend(flop_posts)
+        # === END SURVIVOR BIAS FIX ===
+
+        return posts
