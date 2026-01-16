@@ -11,9 +11,11 @@ import {
   CheckCircle,
   Clock,
   AlertCircle,
+  Cpu,
+  Zap,
 } from 'lucide-react'
 import { useBusinessStore } from '../stores/businessStore'
-import { businessApi, competitorsApi, contentApi } from '../services/api'
+import { businessApi, competitorsApi, contentApi, mlApi } from '../services/api'
 import clsx from 'clsx'
 
 export default function Dashboard() {
@@ -26,6 +28,11 @@ export default function Dashboard() {
   const competitors = useBusinessStore((state) => state.competitors)
   const calendars = useBusinessStore((state) => state.calendars)
   const [isLoading, setIsLoading] = useState(true)
+  const [mlStatus, setMlStatus] = useState<{
+    is_trained: boolean
+    model_version: string
+    feature_count: number
+  } | null>(null)
 
   useEffect(() => {
     if (!currentBusiness) {
@@ -36,14 +43,16 @@ export default function Dashboard() {
     const loadData = async () => {
       setIsLoading(true)
       try {
-        const [statusData, competitorsData, calendarsData] = await Promise.all([
+        const [statusData, competitorsData, calendarsData, mlStatusData] = await Promise.all([
           businessApi.getStatus(currentBusiness.id),
           competitorsApi.getCompetitors(currentBusiness.id),
           contentApi.getCalendars(currentBusiness.id),
+          mlApi.getModelStatus().catch(() => null),
         ])
         setStatus(statusData)
         setCompetitors(competitorsData)
         setCalendars(calendarsData)
+        setMlStatus(mlStatusData)
       } catch (error) {
         console.error('Error loading dashboard data:', error)
       } finally {
@@ -122,10 +131,51 @@ export default function Dashboard() {
           icon={TrendingUp}
           label="Engagement Promedio"
           value={calendars.length > 0 ? `${Math.round(calendars[0]?.avg_engagement_score || 0)}%` : '-'}
-          sublabel="score predicho"
+          sublabel="score ML predicho"
           color="orange"
         />
       </div>
+
+      {/* ML Model Status Banner */}
+      {mlStatus && (
+        <div className="card bg-gradient-to-r from-indigo-600/20 to-purple-600/20 border-indigo-500/30">
+          <div className="flex items-start gap-4">
+            <div className="p-2 bg-indigo-500/20 rounded-lg">
+              <Cpu className="w-6 h-6 text-indigo-400" />
+            </div>
+            <div className="flex-1">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-white flex items-center gap-2">
+                  Motor ML Híbrido
+                  <span className={clsx(
+                    'text-xs px-2 py-0.5 rounded-full',
+                    mlStatus.is_trained
+                      ? 'bg-green-500/20 text-green-400'
+                      : 'bg-yellow-500/20 text-yellow-400'
+                  )}>
+                    {mlStatus.is_trained ? 'Activo' : 'Entrenando'}
+                  </span>
+                </h3>
+                <span className="text-xs text-gray-400">v{mlStatus.model_version}</span>
+              </div>
+              <p className="text-gray-300 text-sm mt-1">
+                XGBoost + RandomForest para predicciones de engagement en tiempo real.
+                <span className="text-indigo-400 ml-1">{mlStatus.feature_count} features</span> analizadas por contenido.
+              </p>
+              <div className="flex items-center gap-4 mt-2">
+                <div className="flex items-center gap-1 text-sm text-gray-400">
+                  <Zap className="w-3 h-3 text-yellow-400" />
+                  <span>Predicción instantánea</span>
+                </div>
+                <div className="flex items-center gap-1 text-sm text-gray-400">
+                  <CheckCircle className="w-3 h-3 text-green-400" />
+                  <span>SHAP explicaciones</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Quick Actions */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

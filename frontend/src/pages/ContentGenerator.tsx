@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Sparkles,
@@ -7,9 +7,14 @@ import {
   Layers,
   RefreshCw,
   CheckCircle,
+  Cpu,
+  TrendingUp,
+  AlertTriangle,
+  Info,
+  Zap,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { contentApi } from '../services/api'
+import { contentApi, mlApi, type MLFullPrediction } from '../services/api'
 import { useBusinessStore } from '../stores/businessStore'
 import clsx from 'clsx'
 
@@ -37,6 +42,9 @@ export default function ContentGenerator() {
   const currentBusiness = useBusinessStore((state) => state.currentBusiness)
   const [isGenerating, setIsGenerating] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [mlPrediction, setMlPrediction] = useState<MLFullPrediction | null>(null)
+  const [isLoadingPrediction, setIsLoadingPrediction] = useState(false)
+  const [showMlPreview, setShowMlPreview] = useState(true)
 
   const currentDate = new Date()
   const [formData, setFormData] = useState({
@@ -52,6 +60,32 @@ export default function ContentGenerator() {
   const updateFormData = (updates: Partial<typeof formData>) => {
     setFormData((prev) => ({ ...prev, ...updates }))
   }
+
+  // Fetch ML prediction preview when settings change
+  useEffect(() => {
+    if (!currentBusiness || !showMlPreview) return
+
+    const fetchMlPrediction = async () => {
+      setIsLoadingPrediction(true)
+      try {
+        const prediction = await mlApi.getFullPrediction({
+          caption: '', // Empty for pre-generation preview
+          content_format: formData.content_mix.reels > 50 ? 'reel' : 'carousel',
+          business_type: currentBusiness.business_type,
+          video_duration_seconds: 30,
+        })
+        setMlPrediction(prediction)
+      } catch (error) {
+        console.error('ML prediction error:', error)
+      } finally {
+        setIsLoadingPrediction(false)
+      }
+    }
+
+    // Debounce the API call
+    const timeoutId = setTimeout(fetchMlPrediction, 500)
+    return () => clearTimeout(timeoutId)
+  }, [currentBusiness, formData.content_mix, showMlPreview])
 
   const handleGenerate = async () => {
     if (!currentBusiness) return
@@ -313,17 +347,156 @@ export default function ContentGenerator() {
         </label>
       </div>
 
+      {/* ML Prediction Preview */}
+      {showMlPreview && (
+        <div className="card bg-gradient-to-br from-indigo-900/30 to-purple-900/20 border border-indigo-500/30">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Cpu className="w-5 h-5 text-indigo-400" />
+              <h3 className="font-semibold text-white">Predicción ML (Pre-generación)</h3>
+            </div>
+            <button
+              onClick={() => setShowMlPreview(false)}
+              className="text-xs text-gray-400 hover:text-white"
+            >
+              Ocultar
+            </button>
+          </div>
+
+          {isLoadingPrediction ? (
+            <div className="flex items-center justify-center py-6">
+              <RefreshCw className="w-6 h-6 text-indigo-400 animate-spin" />
+              <span className="ml-2 text-gray-400">Calculando predicción...</span>
+            </div>
+          ) : mlPrediction ? (
+            <div className="space-y-4">
+              {/* Engagement Score */}
+              <div className="flex items-center justify-between p-3 bg-gray-800/50 rounded-lg">
+                <div className="flex items-center gap-3">
+                  <div className={clsx(
+                    'w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold',
+                    mlPrediction.engagement_prediction.score >= 70 && 'bg-green-500/20 text-green-400',
+                    mlPrediction.engagement_prediction.score >= 50 && mlPrediction.engagement_prediction.score < 70 && 'bg-yellow-500/20 text-yellow-400',
+                    mlPrediction.engagement_prediction.score < 50 && 'bg-red-500/20 text-red-400'
+                  )}>
+                    {Math.round(mlPrediction.engagement_prediction.score)}
+                  </div>
+                  <div>
+                    <p className="text-white font-medium">Score Predicho</p>
+                    <p className="text-sm text-gray-400">
+                      Confianza: {Math.round(mlPrediction.engagement_prediction.confidence)}%
+                    </p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className={clsx(
+                    'text-sm font-medium',
+                    mlPrediction.engagement_prediction.score >= 70 && 'text-green-400',
+                    mlPrediction.engagement_prediction.score >= 50 && mlPrediction.engagement_prediction.score < 70 && 'text-yellow-400',
+                    mlPrediction.engagement_prediction.score < 50 && 'text-red-400'
+                  )}>
+                    {mlPrediction.engagement_prediction.score >= 70 ? 'Excelente' :
+                     mlPrediction.engagement_prediction.score >= 50 ? 'Bueno' : 'Mejorable'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Format Recommendation */}
+              <div className="p-3 bg-gray-800/50 rounded-lg">
+                <div className="flex items-center gap-2 mb-2">
+                  <TrendingUp className="w-4 h-4 text-purple-400" />
+                  <p className="text-sm font-medium text-white">Formato Recomendado</p>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-purple-400 font-medium capitalize">
+                    {mlPrediction.format_recommendation.recommended_format}
+                  </span>
+                  <span className="text-xs text-gray-400">
+                    {Math.round(mlPrediction.format_recommendation.confidence)}% confianza
+                  </span>
+                </div>
+              </div>
+
+              {/* Trigger Suggestions */}
+              {mlPrediction.trigger_suggestions.suggestions.length > 0 && (
+                <div className="p-3 bg-gray-800/50 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Zap className="w-4 h-4 text-yellow-400" />
+                    <p className="text-sm font-medium text-white">Triggers Recomendados</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {mlPrediction.trigger_suggestions.suggestions.slice(0, 3).map((trigger, i) => (
+                      <span
+                        key={i}
+                        className={clsx(
+                          'text-xs px-2 py-1 rounded-full',
+                          trigger.impact === 'high' && 'bg-green-500/20 text-green-400',
+                          trigger.impact === 'medium' && 'bg-yellow-500/20 text-yellow-400',
+                          trigger.impact === 'low' && 'bg-gray-500/20 text-gray-400'
+                        )}
+                      >
+                        {trigger.trigger_type}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Optimization Suggestions */}
+              {mlPrediction.optimization_suggestions.length > 0 && (
+                <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <AlertTriangle className="w-4 h-4 text-yellow-400" />
+                    <p className="text-sm font-medium text-yellow-400">Sugerencias de Optimización</p>
+                  </div>
+                  <ul className="space-y-1">
+                    {mlPrediction.optimization_suggestions.slice(0, 3).map((suggestion, i) => (
+                      <li key={i} className="text-xs text-gray-300 flex items-start gap-2">
+                        <span className="text-yellow-400">•</span>
+                        {suggestion}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* SHAP Explanation */}
+              {mlPrediction.engagement_prediction.explanation?.explanation_text && (
+                <div className="p-3 bg-gray-800/50 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Info className="w-4 h-4 text-blue-400" />
+                    <p className="text-sm font-medium text-white">Explicación ML (SHAP)</p>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    {mlPrediction.engagement_prediction.explanation.explanation_text}
+                  </p>
+                </div>
+              )}
+
+              {/* Summary */}
+              <p className="text-xs text-gray-500 text-center">
+                {mlPrediction.ml_summary}
+              </p>
+            </div>
+          ) : (
+            <p className="text-gray-400 text-center py-4">
+              No se pudo obtener predicción ML
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Generate Button */}
       <button
         onClick={handleGenerate}
         className="btn-primary w-full py-4 text-lg flex items-center justify-center gap-2"
       >
         <Sparkles className="w-5 h-5" />
-        Generar Calendario
+        Generar Calendario (Híbrido ML + LLM)
       </button>
 
       <p className="text-center text-sm text-gray-500">
-        La generación puede tardar 1-2 minutos mientras analizamos y creamos contenido optimizado
+        El modelo ML predice engagement primero, luego el LLM genera contenido optimizado con sus recomendaciones
       </p>
     </div>
   )

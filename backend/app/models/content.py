@@ -58,10 +58,11 @@ class GeneratedContent(Base):
     # AI Image generation prompt
     image_prompt = Column(Text, nullable=True)  # For DALL-E / Stability.ai
 
-    # Engagement prediction
-    engagement_score = Column(Float, default=0.0)  # 0-100 predicted score
+    # Engagement prediction (Hybrid ML/LLM)
+    engagement_score = Column(Float, default=0.0)  # 0-100 predicted score (from ML model)
     engagement_explanation = Column(Text, nullable=True)  # "Este Reel tiene 87% porque..."
     similar_viral_posts = Column(JSON, default=[])  # References to competitor posts
+    ml_prediction_data = Column(JSON, default={})  # Full ML prediction with SHAP explanation
 
     # Patterns used
     patterns_used = Column(JSON, default=[])  # IDs of ExtractedPattern used

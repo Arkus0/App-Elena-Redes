@@ -85,18 +85,21 @@ class AIService:
         platform: str,
         content_format: str,
         goal: str,
-        similar_top_posts: List[Dict[str, Any]] = None
+        similar_top_posts: List[Dict[str, Any]] = None,
+        ml_recommendations: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
         Generate a single high-engagement content piece
         Based on proven patterns and top-performing competitor posts
+        Now enhanced with ML recommendations from the hybrid architecture
         """
         if not self.is_available():
             return self._get_mock_generated_content(business_info, platform, content_format, goal)
 
         system_prompt = self._get_content_generation_system_prompt(platform)
         user_prompt = self._build_content_generation_prompt(
-            business_info, patterns, platform, content_format, goal, similar_top_posts
+            business_info, patterns, platform, content_format, goal, similar_top_posts,
+            ml_recommendations
         )
 
         try:
@@ -404,8 +407,23 @@ Extrae patrones y responde en JSON:
         platform: str,
         content_format: str,
         goal: str,
-        similar_posts: List[Dict[str, Any]] = None
+        similar_posts: List[Dict[str, Any]] = None,
+        ml_recommendations: Dict[str, Any] = None
     ) -> str:
+        # Build ML recommendations section if available
+        ml_section = ""
+        if ml_recommendations:
+            ml_section = f"""
+ML RECOMMENDATIONS (MUST INCORPORATE):
+- Recommended format: {ml_recommendations.get('recommended_format', content_format)}
+- Include these engagement triggers: {', '.join(ml_recommendations.get('trigger_suggestions', []))}
+- Optimization tips from ML analysis:
+{chr(10).join(f'  • {tip}' for tip in ml_recommendations.get('optimization_tips', [])[:3])}
+
+IMPORTANT: The ML model has analyzed thousands of high-engagement posts.
+Incorporate these recommendations to maximize engagement score.
+"""
+
         return f"""Genera contenido de ALTO ENGAGEMENT para:
 
 NEGOCIO:
@@ -424,6 +442,8 @@ PATRONES PROBADOS A USAR:
 
 {f"POSTS SIMILARES EXITOSOS DE REFERENCIA:" if similar_posts else ""}
 {json.dumps(similar_posts[:3], ensure_ascii=False, indent=2) if similar_posts else ""}
+
+{ml_section}
 
 Genera contenido en JSON:
 {{

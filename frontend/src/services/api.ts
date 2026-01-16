@@ -260,6 +260,128 @@ export const contentApi = {
   },
 }
 
+// ============ ML PREDICTIONS ============
+
+export interface MLPredictionRequest {
+  caption?: string
+  hashtags?: string[]
+  content_format?: string
+  business_type?: string
+  video_duration_seconds?: number
+  audio_name?: string
+}
+
+export interface FeatureImpact {
+  feature: string
+  impact: number
+}
+
+export interface MLEngagementPrediction {
+  score: number
+  confidence: number
+  explanation: {
+    top_positive_factors: FeatureImpact[]
+    top_negative_factors: FeatureImpact[]
+    explanation_text: string
+  }
+  feature_importance: FeatureImpact[]
+}
+
+export interface MLFormatRecommendation {
+  recommended_format: string
+  confidence: number
+  alternatives: { format: string; score: number }[]
+  explanation: Record<string, any>
+}
+
+export interface MLTriggerSuggestion {
+  trigger_type: string
+  impact: string
+  examples: string[]
+  reason: string
+}
+
+export interface MLTriggerSuggestions {
+  current_triggers: Record<string, number>
+  suggestions: MLTriggerSuggestion[]
+  improvement_potential: number
+}
+
+export interface MLFullPrediction {
+  engagement_prediction: MLEngagementPrediction
+  format_recommendation: MLFormatRecommendation
+  trigger_suggestions: MLTriggerSuggestions
+  optimization_suggestions: string[]
+  ml_summary: string
+}
+
+export const mlApi = {
+  getModelStatus: async () => {
+    const { data } = await api.get<{
+      is_trained: boolean
+      model_version: string
+      feature_count: number
+    }>('/ml/status')
+    return data
+  },
+
+  trainModel: async (useSyntheticData = true, sampleCount = 500) => {
+    const { data } = await api.post<{
+      success: boolean
+      message: string
+      metrics: Record<string, any>
+    }>('/ml/train', {
+      use_synthetic_data: useSyntheticData,
+      sample_count: sampleCount,
+    })
+    return data
+  },
+
+  getFullPrediction: async (content: MLPredictionRequest) => {
+    const { data } = await api.post<MLFullPrediction>('/ml/predict', content)
+    return data
+  },
+
+  predictEngagement: async (content: MLPredictionRequest) => {
+    const { data } = await api.post<MLEngagementPrediction>(
+      '/ml/predict/engagement',
+      content
+    )
+    return data
+  },
+
+  recommendFormat: async (content: MLPredictionRequest) => {
+    const { data } = await api.post<MLFormatRecommendation>(
+      '/ml/predict/format',
+      content
+    )
+    return data
+  },
+
+  suggestTriggers: async (content: MLPredictionRequest) => {
+    const { data } = await api.post<MLTriggerSuggestions>(
+      '/ml/predict/triggers',
+      content
+    )
+    return data
+  },
+
+  analyzeDraft: async (content: Record<string, any>) => {
+    const { data } = await api.post<
+      MLFullPrediction & {
+        improvement_roadmap: {
+          priority: string
+          area: string
+          action: string
+          potential_gain: string
+        }[]
+        ready_to_publish: boolean
+      }
+    >('/ml/analyze-draft', content)
+    return data
+  },
+}
+
 // ============ VIRAL SCANNER ============
 
 export const viralApi = {

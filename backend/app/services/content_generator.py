@@ -1,6 +1,7 @@
 """
 Content Generator Service
 The magic engine that creates high-engagement content
+Now with Hybrid ML/LLM architecture for cost-efficient predictions
 """
 import logging
 import random
@@ -16,6 +17,7 @@ from app.models.pattern import ExtractedPattern, PatternType
 from app.models.content import GeneratedContent, ContentCalendar, ContentGoal, ContentStatus
 from app.services.ai_service import AIService
 from app.services.apify_service import ApifyService
+from app.services.ml_service import get_ml_predictor, train_initial_model
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,12 @@ class ContentGenerator:
     def __init__(self):
         self.ai_service = AIService()
         self.apify_service = ApifyService()
+        self.ml_predictor = get_ml_predictor()
+
+        # Ensure ML model is trained
+        if not self.ml_predictor.is_trained:
+            logger.info("ML model not trained, initializing with synthetic data...")
+            train_initial_model()
 
     async def generate_calendar(
         self,
@@ -122,14 +130,34 @@ class ContentGenerator:
                 if self._match_format(p, content_format)
             ][:3]
 
-            # Generate content with AI
+            # === HYBRID ML/LLM APPROACH ===
+            # Step 1: Get ML predictions FIRST (fast, cost-efficient)
+            ml_input = {
+                "caption": "",  # Empty for pre-generation prediction
+                "content_format": content_format,
+                "business_type": business.business_type.value,
+                "hashtags": [],
+            }
+            ml_prediction = self.ml_predictor.get_full_prediction(ml_input)
+
+            # Step 2: Inject ML recommendations into LLM prompt
+            ml_recommendations = {
+                "recommended_format": ml_prediction.get("format_recommendation", {}).get("recommended_format", content_format),
+                "trigger_suggestions": [
+                    s.get("trigger_type") for s in ml_prediction.get("trigger_suggestions", {}).get("suggestions", [])
+                ],
+                "optimization_tips": ml_prediction.get("optimization_suggestions", []),
+            }
+
+            # Step 3: Generate content with AI (LLM) using ML recommendations
             content_data = await self.ai_service.generate_content_piece(
                 business_info=business_info,
                 patterns=patterns_data,
                 platform=platform,
                 content_format=content_format,
                 goal=goal,
-                similar_top_posts=relevant_posts
+                similar_top_posts=relevant_posts,
+                ml_recommendations=ml_recommendations  # Inject ML insights
             )
 
             # Create content record
@@ -158,15 +186,30 @@ class ContentGenerator:
                 optimal_posting_time=self._get_optimal_time(patterns_data, platform),
             )
 
-            # Predict engagement
-            prediction = await self.ai_service.predict_engagement(
-                content_data,
-                patterns_data,
-                {"avg_likes": 2000, "avg_comments": 100}  # Benchmark
+            # === HYBRID ENGAGEMENT PREDICTION ===
+            # Step 4: Use ML for fast engagement scoring (not LLM!)
+            final_ml_prediction = self.ml_predictor.predict_engagement({
+                "caption": content_data.get("caption", ""),
+                "hashtags": content_data.get("hashtags", []),
+                "content_format": content_format,
+                "business_type": business.business_type.value,
+                "video_duration_seconds": 30 if content_format in ["reel", "tiktok_video"] else 0,
+            })
+
+            content_piece.engagement_score = final_ml_prediction.get("score", 0)
+            content_piece.engagement_explanation = final_ml_prediction.get("explanation", {}).get(
+                "explanation_text",
+                "Predicción ML basada en patrones de contenido exitoso"
             )
 
-            content_piece.engagement_score = prediction.get("score", 0)
-            content_piece.engagement_explanation = prediction.get("explanation", "")
+            # Store ML metadata for dashboard display
+            content_piece.ml_prediction_data = {
+                "score": final_ml_prediction.get("score"),
+                "confidence": final_ml_prediction.get("confidence"),
+                "top_factors": final_ml_prediction.get("explanation", {}).get("top_positive_factors", []),
+                "format_recommendation": ml_prediction.get("format_recommendation", {}),
+                "triggers_used": ml_recommendations.get("trigger_suggestions", []),
+            }
             content_piece.similar_viral_posts = [
                 {"id": p.get("id"), "engagement": p.get("engagement_score")}
                 for p in relevant_posts

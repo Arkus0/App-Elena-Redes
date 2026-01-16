@@ -23,6 +23,18 @@ from app.schemas.content import (
     ViralScanRequest,
     ViralOpportunity,
 )
+from app.schemas.ml import (
+    MLPredictionRequest,
+    MLFullPrediction,
+    EngagementPredictionML,
+    FormatRecommendation,
+    TriggerSuggestions,
+    HybridContentRequest,
+    HybridContentResponse,
+    ModelTrainingRequest,
+    ModelTrainingResponse,
+    ModelStatusResponse,
+)
 
 __all__ = [
     "UserCreate",
@@ -44,4 +56,14 @@ __all__ = [
     "EngagementPrediction",
     "ViralScanRequest",
     "ViralOpportunity",
+    "MLPredictionRequest",
+    "MLFullPrediction",
+    "EngagementPredictionML",
+    "FormatRecommendation",
+    "TriggerSuggestions",
+    "HybridContentRequest",
+    "HybridContentResponse",
+    "ModelTrainingRequest",
+    "ModelTrainingResponse",
+    "ModelStatusResponse",
 ]

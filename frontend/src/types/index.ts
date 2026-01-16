@@ -158,6 +158,18 @@ export interface FilmingGuide {
   editing_tips: string[]
 }
 
+// ML Prediction Data
+export interface MLPredictionData {
+  score: number
+  confidence: number
+  top_factors: { feature: string; impact: number }[]
+  format_recommendation: {
+    recommended_format: string
+    confidence: number
+  }
+  triggers_used: string[]
+}
+
 // Generated Content
 export interface ContentPiece {
   id: number
@@ -185,6 +197,7 @@ export interface ContentPiece {
   optimal_posting_time: string | null
   variation_label: string | null
   has_variations: boolean
+  ml_prediction_data?: MLPredictionData  // Hybrid ML/LLM prediction data
 }
 
 // Content Calendar
