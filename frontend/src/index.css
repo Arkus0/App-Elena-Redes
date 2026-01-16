@@ -1,0 +1,103 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-900 text-gray-100 antialiased;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-brand-600 hover:bg-brand-700 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200;
+  }
+
+  .btn-outline {
+    @apply border border-gray-600 hover:border-brand-500 hover:text-brand-400 text-gray-300 font-medium py-2 px-4 rounded-lg transition-colors duration-200;
+  }
+
+  .input-field {
+    @apply w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-all duration-200;
+  }
+
+  .card {
+    @apply bg-gray-800 rounded-xl border border-gray-700 p-6;
+  }
+
+  .card-hover {
+    @apply card hover:border-brand-500/50 hover:shadow-lg hover:shadow-brand-500/10 transition-all duration-300;
+  }
+
+  .engagement-score {
+    @apply inline-flex items-center justify-center w-12 h-12 rounded-full font-bold text-lg;
+  }
+
+  .engagement-score-high {
+    @apply engagement-score bg-green-500/20 text-green-400 ring-2 ring-green-500/30;
+  }
+
+  .engagement-score-medium {
+    @apply engagement-score bg-yellow-500/20 text-yellow-400 ring-2 ring-yellow-500/30;
+  }
+
+  .engagement-score-low {
+    @apply engagement-score bg-red-500/20 text-red-400 ring-2 ring-red-500/30;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-instagram {
+    @apply badge bg-gradient-to-r from-purple-500 to-pink-500 text-white;
+  }
+
+  .badge-tiktok {
+    @apply badge bg-black text-white border border-gray-700;
+  }
+
+  .badge-linkedin {
+    @apply badge bg-blue-600 text-white;
+  }
+
+  .gradient-text {
+    @apply bg-gradient-to-r from-brand-400 to-purple-400 bg-clip-text text-transparent;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-800;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-600 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-500;
+}
+
+/* Animation for loading states */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton {
+  @apply bg-gradient-to-r from-gray-800 via-gray-700 to-gray-800 bg-[length:200%_100%] animate-[shimmer_1.5s_infinite];
+}
