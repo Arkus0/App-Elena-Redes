@@ -13,6 +13,11 @@ Key Optimizations:
 - float32 precision to reduce memory footprint
 - Audio limited to first 30 seconds at 22050Hz
 
+Extended with Text Intelligence:
+- Whisper transcription (speech-to-text)
+- EasyOCR (text overlay detection)
+- Semantic embeddings with PCA reduction
+
 Author: ML Engineering Team
 """
 
@@ -32,6 +37,25 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 logger = logging.getLogger(__name__)
+
+# Lazy import for text intelligence (optional dependency)
+_text_intelligence_available = None
+
+
+def _check_text_intelligence() -> bool:
+    """Check if text intelligence module is available."""
+    global _text_intelligence_available
+    if _text_intelligence_available is None:
+        try:
+            from app.services.text_intelligence import TextIntelligenceEngine
+            _text_intelligence_available = True
+        except ImportError:
+            _text_intelligence_available = False
+            logger.warning(
+                "Text intelligence module not available. "
+                "Install dependencies: pip install faster-whisper easyocr sentence-transformers"
+            )
+    return _text_intelligence_available
 
 
 # =============================================================================
@@ -447,26 +471,42 @@ class AnalyticsEngine:
     Combines video and audio extractors with memory-safe orchestration.
     Designed for edge computing environments with limited resources.
 
+    Now includes Text Intelligence for semantic understanding:
+    - Whisper transcription (spoken words)
+    - EasyOCR (text overlays)
+    - Semantic embeddings with PCA reduction
+
     Example:
-        engine = AnalyticsEngine()
-        features = engine.extract_all_features("video.mp4")
+        engine = AnalyticsEngine(enable_text_intelligence=True)
+        features = engine.extract_complete_features("video.mp4", caption="Amazing!")
         print(json.dumps(features, indent=2))
     """
 
     def __init__(
         self,
         video_config: Optional[VideoConfig] = None,
-        audio_config: Optional[AudioConfig] = None
+        audio_config: Optional[AudioConfig] = None,
+        enable_text_intelligence: bool = False,
+        text_config: Optional[Any] = None
     ):
         self.video_extractor = EfficientFeatureExtractor(video_config)
         self.audio_extractor = EfficientAudioExtractor(audio_config)
+        self._text_engine = None
+        self._text_intelligence_enabled = enable_text_intelligence
+
+        # Initialize text intelligence if requested
+        if enable_text_intelligence and _check_text_intelligence():
+            from app.services.text_intelligence import TextIntelligenceEngine, TextConfig
+            config = text_config if text_config else TextConfig()
+            self._text_engine = TextIntelligenceEngine(config)
 
         logger.info(
             f"AnalyticsEngine initialized - "
             f"Video: {self.video_extractor.config.target_resolution}, "
             f"Stride: {self.video_extractor.config.frame_stride_seconds}s | "
             f"Audio: {self.audio_extractor.config.sample_rate}Hz, "
-            f"Duration: {self.audio_extractor.config.duration_seconds}s"
+            f"Duration: {self.audio_extractor.config.duration_seconds}s | "
+            f"TextIntelligence: {'enabled' if self._text_engine else 'disabled'}"
         )
 
     def extract_video_features(self, video_path: str) -> Dict[str, float]:
@@ -477,6 +517,34 @@ class AnalyticsEngine:
         """Extract only audio features."""
         return self.audio_extractor.extract_audio_features(audio_path)
 
+    def extract_text_features(
+        self,
+        video_path: str,
+        caption: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Extract text intelligence features (transcription, OCR, semantic PCA).
+
+        Args:
+            video_path: Path to video file
+            caption: User-provided caption
+
+        Returns:
+            Dict with transcription, OCR, and sem_pca_1 to sem_pca_10
+        """
+        if self._text_engine is None:
+            return {
+                "text_status": "text_intelligence_not_enabled",
+                "transcription": "",
+                "ocr_text": "",
+                "text_density": 0.0
+            }
+
+        return self._text_engine.extract_all_features(
+            video_path=video_path,
+            caption=caption
+        )
+
     def extract_all_features(
         self,
         media_path: str,
@@ -484,7 +552,7 @@ class AnalyticsEngine:
         include_audio: bool = True
     ) -> Dict[str, Any]:
         """
-        Extract all DNA features from a media file.
+        Extract all DNA features from a media file (video + audio only).
 
         Args:
             media_path: Path to video/audio file
@@ -529,6 +597,156 @@ class AnalyticsEngine:
             gc.collect()
 
         return result
+
+    def extract_complete_features(
+        self,
+        media_path: str,
+        caption: str = "",
+        include_video: bool = True,
+        include_audio: bool = True,
+        include_text: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Extract ALL features: Video DNA + Audio DNA + Text Intelligence.
+
+        This is the comprehensive extraction method that combines:
+        - Visual features (energy, brightness, cuts)
+        - Audio features (tempo, onset strength)
+        - Text features (transcription, OCR, semantic PCA)
+
+        Args:
+            media_path: Path to video/audio file
+            caption: User-provided caption for semantic analysis
+            include_video: Whether to extract video features
+            include_audio: Whether to extract audio features
+            include_text: Whether to extract text intelligence features
+
+        Returns:
+            Flat JSON-serializable dict with all features including sem_pca_1 to sem_pca_10
+
+        Example output:
+            {
+                "source": "video.mp4",
+                "status": "success",
+                # Video DNA
+                "visual_energy": 0.045,
+                "brightness_variance": 0.12,
+                "cut_density": 8.5,
+                "duration_seconds": 15.2,
+                # Audio DNA
+                "tempo": 128.0,
+                "onset_strength": 0.85,
+                # Text Intelligence
+                "transcription": "Hey guys check this out...",
+                "transcription_word_count": 25,
+                "ocr_text": "FOLLOW FOR MORE",
+                "text_density": 5.2,
+                # Semantic PCA (for XGBoost)
+                "sem_pca_1": 0.234,
+                "sem_pca_2": -0.156,
+                ...
+                "sem_pca_10": 0.089
+            }
+        """
+        result: Dict[str, Any] = {
+            "source": str(Path(media_path).name),
+            "status": "success",
+            "caption_provided": bool(caption)
+        }
+
+        try:
+            # Video DNA features
+            if include_video:
+                video_features = self.video_extractor.extract_video_features(media_path)
+                result.update({
+                    "visual_energy": video_features.get("visual_energy", 0.0),
+                    "brightness_variance": video_features.get("brightness_variance", 0.0),
+                    "cut_density": video_features.get("cut_density", 0.0),
+                    "duration_seconds": video_features.get("duration_seconds", 0.0),
+                    "frames_analyzed": video_features.get("frames_analyzed", 0)
+                })
+
+            # Audio DNA features
+            if include_audio:
+                audio_features = self.audio_extractor.extract_audio_features(media_path)
+                result.update({
+                    "tempo": audio_features.get("tempo", 0.0),
+                    "onset_strength": audio_features.get("onset_strength", 0.0),
+                    "audio_status": audio_features.get("audio_status", "unknown")
+                })
+
+            # Text Intelligence features
+            if include_text and self._text_engine is not None:
+                text_features = self._text_engine.extract_all_features(
+                    video_path=media_path,
+                    caption=caption
+                )
+
+                # Add transcription features
+                result.update({
+                    "transcription": text_features.get("transcription", ""),
+                    "transcription_language": text_features.get("transcription_language", ""),
+                    "transcription_confidence": text_features.get("transcription_confidence", 0.0),
+                    "transcription_word_count": text_features.get("transcription_word_count", 0),
+                    "transcription_status": text_features.get("transcription_status", "unknown")
+                })
+
+                # Add OCR features
+                result.update({
+                    "ocr_text": text_features.get("ocr_text", ""),
+                    "text_density": text_features.get("text_density", 0.0),
+                    "max_text_density": text_features.get("max_text_density", 0.0),
+                    "ocr_text_boxes": text_features.get("ocr_text_boxes", 0),
+                    "ocr_status": text_features.get("ocr_status", "unknown")
+                })
+
+                # Add semantic PCA components (sem_pca_1 to sem_pca_10)
+                for i in range(1, 11):
+                    key = f"sem_pca_{i}"
+                    result[key] = text_features.get(key, 0.0)
+
+                result["semantic_text_sources"] = text_features.get("semantic_text_sources", 0)
+                result["semantic_status"] = text_features.get("semantic_status", "unknown")
+                result["text_status"] = text_features.get("text_status", "success")
+
+            elif include_text:
+                # Text intelligence requested but not available
+                result["text_status"] = "text_intelligence_not_enabled"
+
+        except Exception as e:
+            logger.error(f"Complete feature extraction failed: {e}")
+            result["status"] = "error"
+            result["error"] = str(e)
+
+        finally:
+            gc.collect()
+
+        return result
+
+    def fit_semantic_pca(
+        self,
+        corpus: List[Dict[str, str]],
+        save_path: Optional[str] = None
+    ) -> "AnalyticsEngine":
+        """
+        Fit the PCA model on a corpus of texts.
+
+        Must be called before extracting semantic features if no pre-fitted
+        PCA model is provided.
+
+        Args:
+            corpus: List of dicts with 'caption', 'transcription', 'ocr_text' keys
+            save_path: Optional path to save the fitted PCA model
+
+        Returns:
+            self for chaining
+        """
+        if self._text_engine is None:
+            logger.warning("Text intelligence not enabled. Cannot fit PCA.")
+            return self
+
+        self._text_engine.fit_pca_from_corpus(corpus, save_path)
+        return self
 
     def extract_batch(
         self,
@@ -620,15 +838,23 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     if len(sys.argv) < 2:
-        print("Usage: python analytics_engine.py <video_path>")
-        print("\nExample:")
+        print("Usage: python analytics_engine.py <video_path> [--text] [caption]")
+        print("\nExamples:")
         print("  python analytics_engine.py video.mp4")
+        print("  python analytics_engine.py video.mp4 --text")
+        print("  python analytics_engine.py video.mp4 --text 'Check this viral content!'")
         sys.exit(1)
 
     video_path = sys.argv[1]
+    enable_text = "--text" in sys.argv
+    caption = ""
+
+    # Parse caption (last argument if not a flag)
+    if len(sys.argv) > 2 and not sys.argv[-1].startswith("--"):
+        caption = sys.argv[-1]
 
     print(f"\n{'='*60}")
-    print("Analytics Engine - DNA Feature Extraction")
+    print("Analytics Engine - Complete Feature Extraction")
     print(f"{'='*60}\n")
 
     # Memory estimation
@@ -638,12 +864,29 @@ if __name__ == "__main__":
         print(f"    {key}: {value}")
 
     # Feature extraction
-    print(f"\n[2] Extracting Features...")
-    engine = AnalyticsEngine()
-    features = engine.extract_all_features(video_path)
+    print(f"\n[2] Initializing Engine (Text Intelligence: {enable_text})...")
+    engine = AnalyticsEngine(enable_text_intelligence=enable_text)
 
-    print("\n[3] DNA Features (JSON Output):")
+    if enable_text:
+        print(f"\n[3] Extracting Complete Features (Video + Audio + Text)...")
+        if caption:
+            print(f"    Caption: {caption[:50]}...")
+        features = engine.extract_complete_features(video_path, caption=caption)
+    else:
+        print(f"\n[3] Extracting DNA Features (Video + Audio)...")
+        features = engine.extract_all_features(video_path)
+
+    print("\n[4] Extracted Features (JSON Output):")
     print(engine.to_json(features, pretty=True))
+
+    # Show PCA summary if available
+    pca_features = {k: v for k, v in features.items() if k.startswith("sem_pca_")}
+    if pca_features:
+        print("\n[5] Semantic PCA Components:")
+        for name, value in pca_features.items():
+            bar = "=" * int(abs(value) * 50) if isinstance(value, (int, float)) else ""
+            sign = "+" if isinstance(value, (int, float)) and value >= 0 else "-"
+            print(f"    {name}: {value:+.4f} [{sign}{bar}]")
 
     print(f"\n{'='*60}")
     print("Processing Complete")
