@@ -1,14 +1,27 @@
 """
 ML Service - Hybrid ML/LLM Architecture for Cost-Efficient Predictions
 Uses XGBoost/RandomForest for fast predictions, LLM only for creative generation
+
+FEEDBACK LOOP ARCHITECTURE (Human-in-the-Loop Reinforcement Learning):
+======================================================================
+The model learns from real-world performance by:
+1. Storing predictions before publication
+2. Collecting actual performance metrics after 24-48 hours
+3. Calculating delta between predicted and actual engagement
+4. Flagging high-delta samples (>20% difference) as high priority
+5. Incorporating these samples in the next training cycle
+
+This allows the model to learn from its mistakes and continuously improve.
 """
 import os
 import re
 import logging
 import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
+from enum import Enum
 import json
 
 import numpy as np
@@ -24,6 +37,74 @@ import joblib
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# FEEDBACK LOOP DATA STRUCTURES
+# =============================================================================
+
+# Threshold for flagging samples as high priority training data
+# If actual differs from predicted by more than this percentage, it's flagged
+HIGH_PRIORITY_DELTA_THRESHOLD = 20.0  # 20% difference
+
+# Minimum hours after posting to collect performance data
+MIN_HOURS_FOR_FEEDBACK = 24
+
+# Maximum hours after posting (older data may not be relevant)
+MAX_HOURS_FOR_FEEDBACK = 168  # 7 days
+
+
+@dataclass
+class PerformanceFeedback:
+    """
+    Feedback data structure for ML training loop.
+
+    Captures the delta between predicted and actual performance,
+    along with metadata about why this sample is valuable for training.
+    """
+    content_id: int
+    predicted_score: float
+    actual_score: float
+    delta_percent: float
+    is_high_priority: bool
+    training_priority: float
+    metrics: Dict[str, Any]
+    collected_at: datetime
+    analysis_notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "content_id": self.content_id,
+            "predicted_score": round(self.predicted_score, 2),
+            "actual_score": round(self.actual_score, 2),
+            "delta_percent": round(self.delta_percent, 2),
+            "is_high_priority": self.is_high_priority,
+            "training_priority": round(self.training_priority, 4),
+            "metrics": self.metrics,
+            "collected_at": self.collected_at.isoformat(),
+            "analysis_notes": self.analysis_notes,
+        }
+
+
+@dataclass
+class TrainingQueueItem:
+    """
+    Item in the training queue for the next retraining cycle.
+    """
+    content_id: int
+    features: Dict[str, Any]
+    actual_engagement: float
+    priority: float
+    added_at: datetime
+    feedback: PerformanceFeedback
+
+    def to_training_sample(self) -> Dict[str, Any]:
+        """Convert to format suitable for model training."""
+        sample = self.features.copy()
+        sample["engagement_score"] = self.actual_engagement
+        sample["_priority"] = self.priority
+        sample["_source"] = "feedback_loop"
+        return sample
 
 # Model storage directory
 MODEL_DIR = Path("./ml_models")
@@ -738,6 +819,383 @@ class MLPredictor:
 
         return summary
 
+    # =========================================================================
+    # FEEDBACK LOOP - Human-in-the-Loop Reinforcement Learning
+    # =========================================================================
+
+    def __init_feedback_queue(self):
+        """Initialize the training queue if not exists."""
+        if not hasattr(self, '_training_queue'):
+            self._training_queue: List[TrainingQueueItem] = []
+            self._feedback_history: List[PerformanceFeedback] = []
+
+    def register_performance_feedback(
+        self,
+        content_id: int,
+        metrics: Dict[str, Any],
+        original_content: Optional[Dict[str, Any]] = None,
+        predicted_score: Optional[float] = None
+    ) -> PerformanceFeedback:
+        """
+        Register actual performance metrics for a published content piece.
+
+        This is the core method of the Human-in-the-Loop feedback system.
+        It compares predicted engagement against actual performance and
+        flags high-delta samples for priority retraining.
+
+        FLOW:
+        1. Calculate actual engagement score from metrics
+        2. Compare with predicted score
+        3. If delta > 20%, flag as HIGH_PRIORITY training sample
+        4. Add to training queue for next retraining cycle
+
+        Args:
+            content_id: ID of the GeneratedContent record
+            metrics: Actual performance metrics from Instagram/TikTok
+                     Expected keys: likes, comments, saves, shares, views,
+                                   reach, impressions, retention_rate
+            original_content: Optional content dict (for feature extraction)
+            predicted_score: Optional predicted score (if not provided,
+                            will try to look up from content)
+
+        Returns:
+            PerformanceFeedback with analysis results
+
+        Raises:
+            ValueError: If metrics are invalid or insufficient
+        """
+        self.__init_feedback_queue()
+
+        # Validate metrics
+        required_metrics = ["likes", "comments"]
+        if not all(k in metrics for k in required_metrics):
+            raise ValueError(f"Missing required metrics: {required_metrics}")
+
+        # Calculate actual engagement score (same formula as prediction training)
+        actual_score = self._calculate_engagement_score(metrics)
+
+        # Get predicted score
+        if predicted_score is None:
+            # In a real implementation, this would query the database
+            # For now, use a placeholder or the score from original_content
+            if original_content and "engagement_score" in original_content:
+                predicted_score = original_content.get("engagement_score", 50.0)
+            else:
+                predicted_score = 50.0  # Default if unknown
+                logger.warning(f"No predicted score for content {content_id}, using default")
+
+        # Calculate delta percentage
+        if predicted_score > 0:
+            delta_percent = ((actual_score - predicted_score) / predicted_score) * 100
+        else:
+            delta_percent = 100.0 if actual_score > 0 else 0.0
+
+        # Determine if this is a high priority training sample
+        is_high_priority = abs(delta_percent) > HIGH_PRIORITY_DELTA_THRESHOLD
+
+        # Calculate training priority score
+        training_priority = self._calculate_training_priority(
+            delta_percent=delta_percent,
+            metrics=metrics,
+            content=original_content
+        )
+
+        # Generate analysis notes
+        analysis_notes = self._generate_feedback_analysis(
+            predicted=predicted_score,
+            actual=actual_score,
+            delta=delta_percent,
+            metrics=metrics
+        )
+
+        # Create feedback object
+        feedback = PerformanceFeedback(
+            content_id=content_id,
+            predicted_score=predicted_score,
+            actual_score=actual_score,
+            delta_percent=delta_percent,
+            is_high_priority=is_high_priority,
+            training_priority=training_priority,
+            metrics=metrics,
+            collected_at=datetime.utcnow(),
+            analysis_notes=analysis_notes
+        )
+
+        # Store in history
+        self._feedback_history.append(feedback)
+
+        # If we have original content, add to training queue
+        if original_content is not None:
+            features = FeatureExtractor.extract_features(original_content)
+            queue_item = TrainingQueueItem(
+                content_id=content_id,
+                features=features,
+                actual_engagement=actual_score,
+                priority=training_priority,
+                added_at=datetime.utcnow(),
+                feedback=feedback
+            )
+            self._training_queue.append(queue_item)
+
+            if is_high_priority:
+                logger.info(
+                    f"HIGH PRIORITY training sample flagged: content_id={content_id}, "
+                    f"delta={delta_percent:.1f}%, priority={training_priority:.3f}"
+                )
+
+        logger.info(
+            f"Registered feedback for content {content_id}: "
+            f"predicted={predicted_score:.1f}, actual={actual_score:.1f}, "
+            f"delta={delta_percent:.1f}%, high_priority={is_high_priority}"
+        )
+
+        return feedback
+
+    def _calculate_engagement_score(self, metrics: Dict[str, Any]) -> float:
+        """
+        Calculate normalized engagement score from raw metrics.
+
+        Uses same formula as training to ensure consistency:
+        score = likes + comments*3 + saves*5 + shares*4
+
+        Then normalizes to 0-100 scale.
+        """
+        likes = metrics.get("likes", 0) or 0
+        comments = metrics.get("comments", 0) or 0
+        saves = metrics.get("saves", 0) or 0
+        shares = metrics.get("shares", 0) or 0
+        views = metrics.get("views", 0) or 0
+
+        # Weighted engagement sum
+        raw_score = likes + (comments * 3) + (saves * 5) + (shares * 4)
+
+        # Normalize based on views (if available) or absolute scale
+        if views > 0:
+            # Engagement rate based normalization
+            engagement_rate = raw_score / views
+            # Scale to 0-100 (typical engagement rates are 1-10%)
+            normalized = min(100, engagement_rate * 1000)
+        else:
+            # Absolute scale normalization (assuming max ~10000 engagement)
+            normalized = min(100, (raw_score / 100) * 10)
+
+        return round(normalized, 2)
+
+    def _calculate_training_priority(
+        self,
+        delta_percent: float,
+        metrics: Dict[str, Any],
+        content: Optional[Dict[str, Any]] = None
+    ) -> float:
+        """
+        Calculate training priority score for a feedback sample.
+
+        Higher priority samples are more valuable for model learning:
+        - High delta = model made a big mistake, needs correction
+        - Diverse content types = helps model generalize
+        - Recent data = more relevant to current trends
+
+        Priority formula:
+        priority = base_delta_score * diversity_multiplier * recency_multiplier
+
+        Returns:
+            Priority score (0-1, higher = more valuable)
+        """
+        # Base priority from delta magnitude
+        # Larger errors are more valuable for learning
+        base_priority = min(1.0, abs(delta_percent) / 100.0)
+
+        # Boost for very high deltas (model was very wrong)
+        if abs(delta_percent) > 50:
+            base_priority *= 1.5
+        elif abs(delta_percent) > HIGH_PRIORITY_DELTA_THRESHOLD:
+            base_priority *= 1.2
+
+        # Diversity bonus for underrepresented content types
+        diversity_multiplier = 1.0
+        if content:
+            content_format = content.get("content_format", "")
+            # Carousel and static are less common, boost their priority
+            if content_format == "carousel":
+                diversity_multiplier = 1.3
+            elif content_format in ["static", "static_image"]:
+                diversity_multiplier = 1.2
+
+        # Engagement volume bonus (high-engagement content is more informative)
+        views = metrics.get("views", 0) or metrics.get("reach", 0) or 0
+        volume_multiplier = 1.0
+        if views > 10000:
+            volume_multiplier = 1.3
+        elif views > 1000:
+            volume_multiplier = 1.1
+
+        # Combine factors
+        priority = base_priority * diversity_multiplier * volume_multiplier
+
+        # Clamp to 0-1
+        return min(1.0, max(0.0, priority))
+
+    def _generate_feedback_analysis(
+        self,
+        predicted: float,
+        actual: float,
+        delta: float,
+        metrics: Dict[str, Any]
+    ) -> str:
+        """Generate human-readable analysis of the prediction error."""
+        notes = []
+
+        # Direction of error
+        if delta > HIGH_PRIORITY_DELTA_THRESHOLD:
+            notes.append(f"Model UNDERESTIMATED by {delta:.1f}%")
+            notes.append("Content performed better than expected")
+        elif delta < -HIGH_PRIORITY_DELTA_THRESHOLD:
+            notes.append(f"Model OVERESTIMATED by {abs(delta):.1f}%")
+            notes.append("Content underperformed expectations")
+        else:
+            notes.append(f"Prediction within acceptable range (delta: {delta:.1f}%)")
+
+        # Analyze which metrics drove the difference
+        likes = metrics.get("likes", 0)
+        comments = metrics.get("comments", 0)
+        saves = metrics.get("saves", 0)
+        shares = metrics.get("shares", 0)
+
+        if comments > likes * 0.1:
+            notes.append("High comment ratio suggests strong audience connection")
+        if saves > likes * 0.05:
+            notes.append("High save ratio indicates valuable/educational content")
+        if shares > likes * 0.03:
+            notes.append("High share ratio shows viral potential")
+
+        return "; ".join(notes)
+
+    def get_training_queue(self, min_priority: float = 0.0) -> List[Dict[str, Any]]:
+        """
+        Get queued training samples above minimum priority.
+
+        Args:
+            min_priority: Minimum priority score (0-1)
+
+        Returns:
+            List of training samples ready for the next training cycle
+        """
+        self.__init_feedback_queue()
+
+        samples = [
+            item.to_training_sample()
+            for item in self._training_queue
+            if item.priority >= min_priority
+        ]
+
+        # Sort by priority (highest first)
+        samples.sort(key=lambda x: x.get("_priority", 0), reverse=True)
+
+        return samples
+
+    def get_high_priority_samples(self) -> List[Dict[str, Any]]:
+        """Get only high priority training samples (>20% delta)."""
+        self.__init_feedback_queue()
+
+        return [
+            item.to_training_sample()
+            for item in self._training_queue
+            if item.feedback.is_high_priority
+        ]
+
+    def get_feedback_statistics(self) -> Dict[str, Any]:
+        """Get statistics about collected feedback."""
+        self.__init_feedback_queue()
+
+        if not self._feedback_history:
+            return {
+                "total_samples": 0,
+                "high_priority_count": 0,
+                "avg_delta_percent": 0,
+                "model_bias": "unknown"
+            }
+
+        deltas = [f.delta_percent for f in self._feedback_history]
+        high_priority = [f for f in self._feedback_history if f.is_high_priority]
+
+        avg_delta = np.mean(deltas)
+
+        # Determine if model has systematic bias
+        if avg_delta > 10:
+            bias = "underestimating"
+        elif avg_delta < -10:
+            bias = "overestimating"
+        else:
+            bias = "calibrated"
+
+        return {
+            "total_samples": len(self._feedback_history),
+            "high_priority_count": len(high_priority),
+            "queue_size": len(self._training_queue),
+            "avg_delta_percent": round(avg_delta, 2),
+            "delta_std": round(np.std(deltas), 2),
+            "model_bias": bias,
+            "underestimated_count": sum(1 for d in deltas if d > HIGH_PRIORITY_DELTA_THRESHOLD),
+            "overestimated_count": sum(1 for d in deltas if d < -HIGH_PRIORITY_DELTA_THRESHOLD),
+        }
+
+    def clear_training_queue(self):
+        """Clear the training queue after a training cycle."""
+        self.__init_feedback_queue()
+        cleared = len(self._training_queue)
+        self._training_queue = []
+        logger.info(f"Cleared {cleared} samples from training queue")
+        return cleared
+
+    def retrain_with_feedback(
+        self,
+        additional_data: Optional[List[Dict[str, Any]]] = None,
+        min_samples: int = 30
+    ) -> bool:
+        """
+        Retrain the model using accumulated feedback data.
+
+        Combines high-priority feedback samples with any additional
+        real data to improve model accuracy.
+
+        Args:
+            additional_data: Optional list of additional training samples
+            min_samples: Minimum samples required for retraining
+
+        Returns:
+            True if retraining was successful, False if insufficient data
+        """
+        self.__init_feedback_queue()
+
+        # Collect training data
+        feedback_samples = self.get_training_queue(min_priority=0.3)
+
+        all_samples = []
+        all_samples.extend(feedback_samples)
+
+        if additional_data:
+            all_samples.extend(additional_data)
+
+        if len(all_samples) < min_samples:
+            logger.warning(
+                f"Insufficient data for retraining: {len(all_samples)} samples "
+                f"(minimum: {min_samples}). Collect more feedback."
+            )
+            return False
+
+        logger.info(
+            f"Retraining model with {len(all_samples)} samples "
+            f"({len(feedback_samples)} from feedback loop)"
+        )
+
+        # Perform retraining
+        self.train(all_samples, retrain=True)
+
+        # Clear used samples from queue
+        self.clear_training_queue()
+
+        return True
+
     # === Mock predictions when model not trained ===
 
     def _mock_engagement_prediction(self, content: Dict) -> Dict[str, Any]:
@@ -776,133 +1234,9 @@ class MLPredictor:
         }
 
 
-class SyntheticDataGenerator:
-    """
-    Generate synthetic training data for initial model training
-    Based on realistic patterns for local SMB content
-    """
-
-    BUSINESS_TYPES = [
-        "floristeria", "inmobiliaria", "cafeteria", "peluqueria",
-        "tienda_local", "restaurante", "gimnasio", "clinica", "otros"
-    ]
-
-    HOOKS = {
-        "floristeria": [
-            "POV: Te piden un ramo 'especial'",
-            "3 flores que NUNCA debes regalar",
-            "De esto... a ESTO en 5 minutos",
-            "El ramo más difícil que he hecho",
-        ],
-        "inmobiliaria": [
-            "POV: El cliente dice 'lo quiero ver hoy'",
-            "5 errores al comprar tu primera casa",
-            "Tour por este INCREÍBLE piso",
-            "Vendido en 24 horas - te cuento cómo",
-        ],
-        "cafeteria": [
-            "POV: Pides un café 'especial'",
-            "El secreto del mejor latte art",
-            "Un día en mi cafetería",
-            "3 errores que arruinan tu café",
-        ],
-    }
-
-    CAPTIONS = [
-        "Este {item} fue todo un éxito 🌟\n\nEl cliente pidió algo especial y mira el resultado ✨\n\n¿Te gusta? Comenta tu opinión 👇\n\nGuarda este video para cuando necesites inspiración 💾",
-        "POV: {scenario} 😱\n\nEsto es lo que pasa cuando confías en profesionales 💪\n\n¿Te ha pasado algo similar? Cuéntame 👇",
-        "3 cosas que NO sabías sobre {topic}:\n\n1️⃣ Primera cosa importante\n2️⃣ Segunda revelación\n3️⃣ Esta te sorprenderá\n\n¿Cuál no conocías? Dímelo en comentarios 💬",
-    ]
-
-    @classmethod
-    def generate_dataset(cls, n_samples: int = 500) -> List[Dict[str, Any]]:
-        """Generate synthetic training data"""
-        np.random.seed(42)
-        data = []
-
-        for i in range(n_samples):
-            business_type = np.random.choice(cls.BUSINESS_TYPES)
-
-            # Generate content
-            content_format = np.random.choice(
-                ["reel", "carousel", "static_image", "tiktok_video"],
-                p=[0.5, 0.25, 0.15, 0.1]
-            )
-
-            # Caption with variations
-            caption_template = np.random.choice(cls.CAPTIONS)
-            caption = caption_template.format(
-                item="producto",
-                scenario="un cliente difícil",
-                topic=business_type
-            )
-
-            # Add hashtags
-            n_hashtags = np.random.randint(5, 20)
-            hashtags = [f"hashtag{j}" for j in range(n_hashtags)]
-            hashtags.extend([business_type, "emprender", "negociolocal"])
-
-            # Engagement based on content quality (with noise)
-            base_engagement = 100
-
-            # Format bonus
-            if content_format in ["reel", "tiktok_video"]:
-                base_engagement *= np.random.uniform(1.5, 3.0)
-            elif content_format == "carousel":
-                base_engagement *= np.random.uniform(1.2, 2.0)
-
-            # Hook bonus
-            has_good_hook = np.random.random() > 0.4
-            if has_good_hook:
-                base_engagement *= np.random.uniform(1.3, 2.0)
-                if "POV" in caption or "?" in caption.split("\n")[0]:
-                    base_engagement *= 1.2
-
-            # CTA bonus
-            has_cta = "comenta" in caption.lower() or "guarda" in caption.lower()
-            if has_cta:
-                base_engagement *= np.random.uniform(1.2, 1.8)
-
-            # Emoji bonus
-            emoji_count = len(re.findall(r'[🌟✨💪💾😱👇💬1️⃣2️⃣3️⃣]', caption))
-            if emoji_count > 3:
-                base_engagement *= np.random.uniform(1.1, 1.3)
-
-            # Add noise
-            base_engagement *= np.random.uniform(0.5, 1.5)
-
-            # Generate metrics
-            likes = int(base_engagement * np.random.uniform(0.8, 1.2))
-            comments = int(likes * np.random.uniform(0.05, 0.15))
-            saves = int(likes * np.random.uniform(0.02, 0.08))
-            shares = int(likes * np.random.uniform(0.01, 0.05))
-            views = int(likes * np.random.uniform(5, 20)) if content_format in ["reel", "tiktok_video"] else 0
-
-            # Video duration
-            duration = np.random.randint(15, 90) if content_format in ["reel", "tiktok_video"] else 0
-
-            # Posting time
-            hour = np.random.choice([9, 10, 11, 12, 13, 18, 19, 20, 21], p=[0.05, 0.08, 0.15, 0.12, 0.1, 0.1, 0.15, 0.15, 0.1])
-            day = np.random.randint(0, 7)
-
-            data.append({
-                "caption": caption,
-                "hashtags": hashtags,
-                "content_format": content_format,
-                "type": content_format,
-                "business_type": business_type,
-                "likes_count": likes,
-                "comments_count": comments,
-                "saves_count": saves,
-                "shares_count": shares,
-                "views_count": views,
-                "video_duration_seconds": duration,
-                "audio_name": "trending_audio" if np.random.random() > 0.3 else "original",
-                "posted_at": f"2026-01-{np.random.randint(1, 28):02d}T{hour:02d}:00:00",
-            })
-
-        return data
-
+# ==========================================================================
+# Global Instance & Factory
+# ==========================================================================
 
 # Global ML predictor instance
 ml_predictor = MLPredictor()
@@ -913,12 +1247,8 @@ def get_ml_predictor() -> MLPredictor:
     return ml_predictor
 
 
-def train_initial_model():
-    """Train the model with synthetic data if not already trained"""
-    predictor = get_ml_predictor()
-
-    if not predictor.is_trained:
-        logger.info("Training ML model with synthetic data...")
-        synthetic_data = SyntheticDataGenerator.generate_dataset(500)
-        predictor.train(synthetic_data)
-        logger.info("Initial ML model training complete")
+# Note: Synthetic data generation has been removed.
+# The model now uses Cold Start heuristic prediction until sufficient
+# real performance data is collected (minimum 30 samples).
+# Use register_performance_feedback() to collect training data from
+# actual content performance, then retrain_with_feedback() when ready.
