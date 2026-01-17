@@ -98,7 +98,7 @@ cd brandpulse-ai
 cd backend
 
 # Crear entorno virtual
-python -m venv venv
+py -3.11 -m venv venv
 source venv/bin/activate  # Linux/Mac
 # o en Windows: venv\Scripts\activate
 
