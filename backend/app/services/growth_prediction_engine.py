@@ -1,0 +1,939 @@
+"""
+Growth Prediction Engine - XGBoost-based RPI Score Prediction with SHAP Explainability
+
+Este módulo implementa el "Cerebro" del sistema de predicción de crecimiento.
+Usa XGBoost para predecir el RPI_score (log-transformed) basándose en:
+- Metadata: hora, día, tipo de post
+- Features sensoriales: visual_energy, bpm, brightness, cut_density
+- Features semánticas: 10 componentes PCA del embedding semántico
+
+ARQUITECTURA:
+- XGBoost Regressor optimizado para datos tabulares
+- SHAP (SHapley Additive exPlanations) para explicabilidad
+- Validación cruzada K-Fold para evitar overfitting
+- Serialización con joblib para persistencia del modelo
+
+Autor: BrandPulse AI
+"""
+
+import logging
+import os
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import joblib
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.model_selection import KFold, cross_val_score, train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+logger = logging.getLogger(__name__)
+
+# Directory for model persistence
+MODEL_DIR = Path("./ml_models/growth")
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@dataclass(frozen=True)
+class GrowthPredictionConfig:
+    """
+    Configuración inmutable para el motor de predicción de crecimiento.
+
+    Attributes:
+        n_estimators: Número de árboles en el ensemble XGBoost
+        max_depth: Profundidad máxima de cada árbol
+        learning_rate: Tasa de aprendizaje (eta)
+        min_child_weight: Peso mínimo de hoja (regularización)
+        subsample: Fracción de muestras para cada árbol
+        colsample_bytree: Fracción de features para cada árbol
+        cv_folds: Número de folds para validación cruzada
+        random_state: Semilla para reproducibilidad
+        early_stopping_rounds: Parada temprana si no mejora
+        shap_max_display: Máximo de features a mostrar en explicaciones
+    """
+    n_estimators: int = 200
+    max_depth: int = 6
+    learning_rate: float = 0.05
+    min_child_weight: int = 3
+    subsample: float = 0.8
+    colsample_bytree: float = 0.8
+    gamma: float = 0.1
+    reg_alpha: float = 0.1
+    reg_lambda: float = 1.0
+    cv_folds: int = 5
+    random_state: int = 42
+    early_stopping_rounds: int = 20
+    shap_max_display: int = 10
+
+
+@dataclass
+class FeatureContribution:
+    """Contribución de una feature individual al score predicho."""
+    feature_name: str
+    contribution: float
+    feature_value: float
+    direction: str  # "positive" or "negative"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "feature": self.feature_name,
+            "contribution": round(self.contribution, 4),
+            "value": round(self.feature_value, 4),
+            "direction": self.direction
+        }
+
+
+@dataclass
+class PredictionResult:
+    """Resultado completo de una predicción con explicabilidad."""
+    predicted_rpi_score: float
+    predicted_rpi_raw: float  # exp(predicted_rpi_score) - 1
+    confidence_interval: Tuple[float, float]
+    top_positive_contributions: List[FeatureContribution]
+    top_negative_contributions: List[FeatureContribution]
+    explanation_text: str
+    feature_values: Dict[str, float]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "predicted_rpi_score": round(self.predicted_rpi_score, 4),
+            "predicted_rpi_raw": round(self.predicted_rpi_raw, 4),
+            "confidence_interval": {
+                "lower": round(self.confidence_interval[0], 4),
+                "upper": round(self.confidence_interval[1], 4)
+            },
+            "top_positive_factors": [c.to_dict() for c in self.top_positive_contributions],
+            "top_negative_factors": [c.to_dict() for c in self.top_negative_contributions],
+            "explanation": self.explanation_text,
+            "feature_values": {k: round(v, 4) for k, v in self.feature_values.items()}
+        }
+
+
+@dataclass
+class TrainingMetrics:
+    """Métricas de entrenamiento del modelo."""
+    train_rmse: float
+    test_rmse: float
+    train_mae: float
+    test_mae: float
+    train_r2: float
+    test_r2: float
+    cv_rmse_mean: float
+    cv_rmse_std: float
+    cv_scores: List[float]
+    feature_importance: Dict[str, float]
+    training_samples: int
+    training_date: str
+    model_version: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "train_rmse": round(self.train_rmse, 4),
+            "test_rmse": round(self.test_rmse, 4),
+            "train_mae": round(self.train_mae, 4),
+            "test_mae": round(self.test_mae, 4),
+            "train_r2": round(self.train_r2, 4),
+            "test_r2": round(self.test_r2, 4),
+            "cv_rmse_mean": round(self.cv_rmse_mean, 4),
+            "cv_rmse_std": round(self.cv_rmse_std, 4),
+            "cv_scores": [round(s, 4) for s in self.cv_scores],
+            "feature_importance": {k: round(v, 4) for k, v in self.feature_importance.items()},
+            "training_samples": self.training_samples,
+            "training_date": self.training_date,
+            "model_version": self.model_version
+        }
+
+
+class GrowthPredictionEngine:
+    """
+    Motor de predicción de crecimiento usando XGBoost con explicabilidad SHAP.
+
+    Este es el "Cerebro" del sistema que:
+    1. Entrena un modelo XGBoost para predecir RPI_score
+    2. Proporciona explicaciones SHAP de cada predicción
+    3. Identifica qué features contribuyen más al score
+
+    Features de entrada:
+    - Metadata: hour, day_of_week, post_type
+    - Sensoriales: visual_energy, tempo (bpm), brightness_variance, cut_density
+    - Semánticas: sem_pca_1 a sem_pca_10 (10 componentes PCA)
+
+    Variable objetivo:
+    - rpi_score (log-transformed RPI)
+
+    Ejemplo de uso:
+        engine = GrowthPredictionEngine()
+
+        # Entrenar
+        metrics = engine.train(training_data)
+
+        # Predecir con explicación
+        result = engine.predict_with_explanation(features)
+        print(result.explanation_text)
+        # Output: "El score es alto porque tempo (+0.4) y visual_energy (+0.3) son altos"
+    """
+
+    # Feature columns esperadas
+    METADATA_FEATURES = ["hour", "day_of_week", "post_type_encoded"]
+
+    SENSORY_FEATURES = [
+        "visual_energy",
+        "tempo",  # BPM
+        "brightness_variance",
+        "cut_density"
+    ]
+
+    SEMANTIC_FEATURES = [f"sem_pca_{i}" for i in range(1, 11)]  # sem_pca_1 to sem_pca_10
+
+    # Nombres legibles para explicaciones
+    FEATURE_DISPLAY_NAMES = {
+        "hour": "Hora de publicación",
+        "day_of_week": "Día de la semana",
+        "post_type_encoded": "Tipo de post",
+        "visual_energy": "Energía visual",
+        "tempo": "BPM (ritmo)",
+        "brightness_variance": "Variación de brillo",
+        "cut_density": "Densidad de cortes",
+        "sem_pca_1": "Semántica PC1",
+        "sem_pca_2": "Semántica PC2",
+        "sem_pca_3": "Semántica PC3",
+        "sem_pca_4": "Semántica PC4",
+        "sem_pca_5": "Semántica PC5",
+        "sem_pca_6": "Semántica PC6",
+        "sem_pca_7": "Semántica PC7",
+        "sem_pca_8": "Semántica PC8",
+        "sem_pca_9": "Semántica PC9",
+        "sem_pca_10": "Semántica PC10"
+    }
+
+    # Mapeo de tipos de post
+    POST_TYPES = ["reel", "carousel", "static", "story", "video", "unknown"]
+
+    MODEL_VERSION = "1.0.0"
+    MODEL_FILENAME = "growth_prediction_model.joblib"
+    SCALER_FILENAME = "growth_prediction_scaler.joblib"
+    ENCODER_FILENAME = "growth_prediction_encoder.joblib"
+    METADATA_FILENAME = "growth_prediction_metadata.joblib"
+
+    def __init__(self, config: Optional[GrowthPredictionConfig] = None):
+        """
+        Inicializa el motor de predicción.
+
+        Args:
+            config: Configuración opcional. Usa valores por defecto si no se proporciona.
+        """
+        self.config = config or GrowthPredictionConfig()
+        self._model: Optional[xgb.XGBRegressor] = None
+        self._scaler: Optional[StandardScaler] = None
+        self._post_type_encoder: Optional[LabelEncoder] = None
+        self._shap_explainer = None
+        self._is_trained = False
+        self._training_metrics: Optional[TrainingMetrics] = None
+        self._feature_columns: List[str] = []
+
+        # Intentar cargar modelo existente
+        self._load_model()
+
+    @property
+    def is_trained(self) -> bool:
+        """Verifica si el modelo está entrenado y listo para predecir."""
+        return self._is_trained and self._model is not None
+
+    @property
+    def feature_columns(self) -> List[str]:
+        """Retorna las columnas de features en el orden esperado."""
+        if not self._feature_columns:
+            self._feature_columns = (
+                self.METADATA_FEATURES +
+                self.SENSORY_FEATURES +
+                self.SEMANTIC_FEATURES
+            )
+        return self._feature_columns
+
+    def _get_model_path(self, filename: str) -> Path:
+        """Obtiene la ruta completa para un archivo del modelo."""
+        return MODEL_DIR / filename
+
+    def _load_model(self) -> bool:
+        """
+        Carga el modelo serializado desde disco si existe.
+
+        Returns:
+            True si el modelo se cargó exitosamente, False en caso contrario.
+        """
+        model_path = self._get_model_path(self.MODEL_FILENAME)
+        scaler_path = self._get_model_path(self.SCALER_FILENAME)
+        encoder_path = self._get_model_path(self.ENCODER_FILENAME)
+        metadata_path = self._get_model_path(self.METADATA_FILENAME)
+
+        if not all(p.exists() for p in [model_path, scaler_path, encoder_path, metadata_path]):
+            logger.info("No pre-trained model found. Model needs to be trained.")
+            return False
+
+        try:
+            self._model = joblib.load(model_path)
+            self._scaler = joblib.load(scaler_path)
+            self._post_type_encoder = joblib.load(encoder_path)
+            metadata = joblib.load(metadata_path)
+
+            self._feature_columns = metadata.get("feature_columns", self.feature_columns)
+            self._training_metrics = metadata.get("training_metrics")
+            self._is_trained = True
+
+            # Inicializar SHAP explainer
+            self._init_shap_explainer()
+
+            logger.info(f"Model loaded successfully from {model_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            self._is_trained = False
+            return False
+
+    def _save_model(self) -> bool:
+        """
+        Guarda el modelo entrenado a disco usando joblib.
+
+        Returns:
+            True si se guardó exitosamente, False en caso contrario.
+        """
+        if not self._is_trained or self._model is None:
+            logger.error("Cannot save: model is not trained")
+            return False
+
+        try:
+            model_path = self._get_model_path(self.MODEL_FILENAME)
+            scaler_path = self._get_model_path(self.SCALER_FILENAME)
+            encoder_path = self._get_model_path(self.ENCODER_FILENAME)
+            metadata_path = self._get_model_path(self.METADATA_FILENAME)
+
+            joblib.dump(self._model, model_path)
+            joblib.dump(self._scaler, scaler_path)
+            joblib.dump(self._post_type_encoder, encoder_path)
+
+            metadata = {
+                "feature_columns": self._feature_columns,
+                "training_metrics": self._training_metrics,
+                "model_version": self.MODEL_VERSION,
+                "saved_at": datetime.now().isoformat()
+            }
+            joblib.dump(metadata, metadata_path)
+
+            logger.info(f"Model saved successfully to {model_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error saving model: {e}")
+            return False
+
+    def _init_shap_explainer(self) -> None:
+        """Inicializa el explicador SHAP para el modelo entrenado."""
+        if self._model is None:
+            return
+
+        try:
+            import shap
+            self._shap_explainer = shap.TreeExplainer(self._model)
+            logger.info("SHAP explainer initialized successfully")
+        except Exception as e:
+            logger.warning(f"Could not initialize SHAP explainer: {e}")
+            self._shap_explainer = None
+
+    def _encode_post_type(self, post_type: str) -> int:
+        """
+        Codifica el tipo de post a un valor numérico.
+
+        Args:
+            post_type: Tipo de post (reel, carousel, static, etc.)
+
+        Returns:
+            Valor entero codificado.
+        """
+        if self._post_type_encoder is None:
+            self._post_type_encoder = LabelEncoder()
+            self._post_type_encoder.fit(self.POST_TYPES)
+
+        post_type_lower = post_type.lower() if post_type else "unknown"
+        if post_type_lower not in self.POST_TYPES:
+            post_type_lower = "unknown"
+
+        return self._post_type_encoder.transform([post_type_lower])[0]
+
+    def _prepare_features(
+        self,
+        data: Union[Dict[str, Any], pd.DataFrame],
+        fit_scaler: bool = False
+    ) -> np.ndarray:
+        """
+        Prepara las features para el modelo.
+
+        Args:
+            data: Diccionario de features o DataFrame
+            fit_scaler: Si True, ajusta el scaler (solo durante entrenamiento)
+
+        Returns:
+            Array numpy con las features procesadas.
+        """
+        if isinstance(data, dict):
+            # Convertir diccionario a DataFrame de una fila
+            df = pd.DataFrame([data])
+        else:
+            df = data.copy()
+
+        # Asegurar que todas las columnas existan
+        for col in self.feature_columns:
+            if col not in df.columns:
+                if col == "post_type_encoded" and "post_type" in df.columns:
+                    df["post_type_encoded"] = df["post_type"].apply(self._encode_post_type)
+                elif col.startswith("sem_pca_"):
+                    df[col] = 0.0  # Default para PCA faltantes
+                else:
+                    df[col] = 0.0
+
+        # Codificar post_type si existe
+        if "post_type" in df.columns and "post_type_encoded" not in df.columns:
+            df["post_type_encoded"] = df["post_type"].apply(self._encode_post_type)
+
+        # Seleccionar solo las columnas necesarias en el orden correcto
+        X = df[self.feature_columns].values.astype(np.float32)
+
+        # Escalar features
+        if self._scaler is None:
+            self._scaler = StandardScaler()
+            fit_scaler = True
+
+        if fit_scaler:
+            X = self._scaler.fit_transform(X)
+        else:
+            X = self._scaler.transform(X)
+
+        return X
+
+    def _extract_hour_day_from_timestamp(
+        self,
+        timestamp: Optional[Union[str, datetime]]
+    ) -> Tuple[int, int]:
+        """
+        Extrae hora y día de la semana de un timestamp.
+
+        Args:
+            timestamp: Timestamp ISO o objeto datetime
+
+        Returns:
+            Tupla (hora, día_semana) donde día 0=Lunes, 6=Domingo.
+        """
+        if timestamp is None:
+            # Default: hora pico típica (mediodía, miércoles)
+            return 12, 2
+
+        if isinstance(timestamp, str):
+            try:
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                return 12, 2
+        else:
+            dt = timestamp
+
+        return dt.hour, dt.weekday()
+
+    def prepare_training_data(
+        self,
+        raw_data: List[Dict[str, Any]]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Prepara datos crudos para entrenamiento.
+
+        Args:
+            raw_data: Lista de diccionarios con features y rpi_score.
+
+        Returns:
+            Tupla (X, y) con features y target.
+        """
+        processed_records = []
+
+        for record in raw_data:
+            # Extraer metadata temporal
+            hour, day_of_week = self._extract_hour_day_from_timestamp(
+                record.get("posted_at") or record.get("timestamp")
+            )
+
+            processed = {
+                "hour": hour,
+                "day_of_week": day_of_week,
+                "post_type": record.get("post_type", record.get("content_format", "unknown")),
+
+                # Sensory features
+                "visual_energy": record.get("visual_energy", 0.0),
+                "tempo": record.get("tempo", record.get("bpm", 0.0)),
+                "brightness_variance": record.get("brightness_variance", 0.0),
+                "cut_density": record.get("cut_density", 0.0),
+
+                # Target
+                "rpi_score": record.get("rpi_score", 0.0)
+            }
+
+            # Semantic PCA features
+            for i in range(1, 11):
+                pca_key = f"sem_pca_{i}"
+                processed[pca_key] = record.get(pca_key, 0.0)
+
+            processed_records.append(processed)
+
+        df = pd.DataFrame(processed_records)
+
+        # Codificar post_type
+        df["post_type_encoded"] = df["post_type"].apply(self._encode_post_type)
+
+        # Preparar features y target
+        X = self._prepare_features(df, fit_scaler=True)
+        y = df["rpi_score"].values.astype(np.float32)
+
+        return X, y
+
+    def train(
+        self,
+        training_data: Union[List[Dict[str, Any]], pd.DataFrame],
+        save_model: bool = True
+    ) -> TrainingMetrics:
+        """
+        Entrena el modelo XGBoost con validación cruzada.
+
+        Args:
+            training_data: Datos de entrenamiento (lista de dicts o DataFrame).
+            save_model: Si True, guarda el modelo después de entrenar.
+
+        Returns:
+            TrainingMetrics con métricas de rendimiento del modelo.
+        """
+        logger.info("Starting GrowthPredictionEngine training...")
+
+        # Preparar datos
+        if isinstance(training_data, pd.DataFrame):
+            X, y = self._prepare_features_from_dataframe(training_data)
+        else:
+            X, y = self.prepare_training_data(training_data)
+
+        logger.info(f"Training with {len(y)} samples, {X.shape[1]} features")
+
+        # Split train/test
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y,
+            test_size=0.2,
+            random_state=self.config.random_state
+        )
+
+        # Configurar modelo XGBoost
+        self._model = xgb.XGBRegressor(
+            n_estimators=self.config.n_estimators,
+            max_depth=self.config.max_depth,
+            learning_rate=self.config.learning_rate,
+            min_child_weight=self.config.min_child_weight,
+            subsample=self.config.subsample,
+            colsample_bytree=self.config.colsample_bytree,
+            gamma=self.config.gamma,
+            reg_alpha=self.config.reg_alpha,
+            reg_lambda=self.config.reg_lambda,
+            random_state=self.config.random_state,
+            objective="reg:squarederror",
+            n_jobs=-1,
+            verbosity=0
+        )
+
+        # Validación cruzada
+        logger.info(f"Running {self.config.cv_folds}-fold cross-validation...")
+        kfold = KFold(
+            n_splits=self.config.cv_folds,
+            shuffle=True,
+            random_state=self.config.random_state
+        )
+
+        cv_scores = cross_val_score(
+            self._model, X_train, y_train,
+            cv=kfold,
+            scoring="neg_root_mean_squared_error"
+        )
+        cv_rmse_scores = -cv_scores  # Convertir a positivo
+
+        logger.info(f"CV RMSE: {cv_rmse_scores.mean():.4f} (+/- {cv_rmse_scores.std():.4f})")
+
+        # Entrenar modelo final con early stopping
+        self._model.fit(
+            X_train, y_train,
+            eval_set=[(X_test, y_test)],
+            verbose=False
+        )
+
+        # Calcular métricas
+        y_train_pred = self._model.predict(X_train)
+        y_test_pred = self._model.predict(X_test)
+
+        train_rmse = np.sqrt(mean_squared_error(y_train, y_train_pred))
+        test_rmse = np.sqrt(mean_squared_error(y_test, y_test_pred))
+        train_mae = mean_absolute_error(y_train, y_train_pred)
+        test_mae = mean_absolute_error(y_test, y_test_pred)
+        train_r2 = r2_score(y_train, y_train_pred)
+        test_r2 = r2_score(y_test, y_test_pred)
+
+        # Feature importance
+        importance_dict = dict(zip(
+            self.feature_columns,
+            self._model.feature_importances_
+        ))
+        importance_sorted = dict(sorted(
+            importance_dict.items(),
+            key=lambda x: x[1],
+            reverse=True
+        ))
+
+        self._training_metrics = TrainingMetrics(
+            train_rmse=train_rmse,
+            test_rmse=test_rmse,
+            train_mae=train_mae,
+            test_mae=test_mae,
+            train_r2=train_r2,
+            test_r2=test_r2,
+            cv_rmse_mean=cv_rmse_scores.mean(),
+            cv_rmse_std=cv_rmse_scores.std(),
+            cv_scores=cv_rmse_scores.tolist(),
+            feature_importance=importance_sorted,
+            training_samples=len(y),
+            training_date=datetime.now().isoformat(),
+            model_version=self.MODEL_VERSION
+        )
+
+        self._is_trained = True
+
+        # Inicializar SHAP
+        self._init_shap_explainer()
+
+        # Guardar modelo
+        if save_model:
+            self._save_model()
+
+        logger.info(f"Training completed. Test RMSE: {test_rmse:.4f}, Test R2: {test_r2:.4f}")
+
+        return self._training_metrics
+
+    def _prepare_features_from_dataframe(
+        self,
+        df: pd.DataFrame
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepara features desde un DataFrame ya estructurado."""
+        # Asegurar columnas necesarias
+        if "post_type_encoded" not in df.columns:
+            if "post_type" in df.columns:
+                df = df.copy()
+                df["post_type_encoded"] = df["post_type"].apply(self._encode_post_type)
+            else:
+                df = df.copy()
+                df["post_type_encoded"] = 0
+
+        X = self._prepare_features(df, fit_scaler=True)
+        y = df["rpi_score"].values.astype(np.float32)
+
+        return X, y
+
+    def predict(self, features: Dict[str, Any]) -> float:
+        """
+        Predice el RPI score para un conjunto de features.
+
+        Args:
+            features: Diccionario con las features del contenido.
+
+        Returns:
+            RPI score predicho (log-transformed).
+
+        Raises:
+            RuntimeError: Si el modelo no está entrenado.
+        """
+        if not self.is_trained:
+            raise RuntimeError("Model is not trained. Call train() first.")
+
+        X = self._prepare_features(features, fit_scaler=False)
+        return float(self._model.predict(X)[0])
+
+    def predict_with_explanation(
+        self,
+        features: Dict[str, Any],
+        top_k: int = 5
+    ) -> PredictionResult:
+        """
+        Predice con explicación SHAP completa.
+
+        Esta es la función principal que devuelve no solo la predicción,
+        sino también la contribución de cada variable usando SHAP values.
+
+        Args:
+            features: Diccionario con las features del contenido.
+            top_k: Número de features top a mostrar en la explicación.
+
+        Returns:
+            PredictionResult con predicción y explicación detallada.
+
+        Raises:
+            RuntimeError: Si el modelo no está entrenado.
+        """
+        if not self.is_trained:
+            raise RuntimeError("Model is not trained. Call train() first.")
+
+        # Preparar features
+        hour, day_of_week = self._extract_hour_day_from_timestamp(
+            features.get("posted_at") or features.get("timestamp")
+        )
+
+        processed_features = {
+            "hour": hour,
+            "day_of_week": day_of_week,
+            "post_type": features.get("post_type", features.get("content_format", "unknown")),
+            "visual_energy": features.get("visual_energy", 0.0),
+            "tempo": features.get("tempo", features.get("bpm", 0.0)),
+            "brightness_variance": features.get("brightness_variance", 0.0),
+            "cut_density": features.get("cut_density", 0.0),
+        }
+
+        # Agregar PCA features
+        for i in range(1, 11):
+            pca_key = f"sem_pca_{i}"
+            processed_features[pca_key] = features.get(pca_key, 0.0)
+
+        X = self._prepare_features(processed_features, fit_scaler=False)
+
+        # Predicción base
+        prediction = float(self._model.predict(X)[0])
+
+        # Calcular SHAP values
+        positive_contributions = []
+        negative_contributions = []
+
+        if self._shap_explainer is not None:
+            try:
+                shap_values = self._shap_explainer.shap_values(X)
+
+                # shap_values puede ser una lista o array dependiendo de la versión
+                if isinstance(shap_values, list):
+                    shap_values = shap_values[0]
+
+                shap_vector = shap_values[0] if len(shap_values.shape) > 1 else shap_values
+
+                # Crear lista de contribuciones
+                feature_values_array = X[0]
+
+                for idx, (feature_name, shap_val) in enumerate(zip(self.feature_columns, shap_vector)):
+                    contribution = FeatureContribution(
+                        feature_name=self.FEATURE_DISPLAY_NAMES.get(feature_name, feature_name),
+                        contribution=float(shap_val),
+                        feature_value=float(feature_values_array[idx]),
+                        direction="positive" if shap_val > 0 else "negative"
+                    )
+
+                    if shap_val > 0:
+                        positive_contributions.append(contribution)
+                    elif shap_val < 0:
+                        negative_contributions.append(contribution)
+
+                # Ordenar por magnitud
+                positive_contributions.sort(key=lambda x: x.contribution, reverse=True)
+                negative_contributions.sort(key=lambda x: x.contribution)
+
+            except Exception as e:
+                logger.warning(f"SHAP explanation failed: {e}")
+
+        # Generar texto explicativo
+        explanation_parts = []
+
+        if positive_contributions:
+            top_positive = positive_contributions[:3]
+            pos_text = ", ".join([
+                f"{c.feature_name} (+{c.contribution:.2f})"
+                for c in top_positive
+            ])
+            explanation_parts.append(f"factores positivos: {pos_text}")
+
+        if negative_contributions:
+            top_negative = negative_contributions[:2]
+            neg_text = ", ".join([
+                f"{c.feature_name} ({c.contribution:.2f})"
+                for c in top_negative
+            ])
+            explanation_parts.append(f"factores negativos: {neg_text}")
+
+        if explanation_parts:
+            explanation_text = f"El score es {'alto' if prediction > 0.5 else 'moderado' if prediction > 0 else 'bajo'} porque " + " y ".join(explanation_parts)
+        else:
+            explanation_text = f"Score predicho: {prediction:.3f}"
+
+        # Calcular intervalo de confianza aproximado (usando std del CV si está disponible)
+        if self._training_metrics:
+            std = self._training_metrics.cv_rmse_mean
+            confidence_interval = (prediction - 1.96 * std, prediction + 1.96 * std)
+        else:
+            confidence_interval = (prediction - 0.2, prediction + 0.2)
+
+        return PredictionResult(
+            predicted_rpi_score=prediction,
+            predicted_rpi_raw=np.expm1(max(0, prediction)),  # Inversa de log1p
+            confidence_interval=confidence_interval,
+            top_positive_contributions=positive_contributions[:top_k],
+            top_negative_contributions=negative_contributions[:top_k],
+            explanation_text=explanation_text,
+            feature_values=processed_features
+        )
+
+    def predict_batch(
+        self,
+        features_list: List[Dict[str, Any]]
+    ) -> List[PredictionResult]:
+        """
+        Predice múltiples muestras con explicaciones.
+
+        Args:
+            features_list: Lista de diccionarios con features.
+
+        Returns:
+            Lista de PredictionResult para cada muestra.
+        """
+        return [self.predict_with_explanation(f) for f in features_list]
+
+    def get_feature_importance(self) -> Dict[str, float]:
+        """
+        Obtiene la importancia de features del modelo entrenado.
+
+        Returns:
+            Diccionario feature -> importancia ordenado de mayor a menor.
+        """
+        if not self.is_trained or self._training_metrics is None:
+            return {}
+
+        return self._training_metrics.feature_importance
+
+    def get_model_status(self) -> Dict[str, Any]:
+        """
+        Obtiene el estado actual del modelo.
+
+        Returns:
+            Diccionario con información del estado del modelo.
+        """
+        return {
+            "is_trained": self.is_trained,
+            "model_version": self.MODEL_VERSION,
+            "feature_count": len(self.feature_columns),
+            "features": self.feature_columns,
+            "training_metrics": self._training_metrics.to_dict() if self._training_metrics else None,
+            "config": {
+                "n_estimators": self.config.n_estimators,
+                "max_depth": self.config.max_depth,
+                "learning_rate": self.config.learning_rate,
+                "cv_folds": self.config.cv_folds
+            }
+        }
+
+    def generate_synthetic_training_data(
+        self,
+        n_samples: int = 1000,
+        random_state: int = 42
+    ) -> List[Dict[str, Any]]:
+        """
+        Genera datos sintéticos para entrenamiento inicial o pruebas.
+
+        Los datos simulan patrones realistas de contenido viral en redes sociales:
+        - Contenido con alta energía visual y tempo tiende a tener mejor RPI
+        - Horas pico (12-21h) tienen mejor rendimiento
+        - Reels/videos tienden a tener mejor engagement
+
+        Args:
+            n_samples: Número de muestras a generar.
+            random_state: Semilla para reproducibilidad.
+
+        Returns:
+            Lista de diccionarios con datos sintéticos.
+        """
+        np.random.seed(random_state)
+
+        data = []
+
+        for _ in range(n_samples):
+            # Metadata
+            hour = np.random.randint(0, 24)
+            day_of_week = np.random.randint(0, 7)
+            post_type = np.random.choice(self.POST_TYPES, p=[0.4, 0.2, 0.2, 0.1, 0.05, 0.05])
+
+            # Sensory features con distribuciones realistas
+            visual_energy = np.clip(np.random.beta(2, 5), 0, 1)
+            tempo = np.clip(np.random.normal(120, 30), 60, 180)
+            brightness_variance = np.clip(np.random.beta(2, 3), 0, 1)
+            cut_density = np.clip(np.random.exponential(2), 0, 15)
+
+            # Semantic PCA (aproximadamente normal)
+            pca_features = {
+                f"sem_pca_{i}": np.random.normal(0, 1)
+                for i in range(1, 11)
+            }
+
+            # Calcular RPI score sintético basado en patrones conocidos
+            # Mayor engagement en horas pico
+            hour_bonus = 0.3 if 12 <= hour <= 21 else 0
+            # Reels tienen mejor engagement
+            type_bonus = 0.4 if post_type == "reel" else 0.2 if post_type == "video" else 0
+            # Alta energía visual correlaciona con engagement
+            energy_bonus = visual_energy * 0.5
+            # Tempo moderado-alto (100-140 BPM) es óptimo
+            tempo_bonus = 0.3 if 100 <= tempo <= 140 else 0.1
+            # Variación de brillo moderada es buena
+            brightness_bonus = brightness_variance * 0.2
+
+            # Componente semántico (PC1 y PC2 más importantes)
+            semantic_bonus = pca_features["sem_pca_1"] * 0.1 + pca_features["sem_pca_2"] * 0.05
+
+            # RPI base + bonuses + ruido
+            base_rpi = 0.5
+            noise = np.random.normal(0, 0.15)
+
+            rpi_score = np.clip(
+                base_rpi + hour_bonus + type_bonus + energy_bonus +
+                tempo_bonus + brightness_bonus + semantic_bonus + noise,
+                0, 3  # Limitar a rango realista de log1p(RPI)
+            )
+
+            record = {
+                "hour": hour,
+                "day_of_week": day_of_week,
+                "post_type": post_type,
+                "visual_energy": visual_energy,
+                "tempo": tempo,
+                "brightness_variance": brightness_variance,
+                "cut_density": cut_density,
+                "rpi_score": rpi_score,
+                **pca_features
+            }
+
+            data.append(record)
+
+        return data
+
+
+# Singleton instance para uso en la aplicación
+_growth_engine_instance: Optional[GrowthPredictionEngine] = None
+
+
+def get_growth_prediction_engine() -> GrowthPredictionEngine:
+    """
+    Obtiene la instancia singleton del GrowthPredictionEngine.
+
+    Returns:
+        Instancia del motor de predicción.
+    """
+    global _growth_engine_instance
+    if _growth_engine_instance is None:
+        _growth_engine_instance = GrowthPredictionEngine()
+    return _growth_engine_instance
+
+
+def reset_growth_engine() -> None:
+    """Reinicia la instancia singleton (útil para tests)."""
+    global _growth_engine_instance
+    _growth_engine_instance = None
