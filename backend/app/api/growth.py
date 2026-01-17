@@ -74,14 +74,23 @@ async def predict_growth(request: GrowthPredictionRequest) -> GrowthPredictionRe
         )
 
     try:
-        # Construir features dict
+        # Construir features dict con Hook Theory features
         features = {
             "posted_at": request.posted_at,
             "post_type": request.post_type,
-            "visual_energy": request.visual_energy,
+
+            # === TEMPORAL FEATURES (Hook Theory) ===
+            "hook_energy": request.hook_energy,
+            "retention_energy": request.retention_energy,
+            "hook_cut_rate": request.hook_cut_rate,
+            "retention_cut_rate": request.retention_cut_rate,
+            "face_in_hook": request.face_in_hook,
+
+            # === GLOBAL FEATURES ===
             "tempo": request.tempo or request.bpm or 0.0,
             "brightness_variance": request.brightness_variance,
-            "cut_density": request.cut_density,
+
+            # === SEMANTIC PCA ===
             "sem_pca_1": request.sem_pca_1,
             "sem_pca_2": request.sem_pca_2,
             "sem_pca_3": request.sem_pca_3,
@@ -163,10 +172,19 @@ async def predict_growth_batch(request: BatchPredictionRequest) -> BatchPredicti
             features = {
                 "posted_at": item.posted_at,
                 "post_type": item.post_type,
-                "visual_energy": item.visual_energy,
+
+                # === TEMPORAL FEATURES (Hook Theory) ===
+                "hook_energy": item.hook_energy,
+                "retention_energy": item.retention_energy,
+                "hook_cut_rate": item.hook_cut_rate,
+                "retention_cut_rate": item.retention_cut_rate,
+                "face_in_hook": item.face_in_hook,
+
+                # === GLOBAL FEATURES ===
                 "tempo": item.tempo or item.bpm or 0.0,
                 "brightness_variance": item.brightness_variance,
-                "cut_density": item.cut_density,
+
+                # === SEMANTIC PCA ===
                 "sem_pca_1": item.sem_pca_1,
                 "sem_pca_2": item.sem_pca_2,
                 "sem_pca_3": item.sem_pca_3,

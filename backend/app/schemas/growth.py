@@ -22,7 +22,12 @@ class ConfidenceIntervalSchema(BaseModel):
 
 
 class GrowthPredictionRequest(BaseModel):
-    """Request para obtener predicción de crecimiento (RPI score)."""
+    """
+    Request para obtener predicción de crecimiento (RPI score).
+
+    Implementa HOOK THEORY: El algoritmo TikTok/IG evalúa videos como
+    secuencias temporales. Los primeros 3 segundos determinan el 90% del éxito.
+    """
     # Metadata temporal
     posted_at: Optional[str] = Field(
         None,
@@ -33,11 +38,33 @@ class GrowthPredictionRequest(BaseModel):
         description="Tipo de contenido: reel, carousel, static, story, video"
     )
 
-    # Sensory features (del AnalyticsEngine)
-    visual_energy: float = Field(
+    # =========================================================================
+    # TEMPORAL FEATURES (Hook Theory) - CRÍTICO para el algoritmo
+    # =========================================================================
+    hook_energy: float = Field(
         0.0, ge=0.0, le=1.0,
-        description="Energía visual del contenido (0-1)"
+        description="Energía visual en los segundos 0-3 (CRÍTICO - determina retención)"
     )
+    retention_energy: float = Field(
+        0.0, ge=0.0, le=1.0,
+        description="Energía visual del resto del video (segundos 3+)"
+    )
+    hook_cut_rate: float = Field(
+        0.0, ge=0.0,
+        description="Cortes por minuto en el hook (ponderados 10x por el algoritmo)"
+    )
+    retention_cut_rate: float = Field(
+        0.0, ge=0.0,
+        description="Cortes por minuto después del hook"
+    )
+    face_in_hook: int = Field(
+        0, ge=0, le=1,
+        description="¿Hay cara en los primeros 3 segundos? (0=No, 1=Sí)"
+    )
+
+    # =========================================================================
+    # GLOBAL FEATURES
+    # =========================================================================
     tempo: float = Field(
         0.0, ge=0.0, le=300.0,
         description="BPM del audio (beats per minute)"
@@ -49,10 +76,6 @@ class GrowthPredictionRequest(BaseModel):
     brightness_variance: float = Field(
         0.0, ge=0.0, le=1.0,
         description="Variación de brillo en el video (0-1)"
-    )
-    cut_density: float = Field(
-        0.0, ge=0.0,
-        description="Densidad de cortes por minuto"
     )
 
     # Semantic features (del TextIntelligence - PCA components)
@@ -73,13 +96,15 @@ class GrowthPredictionRequest(BaseModel):
                 {
                     "posted_at": "2024-03-15T14:30:00Z",
                     "post_type": "reel",
-                    "visual_energy": 0.75,
+                    "hook_energy": 0.85,
+                    "retention_energy": 0.45,
+                    "hook_cut_rate": 40.0,
+                    "retention_cut_rate": 8.0,
+                    "face_in_hook": 1,
                     "tempo": 128.0,
                     "brightness_variance": 0.45,
-                    "cut_density": 3.5,
                     "sem_pca_1": 0.23,
-                    "sem_pca_2": -0.15,
-                    "sem_pca_3": 0.08
+                    "sem_pca_2": -0.15
                 }
             ]
         }

@@ -180,24 +180,46 @@ class GrowthPredictionEngine:
     # Feature columns esperadas
     METADATA_FEATURES = ["hour", "day_of_week", "post_type_encoded"]
 
+    # =========================================================================
+    # SENSORY FEATURES - Hook Theory (Algorithm-Aligned)
+    # =========================================================================
+    # El algoritmo TikTok/IG evalúa el video como SECUENCIA TEMPORAL.
+    # Los primeros 3 segundos (hook) determinan el 90% del éxito.
+    # =========================================================================
     SENSORY_FEATURES = [
-        "visual_energy",
-        "tempo",  # BPM
-        "brightness_variance",
-        "cut_density"
+        # === TEMPORAL FEATURES (Hook Theory) ===
+        "hook_energy",        # Energía visual en segundos 0-3 (CRÍTICO)
+        "retention_energy",   # Energía visual del resto del video
+        "hook_cut_rate",      # Cortes en hook (ponderados 10x)
+        "retention_cut_rate", # Cortes después del hook
+        "face_in_hook",       # Face-to-camera en primeros 3 segundos
+
+        # === GLOBAL FEATURES (Backward Compatibility) ===
+        "tempo",              # BPM del audio
+        "brightness_variance", # Variación de brillo global
     ]
 
     SEMANTIC_FEATURES = [f"sem_pca_{i}" for i in range(1, 11)]  # sem_pca_1 to sem_pca_10
 
-    # Nombres legibles para explicaciones
+    # Nombres legibles para explicaciones SHAP
     FEATURE_DISPLAY_NAMES = {
+        # Metadata
         "hour": "Hora de publicación",
         "day_of_week": "Día de la semana",
         "post_type_encoded": "Tipo de post",
-        "visual_energy": "Energía visual",
+
+        # === TEMPORAL FEATURES (Hook Theory) ===
+        "hook_energy": "Energía del HOOK (0-3s)",
+        "retention_energy": "Energía de retención",
+        "hook_cut_rate": "Cortes en HOOK (×10)",
+        "retention_cut_rate": "Cortes post-hook",
+        "face_in_hook": "Cara en HOOK",
+
+        # === GLOBAL FEATURES ===
         "tempo": "BPM (ritmo)",
         "brightness_variance": "Variación de brillo",
-        "cut_density": "Densidad de cortes",
+
+        # Semantic PCA
         "sem_pca_1": "Semántica PC1",
         "sem_pca_2": "Semántica PC2",
         "sem_pca_3": "Semántica PC3",
@@ -467,11 +489,16 @@ class GrowthPredictionEngine:
                 "day_of_week": day_of_week,
                 "post_type": record.get("post_type", record.get("content_format", "unknown")),
 
-                # Sensory features
-                "visual_energy": record.get("visual_energy", 0.0),
+                # === TEMPORAL FEATURES (Hook Theory) ===
+                "hook_energy": record.get("hook_energy", 0.0),
+                "retention_energy": record.get("retention_energy", 0.0),
+                "hook_cut_rate": record.get("hook_cut_rate", 0.0),
+                "retention_cut_rate": record.get("retention_cut_rate", 0.0),
+                "face_in_hook": record.get("face_in_hook", 0),
+
+                # === GLOBAL FEATURES ===
                 "tempo": record.get("tempo", record.get("bpm", 0.0)),
                 "brightness_variance": record.get("brightness_variance", 0.0),
-                "cut_density": record.get("cut_density", 0.0),
 
                 # Target
                 "rpi_score": record.get("rpi_score", 0.0)
@@ -690,10 +717,17 @@ class GrowthPredictionEngine:
             "hour": hour,
             "day_of_week": day_of_week,
             "post_type": features.get("post_type", features.get("content_format", "unknown")),
-            "visual_energy": features.get("visual_energy", 0.0),
+
+            # === TEMPORAL FEATURES (Hook Theory) ===
+            "hook_energy": features.get("hook_energy", 0.0),
+            "retention_energy": features.get("retention_energy", 0.0),
+            "hook_cut_rate": features.get("hook_cut_rate", 0.0),
+            "retention_cut_rate": features.get("retention_cut_rate", 0.0),
+            "face_in_hook": features.get("face_in_hook", 0),
+
+            # === GLOBAL FEATURES ===
             "tempo": features.get("tempo", features.get("bpm", 0.0)),
             "brightness_variance": features.get("brightness_variance", 0.0),
-            "cut_density": features.get("cut_density", 0.0),
         }
 
         # Agregar PCA features
@@ -838,10 +872,12 @@ class GrowthPredictionEngine:
         random_state: int = 42
     ) -> List[Dict[str, Any]]:
         """
-        Genera datos sintéticos para entrenamiento inicial o pruebas.
+        Genera datos sintéticos para entrenamiento implementando HOOK THEORY.
 
-        Los datos simulan patrones realistas de contenido viral en redes sociales:
-        - Contenido con alta energía visual y tempo tiende a tener mejor RPI
+        Los datos simulan patrones realistas del algoritmo TikTok/IG 2024:
+        - Hook energy (0-3s) es el factor MÁS IMPORTANTE
+        - Face-to-camera en hook aumenta engagement significativamente
+        - Cortes en hook valen 10x más que cortes después
         - Horas pico (12-21h) tienen mejor rendimiento
         - Reels/videos tienden a tener mejor engagement
 
@@ -850,7 +886,7 @@ class GrowthPredictionEngine:
             random_state: Semilla para reproducibilidad.
 
         Returns:
-            Lista de diccionarios con datos sintéticos.
+            Lista de diccionarios con datos sintéticos (Hook Theory aligned).
         """
         np.random.seed(random_state)
 
@@ -862,11 +898,25 @@ class GrowthPredictionEngine:
             day_of_week = np.random.randint(0, 7)
             post_type = np.random.choice(self.POST_TYPES, p=[0.4, 0.2, 0.2, 0.1, 0.05, 0.05])
 
-            # Sensory features con distribuciones realistas
-            visual_energy = np.clip(np.random.beta(2, 5), 0, 1)
+            # ================================================================
+            # TEMPORAL FEATURES (Hook Theory)
+            # ================================================================
+            # Hook energy es CRÍTICO - si es bajo, el video muere
+            hook_energy = np.clip(np.random.beta(3, 4), 0, 1)  # Sesgo hacia valores altos
+            retention_energy = np.clip(np.random.beta(2, 5), 0, 1)
+
+            # Cortes en hook (ponderados 10x en el modelo)
+            hook_cut_rate = np.clip(np.random.exponential(20), 0, 200)  # Por minuto en hook
+            retention_cut_rate = np.clip(np.random.exponential(5), 0, 30)
+
+            # Face in hook - 40% de videos tienen cara
+            face_in_hook = 1 if np.random.random() < 0.4 else 0
+
+            # ================================================================
+            # GLOBAL FEATURES
+            # ================================================================
             tempo = np.clip(np.random.normal(120, 30), 60, 180)
             brightness_variance = np.clip(np.random.beta(2, 3), 0, 1)
-            cut_density = np.clip(np.random.exponential(2), 0, 15)
 
             # Semantic PCA (aproximadamente normal)
             pca_features = {
@@ -874,40 +924,69 @@ class GrowthPredictionEngine:
                 for i in range(1, 11)
             }
 
-            # Calcular RPI score sintético basado en patrones conocidos
+            # ================================================================
+            # CALCULAR RPI SCORE SINTÉTICO (Algoritmo 2024)
+            # ================================================================
+
+            # Hook energy es el factor MÁS IMPORTANTE (peso 0.8)
+            # Si hook_energy < 0.3, el video está prácticamente muerto
+            hook_energy_bonus = hook_energy * 0.8  # CRÍTICO
+            if hook_energy < 0.3:
+                hook_energy_bonus -= 0.5  # Penalización severa por hook débil
+
+            # Retention energy tiene menos peso (0.2)
+            retention_bonus = retention_energy * 0.2
+
+            # Face in hook da bonus significativo (+0.3)
+            face_bonus = 0.3 if face_in_hook else 0
+
+            # Cortes en hook - óptimo es moderado (20-60 por minuto)
+            hook_cuts_bonus = 0.2 if 20 <= hook_cut_rate <= 60 else 0
+
             # Mayor engagement en horas pico
-            hour_bonus = 0.3 if 12 <= hour <= 21 else 0
+            hour_bonus = 0.25 if 12 <= hour <= 21 else 0
+
             # Reels tienen mejor engagement
-            type_bonus = 0.4 if post_type == "reel" else 0.2 if post_type == "video" else 0
-            # Alta energía visual correlaciona con engagement
-            energy_bonus = visual_energy * 0.5
+            type_bonus = 0.35 if post_type == "reel" else 0.15 if post_type == "video" else 0
+
             # Tempo moderado-alto (100-140 BPM) es óptimo
-            tempo_bonus = 0.3 if 100 <= tempo <= 140 else 0.1
-            # Variación de brillo moderada es buena
-            brightness_bonus = brightness_variance * 0.2
+            tempo_bonus = 0.2 if 100 <= tempo <= 140 else 0.05
 
             # Componente semántico (PC1 y PC2 más importantes)
-            semantic_bonus = pca_features["sem_pca_1"] * 0.1 + pca_features["sem_pca_2"] * 0.05
+            semantic_bonus = pca_features["sem_pca_1"] * 0.08 + pca_features["sem_pca_2"] * 0.04
 
             # RPI base + bonuses + ruido
-            base_rpi = 0.5
-            noise = np.random.normal(0, 0.15)
+            base_rpi = 0.4
+            noise = np.random.normal(0, 0.12)
 
             rpi_score = np.clip(
-                base_rpi + hour_bonus + type_bonus + energy_bonus +
-                tempo_bonus + brightness_bonus + semantic_bonus + noise,
+                base_rpi + hook_energy_bonus + retention_bonus + face_bonus +
+                hook_cuts_bonus + hour_bonus + type_bonus + tempo_bonus +
+                semantic_bonus + noise,
                 0, 3  # Limitar a rango realista de log1p(RPI)
             )
 
             record = {
+                # Metadata
                 "hour": hour,
                 "day_of_week": day_of_week,
                 "post_type": post_type,
-                "visual_energy": visual_energy,
+
+                # Temporal Features (Hook Theory)
+                "hook_energy": hook_energy,
+                "retention_energy": retention_energy,
+                "hook_cut_rate": hook_cut_rate,
+                "retention_cut_rate": retention_cut_rate,
+                "face_in_hook": face_in_hook,
+
+                # Global Features
                 "tempo": tempo,
                 "brightness_variance": brightness_variance,
-                "cut_density": cut_density,
+
+                # Target
                 "rpi_score": rpi_score,
+
+                # Semantic PCA
                 **pca_features
             }
 
