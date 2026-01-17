@@ -18,6 +18,23 @@ Extended with Text Intelligence:
 - EasyOCR (text overlay detection)
 - Semantic embeddings with PCA reduction
 
+HOOK THEORY (Algorithm-Aligned Feature Engineering):
+=====================================================
+The TikTok/IG algorithm evaluates videos as TEMPORAL SEQUENCES, not flat data.
+The first 3 seconds (hook) determine 90% of video success.
+
+Temporal Features:
+- hook_energy: Visual energy in seconds 0-3 (critical for retention)
+- retention_energy: Visual energy for the rest of the video
+- hook_cut_rate: Cut rate in first 3s (weighted 10x more than later cuts)
+- retention_cut_rate: Cut rate for the rest of the video
+- face_in_hook: Binary - is there a face in the first 3 seconds?
+
+Justification:
+- If hook_energy is low, the video dies regardless of how good the rest is
+- A cut in second 1 is worth 10x a cut in second 50
+- Face-to-camera in first frame is prioritized by the algorithm
+
 Author: ML Engineering Team
 """
 
@@ -70,6 +87,16 @@ class VideoConfig:
     histogram_bins: int = 64  # Reduced from 256 for faster computation
     cut_threshold: float = 0.5  # Histogram correlation threshold for cuts
     dtype: np.dtype = field(default_factory=lambda: np.float32)
+
+    # Hook Theory configuration
+    hook_duration_seconds: float = 3.0  # First 3 seconds are the "hook"
+    hook_cut_weight: float = 10.0  # Cuts in hook weighted 10x more than retention cuts
+
+    # Face detection configuration
+    face_detection_enabled: bool = True
+    face_scale_factor: float = 1.1  # OpenCV cascade scale factor
+    face_min_neighbors: int = 4  # Minimum neighbors for detection
+    face_min_size: Tuple[int, int] = (30, 30)  # Minimum face size
 
 
 @dataclass(frozen=True)
@@ -135,14 +162,14 @@ class EfficientFrameGenerator:
         """Calculate how many frames to skip based on stride configuration."""
         return max(1, int(self._fps * self.config.frame_stride_seconds))
 
-    def generate_frames(self) -> Generator[np.ndarray, None, None]:
+    def generate_frames(self) -> Generator[Tuple[np.ndarray, float], None, None]:
         """
         Generator that yields downsampled frames at the configured stride.
 
         Memory Impact: Only ONE frame in memory at any time.
 
         Yields:
-            np.ndarray: Downsampled grayscale frame (224x224, float32)
+            Tuple[np.ndarray, float]: (Downsampled grayscale frame, timestamp in seconds)
         """
         if self._cap is None:
             raise RuntimeError("Generator must be used within context manager")
@@ -157,6 +184,9 @@ class EfficientFrameGenerator:
 
             # Only process frames at the stride interval
             if frame_idx % stride == 0:
+                # Calculate timestamp in seconds
+                timestamp = frame_idx / self._fps if self._fps > 0 else 0.0
+
                 # Downsample to target resolution
                 resized = cv2.resize(
                     frame,
@@ -168,21 +198,122 @@ class EfficientFrameGenerator:
                 gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
 
                 # Convert to float32 for numerical precision with lower memory
-                yield gray.astype(self.config.dtype) / 255.0
+                yield gray.astype(self.config.dtype) / 255.0, timestamp
 
             frame_idx += 1
 
         logger.debug(f"Processed {frame_idx // stride} frames (stride: {stride})")
 
+    def generate_frames_with_color(self) -> Generator[Tuple[np.ndarray, np.ndarray, float], None, None]:
+        """
+        Generator that yields both grayscale and color frames for face detection.
+
+        Used specifically for hook analysis where face detection is needed.
+
+        Yields:
+            Tuple[np.ndarray, np.ndarray, float]: (grayscale frame, color frame, timestamp)
+        """
+        if self._cap is None:
+            raise RuntimeError("Generator must be used within context manager")
+
+        stride = self.get_stride_frames()
+        frame_idx = 0
+
+        while True:
+            ret, frame = self._cap.read()
+            if not ret:
+                break
+
+            if frame_idx % stride == 0:
+                timestamp = frame_idx / self._fps if self._fps > 0 else 0.0
+
+                # Downsample to target resolution
+                resized = cv2.resize(
+                    frame,
+                    self.config.target_resolution,
+                    interpolation=cv2.INTER_AREA
+                )
+
+                # Grayscale for motion analysis
+                gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+                gray_float = gray.astype(self.config.dtype) / 255.0
+
+                yield gray_float, gray, timestamp
+
+            frame_idx += 1
+
+
+class FaceDetector:
+    """
+    Lightweight face detector using OpenCV Haar Cascades.
+
+    Used only for hook analysis (first 3 seconds) to detect
+    face-to-camera content which is prioritized by the algorithm.
+    """
+
+    def __init__(self, config: VideoConfig):
+        self.config = config
+        self._cascade = None
+        self._available = False
+        self._load_cascade()
+
+    def _load_cascade(self) -> None:
+        """Load the face detection cascade classifier."""
+        try:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            self._cascade = cv2.CascadeClassifier(cascade_path)
+            if self._cascade.empty():
+                logger.warning("Face cascade classifier failed to load")
+                self._available = False
+            else:
+                self._available = True
+                logger.debug("Face cascade classifier loaded successfully")
+        except Exception as e:
+            logger.warning(f"Could not load face detector: {e}")
+            self._available = False
+
+    def detect_face(self, gray_frame: np.ndarray) -> bool:
+        """
+        Detect if a face is present in the frame.
+
+        Args:
+            gray_frame: Grayscale frame (uint8, 0-255)
+
+        Returns:
+            True if at least one face is detected
+        """
+        if not self._available or self._cascade is None:
+            return False
+
+        try:
+            faces = self._cascade.detectMultiScale(
+                gray_frame,
+                scaleFactor=self.config.face_scale_factor,
+                minNeighbors=self.config.face_min_neighbors,
+                minSize=self.config.face_min_size
+            )
+            return len(faces) > 0
+        except Exception as e:
+            logger.debug(f"Face detection error: {e}")
+            return False
+
 
 class EfficientFeatureExtractor:
     """
-    Memory-optimized video feature extractor for edge computing.
+    Memory-optimized video feature extractor implementing HOOK THEORY.
 
-    Extracts DNA Features:
-    - visual_energy: Motion detection via frame differencing
+    The TikTok/IG algorithm evaluates videos as temporal sequences.
+    The first 3 seconds (hook) determine 90% of video success.
+
+    Extracts Temporal DNA Features:
+    - hook_energy: Visual energy in seconds 0-3 (CRITICAL)
+    - retention_energy: Visual energy for rest of video
+    - hook_cut_rate: Weighted cut rate in hook (10x multiplier)
+    - retention_cut_rate: Cut rate for rest of video
+    - face_in_hook: Binary - face detected in first 3 seconds
+    - visual_energy: Global energy (for backward compatibility)
     - brightness_variance: Luminance variation
-    - cut_density: Edit rhythm (cuts per minute)
+    - cut_density: Global edit rhythm (for backward compatibility)
 
     Memory Strategy:
     - Uses generators to process frames one-by-one
@@ -192,14 +323,26 @@ class EfficientFeatureExtractor:
 
     def __init__(self, config: Optional[VideoConfig] = None):
         self.config = config or VideoConfig()
+        self._face_detector = FaceDetector(self.config)
         self._reset_accumulators()
 
     def _reset_accumulators(self) -> None:
         """Reset all metric accumulators for a new video."""
+        # Global accumulators
         self._frame_diffs: List[float] = []
         self._brightness_values: List[float] = []
         self._histograms: List[np.ndarray] = []
         self._prev_frame: Optional[np.ndarray] = None
+        self._prev_hist: Optional[np.ndarray] = None
+
+        # Hook-specific accumulators (0-3 seconds)
+        self._hook_frame_diffs: List[float] = []
+        self._hook_cuts: int = 0
+        self._hook_face_detected: bool = False
+
+        # Retention-specific accumulators (after 3 seconds)
+        self._retention_frame_diffs: List[float] = []
+        self._retention_cuts: int = 0
 
     def _calculate_frame_diff(self, current: np.ndarray) -> float:
         """
@@ -226,7 +369,6 @@ class EfficientFeatureExtractor:
             [self.config.histogram_bins],
             [0, 256]
         )
-        # Normalize histogram
         cv2.normalize(hist, hist)
         return hist.flatten().astype(self.config.dtype)
 
@@ -236,13 +378,12 @@ class EfficientFeatureExtractor:
 
         A cut is detected when correlation drops below threshold.
         """
-        if len(self._histograms) == 0:
+        if self._prev_hist is None:
             return False
 
-        prev_hist = self._histograms[-1]
         correlation = cv2.compareHist(
             current_hist.reshape(-1, 1),
-            prev_hist.reshape(-1, 1),
+            self._prev_hist.reshape(-1, 1),
             cv2.HISTCMP_CORREL
         )
 
@@ -250,23 +391,36 @@ class EfficientFeatureExtractor:
 
     def extract_video_features(self, video_path: str) -> Dict[str, float]:
         """
-        Extract all video features with memory-optimized processing.
+        Extract all video features with TEMPORAL HOOK THEORY segmentation.
+
+        Separates features into:
+        - Hook zone (0-3 seconds): Critical for algorithm retention
+        - Retention zone (3+ seconds): Secondary importance
 
         Args:
             video_path: Path to video file
 
         Returns:
-            Dict with visual_energy, brightness_variance, cut_density
+            Dict with temporal features:
+            - hook_energy, retention_energy
+            - hook_cut_rate, retention_cut_rate (weighted)
+            - face_in_hook
+            - Plus legacy global features for backward compatibility
         """
         self._reset_accumulators()
-        cut_count = 0
+        total_cuts = 0
         duration = 0.0
+        hook_duration = self.config.hook_duration_seconds
+        frames_analyzed = 0
 
         try:
             with EfficientFrameGenerator(video_path, self.config) as gen:
                 duration = gen.duration
 
-                for frame in gen.generate_frames():
+                for frame, timestamp in gen.generate_frames():
+                    frames_analyzed += 1
+                    is_hook = timestamp <= hook_duration
+
                     # Accumulate brightness (mean luminance)
                     self._brightness_values.append(float(np.mean(frame)))
 
@@ -275,33 +429,111 @@ class EfficientFeatureExtractor:
                     if frame_diff > 0:
                         self._frame_diffs.append(frame_diff)
 
+                        # Separate into hook vs retention
+                        if is_hook:
+                            self._hook_frame_diffs.append(frame_diff)
+                        else:
+                            self._retention_frame_diffs.append(frame_diff)
+
                     # Histogram-based cut detection
                     hist = self._calculate_histogram(frame)
                     if self._detect_cut(hist):
-                        cut_count += 1
+                        total_cuts += 1
+                        if is_hook:
+                            self._hook_cuts += 1
+                        else:
+                            self._retention_cuts += 1
 
-                    # Keep only last histogram to minimize memory
-                    if len(self._histograms) > 1:
-                        self._histograms.pop(0)
-                    self._histograms.append(hist)
+                    # Face detection ONLY in hook (first 3 seconds)
+                    if is_hook and not self._hook_face_detected:
+                        if self.config.face_detection_enabled:
+                            # Convert to uint8 for face detection
+                            gray_uint8 = (frame * 255).astype(np.uint8)
+                            if self._face_detector.detect_face(gray_uint8):
+                                self._hook_face_detected = True
+                                logger.debug(f"Face detected at {timestamp:.2f}s")
 
-                    # Update previous frame reference
+                    # Update previous frame/histogram
                     self._prev_frame = frame
+                    self._prev_hist = hist
 
-            # Calculate final metrics
-            visual_energy = float(np.mean(self._frame_diffs)) if self._frame_diffs else 0.0
-            brightness_variance = float(np.std(self._brightness_values)) if self._brightness_values else 0.0
+            # =================================================================
+            # Calculate Temporal Features
+            # =================================================================
 
-            # Cuts per minute
+            # Hook energy (0-3s) - CRITICAL for retention
+            hook_energy = (
+                float(np.mean(self._hook_frame_diffs))
+                if self._hook_frame_diffs else 0.0
+            )
+
+            # Retention energy (3s+)
+            retention_energy = (
+                float(np.mean(self._retention_frame_diffs))
+                if self._retention_frame_diffs else 0.0
+            )
+
+            # Global visual energy (backward compatibility)
+            visual_energy = (
+                float(np.mean(self._frame_diffs))
+                if self._frame_diffs else 0.0
+            )
+
+            # Brightness variance (global)
+            brightness_variance = (
+                float(np.std(self._brightness_values))
+                if self._brightness_values else 0.0
+            )
+
+            # =================================================================
+            # Cut Rate Calculation with Hook Weighting
+            # =================================================================
+            # A cut in second 1 is worth 10x a cut in second 50
+
+            # Hook cut rate (cuts per minute in hook, weighted by 10x)
+            hook_minutes = min(hook_duration, duration) / 60.0
+            hook_cut_rate = (
+                float(self._hook_cuts / hook_minutes) * self.config.hook_cut_weight
+                if hook_minutes > 0 else 0.0
+            )
+
+            # Retention cut rate (cuts per minute after hook)
+            retention_duration = max(0, duration - hook_duration)
+            retention_minutes = retention_duration / 60.0
+            retention_cut_rate = (
+                float(self._retention_cuts / retention_minutes)
+                if retention_minutes > 0 else 0.0
+            )
+
+            # Global cut density (backward compatibility)
             duration_minutes = duration / 60.0
-            cut_density = float(cut_count / duration_minutes) if duration_minutes > 0 else 0.0
+            cut_density = float(total_cuts / duration_minutes) if duration_minutes > 0 else 0.0
+
+            # Weighted total cut score (hook cuts worth 10x)
+            weighted_cut_score = (
+                (self._hook_cuts * self.config.hook_cut_weight) + self._retention_cuts
+            )
 
             return {
+                # === TEMPORAL FEATURES (Hook Theory) ===
+                "hook_energy": round(hook_energy, 6),
+                "retention_energy": round(retention_energy, 6),
+                "hook_cut_rate": round(hook_cut_rate, 2),
+                "retention_cut_rate": round(retention_cut_rate, 2),
+                "face_in_hook": 1 if self._hook_face_detected else 0,
+                "weighted_cut_score": round(weighted_cut_score, 2),
+
+                # === GLOBAL FEATURES (Backward Compatibility) ===
                 "visual_energy": round(visual_energy, 6),
                 "brightness_variance": round(brightness_variance, 6),
                 "cut_density": round(cut_density, 2),
+
+                # === METADATA ===
                 "duration_seconds": round(duration, 2),
-                "frames_analyzed": len(self._brightness_values)
+                "frames_analyzed": frames_analyzed,
+                "hook_duration": hook_duration,
+                "hook_frames": len(self._hook_frame_diffs),
+                "retention_frames": len(self._retention_frame_diffs),
             }
 
         finally:
@@ -568,10 +800,19 @@ class AnalyticsEngine:
         }
 
         try:
-            # Video features
+            # Video features (now with Hook Theory temporal features)
             if include_video:
                 video_features = self.video_extractor.extract_video_features(media_path)
                 result.update({
+                    # Temporal Hook Theory features
+                    "hook_energy": video_features.get("hook_energy", 0.0),
+                    "retention_energy": video_features.get("retention_energy", 0.0),
+                    "hook_cut_rate": video_features.get("hook_cut_rate", 0.0),
+                    "retention_cut_rate": video_features.get("retention_cut_rate", 0.0),
+                    "face_in_hook": video_features.get("face_in_hook", 0),
+                    "weighted_cut_score": video_features.get("weighted_cut_score", 0.0),
+
+                    # Global features (backward compatibility)
                     "visual_energy": video_features.get("visual_energy", 0.0),
                     "brightness_variance": video_features.get("brightness_variance", 0.0),
                     "cut_density": video_features.get("cut_density", 0.0),
@@ -628,7 +869,14 @@ class AnalyticsEngine:
             {
                 "source": "video.mp4",
                 "status": "success",
-                # Video DNA
+                # === TEMPORAL FEATURES (Hook Theory) ===
+                "hook_energy": 0.065,      # Energy in first 3 seconds (CRITICAL)
+                "retention_energy": 0.042,  # Energy after 3 seconds
+                "hook_cut_rate": 120.0,    # Cuts/min in hook (weighted 10x)
+                "retention_cut_rate": 8.0,  # Cuts/min after hook
+                "face_in_hook": 1,         # Face detected in first 3s
+                "weighted_cut_score": 12.0, # Total weighted cuts
+                # === GLOBAL FEATURES (Backward Compatibility) ===
                 "visual_energy": 0.045,
                 "brightness_variance": 0.12,
                 "cut_density": 8.5,
@@ -655,10 +903,20 @@ class AnalyticsEngine:
         }
 
         try:
-            # Video DNA features
+            # Video DNA features (with Hook Theory temporal segmentation)
             if include_video:
                 video_features = self.video_extractor.extract_video_features(media_path)
                 result.update({
+                    # === TEMPORAL FEATURES (Hook Theory) ===
+                    # Critical for algorithm - first 3 seconds determine 90% of success
+                    "hook_energy": video_features.get("hook_energy", 0.0),
+                    "retention_energy": video_features.get("retention_energy", 0.0),
+                    "hook_cut_rate": video_features.get("hook_cut_rate", 0.0),
+                    "retention_cut_rate": video_features.get("retention_cut_rate", 0.0),
+                    "face_in_hook": video_features.get("face_in_hook", 0),
+                    "weighted_cut_score": video_features.get("weighted_cut_score", 0.0),
+
+                    # === GLOBAL FEATURES (Backward Compatibility) ===
                     "visual_energy": video_features.get("visual_energy", 0.0),
                     "brightness_variance": video_features.get("brightness_variance", 0.0),
                     "cut_density": video_features.get("cut_density", 0.0),

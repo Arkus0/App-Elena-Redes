@@ -2,7 +2,7 @@
 BrandPulse AI - API Routes
 """
 from fastapi import APIRouter
-from app.api import auth, business, competitors, content, viral, ml
+from app.api import auth, business, competitors, content, viral, ml, growth
 
 api_router = APIRouter()
 
@@ -13,3 +13,4 @@ api_router.include_router(competitors.router, prefix="/competitors", tags=["Comp
 api_router.include_router(content.router, prefix="/content", tags=["Content"])
 api_router.include_router(viral.router, prefix="/viral", tags=["Viral Scanner"])
 api_router.include_router(ml.router, prefix="/ml", tags=["ML Predictions"])
+api_router.include_router(growth.router, prefix="/growth", tags=["Growth Prediction"])

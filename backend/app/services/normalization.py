@@ -16,12 +16,30 @@ LÓGICA MATEMÁTICA:
 3. Log-Transform: np.log1p(RPI) para reducir outliers virales
 4. Cold Start: Si cuenta tiene < min_posts, usar mediana del nicho
 
+PESOS DE ENGAGEMENT (Algoritmo 2024):
+=====================================
+El algoritmo de TikTok/Instagram 2024 NO valora todas las interacciones igual.
+La jerarquía real de valor es:
+
+    Weighted_Score = (Likes × 1) + (Comments × 2) + (Saves × 5) + (Shares × 10)
+
+- SHARES (×10): El rey del algoritmo. Un share = distribución orgánica masiva
+- SAVES (×5): Indica contenido de alto valor que el usuario quiere volver a ver
+- COMMENTS (×2): Engagement activo, pero menos valioso que saves/shares
+- LIKES (×1): El engagement más pasivo, peso base
+- VIEWS (×0.01): Casi sin valor, muy fáciles de obtener
+
+OBJETIVO DEL MODELO:
+Queremos predecir videos que la gente COMPARTA, no solo que mire.
+Un video con 1000 likes pero 0 shares < video con 100 likes y 10 shares.
+
 EJEMPLO:
-- Cuenta con mediana de 1000 likes
-- Post actual tiene 1500 likes
-- RPI = 1500/1000 = 1.5
-- RPI_log = log1p(1.5) ≈ 0.916
-- Interpretación: Este post tuvo 50% más engagement que lo habitual
+- Cuenta con mediana de engagement ponderado 1000
+- Post actual: 500 likes, 50 comments, 100 saves, 20 shares
+- Weighted = 500×1 + 50×2 + 100×5 + 20×10 = 500 + 100 + 500 + 200 = 1300
+- RPI = 1300/1000 = 1.3
+- RPI_log = log1p(1.3) ≈ 0.833
+- Interpretación: 30% mejor que baseline, impulsado por SHARES
 
 Autor: BrandPulse AI
 """
@@ -56,7 +74,7 @@ class NormalizationConfig:
         apply_log_transform: Si aplicar np.log1p al resultado
         clip_rpi_max: Valor máximo de RPI antes de log (evita explosión)
         clip_rpi_min: Valor mínimo de RPI (evita división por 0)
-        engagement_weights: Pesos para calcular engagement ponderado
+        engagement_weights: Pesos para calcular engagement ponderado (Algoritmo 2024)
     """
     window_size: int = 20
     min_posts_for_baseline: int = 5
@@ -65,13 +83,23 @@ class NormalizationConfig:
     clip_rpi_max: float = 100.0     # Max 100x engagement normal
     clip_rpi_min: float = 0.01      # Min 1% engagement normal
 
-    # Pesos por defecto para engagement ponderado
+    # =========================================================================
+    # PESOS DE ENGAGEMENT - ALGORITMO 2024
+    # =========================================================================
+    # Estos pesos reflejan el valor REAL que el algoritmo de TikTok/IG asigna
+    # a cada tipo de interacción. La jerarquía es clara:
+    #
+    #   SHARES > SAVES > COMMENTS > LIKES >> VIEWS
+    #
+    # Un video que genera SHARES es 10x más valioso que uno que solo genera likes.
+    # El objetivo del modelo es predecir contenido que la gente COMPARTA.
+    # =========================================================================
     engagement_weights: Dict[str, float] = field(default_factory=lambda: {
-        "likes": 1.0,
-        "comments": 3.0,
-        "saves": 5.0,
-        "shares": 4.0,
-        "views": 0.1,  # Views tienen peso bajo (fáciles de obtener)
+        "likes": 1.0,      # Base engagement (pasivo)
+        "comments": 2.0,   # Engagement activo (antes era 3.0)
+        "saves": 5.0,      # Alto valor - usuario quiere volver a ver
+        "shares": 10.0,    # REY DEL ALGORITMO (antes era 4.0) - distribución orgánica
+        "views": 0.01,     # Casi sin valor (antes era 0.1) - muy fáciles de obtener
     })
 
 
@@ -605,9 +633,12 @@ def create_rpi_from_raw_metrics(
     apply_log: bool = True
 ) -> float:
     """
-    Calcula RPI directamente desde métricas crudas.
+    Calcula RPI directamente desde métricas crudas usando pesos del algoritmo 2024.
 
     Función de utilidad para cálculos rápidos sin instanciar clase.
+
+    PESOS (Algoritmo 2024):
+        Weighted = Likes×1 + Comments×2 + Saves×5 + Shares×10
 
     Args:
         likes, comments, saves, shares: Métricas del post
@@ -619,13 +650,20 @@ def create_rpi_from_raw_metrics(
 
     Ejemplo:
         >>> rpi = create_rpi_from_raw_metrics(
-        ...     likes=1500, comments=50, saves=100, shares=20,
+        ...     likes=500, comments=50, saves=100, shares=20,
         ...     author_baseline=1000
         ... )
-        >>> print(f"RPI: {rpi:.3f}")  # ~0.916 si apply_log=True
+        >>> # Weighted = 500 + 100 + 500 + 200 = 1300
+        >>> # RPI = 1300/1000 = 1.3
+        >>> print(f"RPI: {rpi:.3f}")  # ~0.833 si apply_log=True
     """
-    # Pesos por defecto
-    weighted = likes * 1.0 + comments * 3.0 + saves * 5.0 + shares * 4.0
+    # Pesos del algoritmo 2024: SHARES son el rey (10x)
+    weighted = (
+        likes * 1.0 +
+        comments * 2.0 +
+        saves * 5.0 +
+        shares * 10.0  # SHARES valen 10x más que likes
+    )
 
     rpi_raw = weighted / max(author_baseline, 1.0)
     rpi_raw = np.clip(rpi_raw, 0.01, 100.0)
