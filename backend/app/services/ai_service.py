@@ -1,5 +1,5 @@
 """
-AI Service - Claude-powered content analysis and generation
+AI Service - Grok-powered content analysis and generation
 The brain behind high-engagement content creation
 """
 import json
@@ -14,26 +14,29 @@ logger = logging.getLogger(__name__)
 
 class AIService:
     """
-    Service for AI-powered content analysis and generation using Claude
+    Service for AI-powered content analysis and generation using Grok (xAI)
     Specialized prompts for maximum engagement in local SMB content
     """
 
     def __init__(self):
         self.client = None
-        self.model = settings.CLAUDE_MODEL
+        self.model = settings.GROK_MODEL
         self._initialize_client()
 
     def _initialize_client(self):
-        """Initialize Anthropic client"""
-        if settings.ANTHROPIC_API_KEY:
+        """Initialize OpenAI client for Grok"""
+        if settings.GROK_API_KEY:
             try:
-                import anthropic
-                self.client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-                logger.info("Anthropic client initialized")
+                from openai import AsyncOpenAI
+                self.client = AsyncOpenAI(
+                    api_key=settings.GROK_API_KEY,
+                    base_url="https://api.x.ai/v1"
+                )
+                logger.info("Grok (OpenAI compatible) client initialized")
             except ImportError:
-                logger.warning("anthropic package not installed")
+                logger.warning("openai package not installed")
         else:
-            logger.warning("ANTHROPIC_API_KEY not set, using mock responses")
+            logger.warning("GROK_API_KEY not set, using mock responses")
 
     def is_available(self) -> bool:
         return self.client is not None
@@ -55,15 +58,17 @@ class AIService:
         user_prompt = self._build_pattern_analysis_prompt(posts, business_type, platform)
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=4000,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}]
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=4000
             )
 
             # Parse JSON response
-            response_text = response.content[0].text
+            response_text = response.choices[0].message.content
             # Extract JSON from response
             if "```json" in response_text:
                 json_str = response_text.split("```json")[1].split("```")[0]
@@ -103,14 +108,16 @@ class AIService:
         )
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=3000,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}]
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=3000
             )
 
-            response_text = response.content[0].text
+            response_text = response.choices[0].message.content
             if "```json" in response_text:
                 json_str = response_text.split("```json")[1].split("```")[0]
             elif "```" in response_text:
@@ -174,14 +181,16 @@ Responde en JSON:
 }}"""
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=1500,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}]
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=1500
             )
 
-            response_text = response.content[0].text
+            response_text = response.choices[0].message.content
             if "```json" in response_text:
                 json_str = response_text.split("```json")[1].split("```")[0]
             else:
@@ -238,14 +247,16 @@ Responde en JSON:
 ]"""
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=2500,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}]
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=2500
             )
 
-            response_text = response.content[0].text
+            response_text = response.choices[0].message.content
             if "```json" in response_text:
                 json_str = response_text.split("```json")[1].split("```")[0]
             else:

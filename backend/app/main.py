@@ -103,7 +103,7 @@ async def health_check():
         "services": {
             "database": "connected",
             "apify": "configured" if settings.APIFY_API_KEY else "not_configured",
-            "claude": "configured" if settings.ANTHROPIC_API_KEY else "not_configured",
+            "grok": "configured" if settings.GROK_API_KEY else "not_configured",
         }
     }
 
