@@ -34,6 +34,10 @@ xgboost==2.0.3
 shap==0.44.1
 joblib==1.3.2
 
+# Analytics Engine (Video/Audio Processing)
+opencv-python-headless==4.9.0.80  # Headless for server/edge (no GUI)
+librosa==0.10.1  # Audio analysis (optional - gracefully degrades if unavailable)
+
 # Testing
 pytest==7.4.4
 pytest-asyncio==0.23.3
