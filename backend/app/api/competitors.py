@@ -2,7 +2,9 @@
 Competitors API Routes
 Competitor management and analysis
 """
-from typing import List
+from typing import List, Optional, Any, Dict
+from datetime import datetime, timedelta
+import json
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -14,6 +16,7 @@ from app.models.business import Business, Platform
 from app.models.competitor import Competitor
 from app.models.scraped_post import ScrapedPost
 from app.models.pattern import ExtractedPattern
+from app.models.cached_analysis import CachedAnalysis
 from app.schemas.competitor import (
     CompetitorCreate,
     CompetitorResponse,
@@ -25,6 +28,62 @@ from app.schemas.competitor import (
 
 router = APIRouter()
 
+
+# =============================================================================
+# Caching Helpers
+# =============================================================================
+
+async def get_cached_data(
+    db: AsyncSession,
+    business_id: int,
+    cache_key: str
+) -> Optional[Dict[str, Any]]:
+    """Retrieve valid cached data if available"""
+    result = await db.execute(
+        select(CachedAnalysis)
+        .where(CachedAnalysis.business_id == business_id)
+        .where(CachedAnalysis.type == cache_key)
+        .where(CachedAnalysis.expires_at > datetime.utcnow())
+    )
+    cache = result.scalar_one_or_none()
+    return cache.data if cache else None
+
+async def set_cached_data(
+    db: AsyncSession,
+    business_id: int,
+    cache_key: str,
+    data: Dict[str, Any],
+    ttl_hours: int = 48
+):
+    """Save data to cache"""
+    # Check if cache entry exists to update or create new
+    result = await db.execute(
+        select(CachedAnalysis)
+        .where(CachedAnalysis.business_id == business_id)
+        .where(CachedAnalysis.type == cache_key)
+    )
+    existing_cache = result.scalar_one_or_none()
+
+    expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+
+    if existing_cache:
+        existing_cache.data = data
+        existing_cache.expires_at = expires_at
+    else:
+        new_cache = CachedAnalysis(
+            business_id=business_id,
+            type=cache_key,
+            data=data,
+            expires_at=expires_at
+        )
+        db.add(new_cache)
+
+    await db.commit()
+
+
+# =============================================================================
+# Endpoints
+# =============================================================================
 
 @router.get("/{business_id}", response_model=List[CompetitorResponse])
 async def get_competitors(
@@ -199,6 +258,7 @@ async def get_competitor_analysis(
 ):
     """
     Get detailed analysis of a competitor
+    Uses caching to reduce database load and avoid re-calculating insights
     """
     # Verify business ownership
     biz_result = await db.execute(
@@ -208,6 +268,14 @@ async def get_competitor_analysis(
     )
     if not biz_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Business not found")
+
+    # Check Cache
+    cache_key = f"competitor_analysis_{competitor_id}"
+    cached_data = await get_cached_data(db, business_id, cache_key)
+    if cached_data:
+        return cached_data
+
+    # --- Cache Miss: Generate Analysis ---
 
     # Get competitor
     comp_result = await db.execute(
@@ -247,7 +315,7 @@ async def get_competitor_analysis(
         )
         patterns = patterns_result.scalars().all()
 
-    # Build response
+    # Build response data objects
     top_posts_data = [
         TopPost(
             post_id=p.id,
@@ -304,7 +372,8 @@ async def get_competitor_analysis(
             elif p.pattern_type.value == "cta":
                 recommended_ctas.extend(p.examples[:3] if p.examples else [])
 
-    return CompetitorAnalysis(
+    # Create response object
+    analysis_result = CompetitorAnalysis(
         competitor_id=competitor.id,
         handle=competitor.handle,
         platform=competitor.platform.value,
@@ -332,6 +401,14 @@ async def get_competitor_analysis(
             "El formato carousel educativo está subexplotado en este nicho",
         ]
     )
+
+    # Convert to dict for caching (Pydantic to JSON-compatible dict)
+    analysis_dict = json.loads(analysis_result.model_dump_json())
+
+    # Save to Cache
+    await set_cached_data(db, business_id, cache_key, analysis_dict)
+
+    return analysis_result
 
 
 @router.get("/{business_id}/{competitor_id}/posts", response_model=List[ScrapedPostSummary])
