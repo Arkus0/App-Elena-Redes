@@ -40,6 +40,173 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path("./ml_models/growth")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+# Minimum number of real data points required for training
+MINIMUM_TRAINING_SAMPLES = 30
+
+
+class InsufficientDataError(Exception):
+    """
+    Raised when there are not enough real data points to train a reliable model.
+
+    The system requires at least MINIMUM_TRAINING_SAMPLES (30) data points
+    to avoid training a weak XGBoost model. When this error is raised,
+    the system should fall back to Cold Start heuristic logic.
+    """
+
+    def __init__(self, samples_provided: int, samples_required: int = MINIMUM_TRAINING_SAMPLES):
+        self.samples_provided = samples_provided
+        self.samples_required = samples_required
+        super().__init__(
+            f"Insufficient training data: {samples_provided} samples provided, "
+            f"minimum {samples_required} required. Use Cold Start heuristic instead."
+        )
+
+
+@dataclass(frozen=True)
+class InstagramInsightsSchema:
+    """
+    Strictly typed schema for REAL Instagram Graph API metrics.
+
+    These are the actual metrics returned by the Instagram Graph API
+    for media insights. Do NOT use synthetic/fake data with this schema.
+
+    API Reference: https://developers.facebook.com/docs/instagram-api/reference/ig-media/insights
+
+    Attributes:
+        media_id: Unique Instagram media ID
+        reach: Number of unique accounts that have seen the media
+        impressions: Total number of times the media has been seen
+        saved: Number of unique accounts that have saved the media
+        shares: Number of shares (only for Reels/Videos)
+        watch_time_seconds: Total watch time in seconds (only for Reels/Videos)
+        likes: Number of likes on the media
+        comments: Number of comments on the media
+        plays: Number of times video was played (for Reels/Videos)
+        ig_reels_avg_watch_time: Average watch time for Reels in milliseconds
+        ig_reels_video_view_total_time: Total time video has been viewed (Reels)
+        timestamp: ISO timestamp when the media was posted
+        media_type: Type of media (IMAGE, VIDEO, CAROUSEL_ALBUM, REELS)
+        media_product_type: Product type (FEED, REELS, STORY)
+    """
+    media_id: str
+    reach: int
+    impressions: int
+    saved: int
+    shares: int
+    watch_time_seconds: float
+    likes: int = 0
+    comments: int = 0
+    plays: int = 0
+    ig_reels_avg_watch_time: float = 0.0
+    ig_reels_video_view_total_time: float = 0.0
+    timestamp: Optional[str] = None
+    media_type: str = "VIDEO"
+    media_product_type: str = "REELS"
+
+    def __post_init__(self):
+        """Validate that metrics are non-negative."""
+        if self.reach < 0:
+            raise ValueError("reach must be non-negative")
+        if self.impressions < 0:
+            raise ValueError("impressions must be non-negative")
+        if self.saved < 0:
+            raise ValueError("saved must be non-negative")
+        if self.shares < 0:
+            raise ValueError("shares must be non-negative")
+        if self.watch_time_seconds < 0:
+            raise ValueError("watch_time_seconds must be non-negative")
+
+    @property
+    def engagement_rate(self) -> float:
+        """Calculate engagement rate based on reach."""
+        if self.reach == 0:
+            return 0.0
+        return (self.likes + self.comments + self.saved + self.shares) / self.reach
+
+    @property
+    def save_rate(self) -> float:
+        """Calculate save rate (strong signal of value)."""
+        if self.reach == 0:
+            return 0.0
+        return self.saved / self.reach
+
+    @property
+    def share_rate(self) -> float:
+        """Calculate share rate (viral potential indicator)."""
+        if self.reach == 0:
+            return 0.0
+        return self.shares / self.reach
+
+    @property
+    def avg_watch_time_ratio(self) -> float:
+        """
+        Calculate average watch time ratio.
+        Returns watch time per play, normalized.
+        """
+        if self.plays == 0:
+            return 0.0
+        return self.watch_time_seconds / self.plays
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "media_id": self.media_id,
+            "reach": self.reach,
+            "impressions": self.impressions,
+            "saved": self.saved,
+            "shares": self.shares,
+            "watch_time_seconds": self.watch_time_seconds,
+            "likes": self.likes,
+            "comments": self.comments,
+            "plays": self.plays,
+            "ig_reels_avg_watch_time": self.ig_reels_avg_watch_time,
+            "ig_reels_video_view_total_time": self.ig_reels_video_view_total_time,
+            "timestamp": self.timestamp,
+            "media_type": self.media_type,
+            "media_product_type": self.media_product_type,
+            "engagement_rate": self.engagement_rate,
+            "save_rate": self.save_rate,
+            "share_rate": self.share_rate,
+        }
+
+    @classmethod
+    def from_api_response(cls, response: Dict[str, Any]) -> "InstagramInsightsSchema":
+        """
+        Create an InstagramInsightsSchema from raw Instagram Graph API response.
+
+        Args:
+            response: Raw API response dictionary
+
+        Returns:
+            InstagramInsightsSchema instance
+        """
+        # Extract insights from nested structure if present
+        insights = {}
+        if "insights" in response and "data" in response["insights"]:
+            for insight in response["insights"]["data"]:
+                name = insight.get("name", "")
+                values = insight.get("values", [{}])
+                value = values[0].get("value", 0) if values else 0
+                insights[name] = value
+
+        return cls(
+            media_id=response.get("id", ""),
+            reach=insights.get("reach", response.get("reach", 0)),
+            impressions=insights.get("impressions", response.get("impressions", 0)),
+            saved=insights.get("saved", response.get("saved", 0)),
+            shares=insights.get("shares", response.get("shares", 0)),
+            watch_time_seconds=insights.get("ig_reels_video_view_total_time",
+                                           response.get("watch_time_seconds", 0)) / 1000.0,
+            likes=response.get("like_count", response.get("likes", 0)),
+            comments=response.get("comments_count", response.get("comments", 0)),
+            plays=insights.get("plays", response.get("plays", 0)),
+            ig_reels_avg_watch_time=insights.get("ig_reels_avg_watch_time", 0),
+            ig_reels_video_view_total_time=insights.get("ig_reels_video_view_total_time", 0),
+            timestamp=response.get("timestamp"),
+            media_type=response.get("media_type", "VIDEO"),
+            media_product_type=response.get("media_product_type", "REELS"),
+        )
+
 
 @dataclass(frozen=True)
 class GrowthPredictionConfig:
@@ -149,6 +316,46 @@ class TrainingMetrics:
             "training_date": self.training_date,
             "model_version": self.model_version
         }
+
+
+@dataclass
+class ColdStartPredictionResult:
+    """
+    Result from the Cold Start heuristic when no trained model is available.
+
+    This provides rule-based predictions based on Instagram algorithm heuristics
+    and industry best practices when we don't have enough data to train XGBoost.
+    """
+    predicted_rpi_score: float
+    predicted_rpi_raw: float
+    confidence_level: str  # "low", "medium" - always lower than ML model
+    heuristic_factors: List[Dict[str, Any]]
+    explanation_text: str
+    is_cold_start: bool = True
+    recommendation: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "predicted_rpi_score": round(self.predicted_rpi_score, 4),
+            "predicted_rpi_raw": round(self.predicted_rpi_raw, 4),
+            "confidence_level": self.confidence_level,
+            "is_cold_start": self.is_cold_start,
+            "heuristic_factors": self.heuristic_factors,
+            "explanation": self.explanation_text,
+            "recommendation": self.recommendation,
+        }
+
+    def to_prediction_result(self) -> PredictionResult:
+        """Convert to standard PredictionResult for API compatibility."""
+        return PredictionResult(
+            predicted_rpi_score=self.predicted_rpi_score,
+            predicted_rpi_raw=self.predicted_rpi_raw,
+            confidence_interval=(self.predicted_rpi_score - 0.5, self.predicted_rpi_score + 0.5),
+            top_positive_contributions=[],
+            top_negative_contributions=[],
+            explanation_text=f"[COLD START] {self.explanation_text}",
+            feature_values={}
+        )
 
 
 class GrowthPredictionEngine:
@@ -533,14 +740,36 @@ class GrowthPredictionEngine:
         """
         Entrena el modelo XGBoost con validación cruzada.
 
+        IMPORTANT: Requires at least MINIMUM_TRAINING_SAMPLES (30) real data points.
+        Training on insufficient data leads to weak models with confirmation bias.
+        If you have fewer samples, use Cold Start heuristics instead.
+
         Args:
             training_data: Datos de entrenamiento (lista de dicts o DataFrame).
+                           MUST contain at least 30 REAL data points.
             save_model: Si True, guarda el modelo después de entrenar.
 
         Returns:
             TrainingMetrics con métricas de rendimiento del modelo.
+
+        Raises:
+            InsufficientDataError: If training_data has fewer than 30 samples.
+                                   Use Cold Start heuristics in this case.
         """
         logger.info("Starting GrowthPredictionEngine training...")
+
+        # Validate minimum sample count BEFORE any processing
+        sample_count = len(training_data) if isinstance(training_data, list) else len(training_data)
+
+        if sample_count < MINIMUM_TRAINING_SAMPLES:
+            logger.warning(
+                f"Insufficient training data: {sample_count} samples provided, "
+                f"minimum {MINIMUM_TRAINING_SAMPLES} required. Use Cold Start heuristics."
+            )
+            raise InsufficientDataError(
+                samples_provided=sample_count,
+                samples_required=MINIMUM_TRAINING_SAMPLES
+            )
 
         # Preparar datos
         if isinstance(training_data, pd.DataFrame):
@@ -668,21 +897,215 @@ class GrowthPredictionEngine:
 
         return X, y
 
-    def predict(self, features: Dict[str, Any]) -> float:
+    def _cold_start_predict(self, features: Dict[str, Any]) -> ColdStartPredictionResult:
+        """
+        Heuristic rule-based prediction for Cold Start scenario.
+
+        When no trained model is available (insufficient data), this method
+        provides predictions based on Instagram algorithm heuristics and
+        industry best practices from 2024.
+
+        HEURISTIC RULES (based on Instagram Algorithm Analysis):
+        1. Hook Energy (0-3s): Most critical factor - 40% weight
+        2. Face in Hook: +20% boost for face-to-camera content
+        3. Post Type: Reels > Video > Carousel > Static
+        4. Posting Time: Peak hours (12-21h) get +15% boost
+        5. Tempo: Optimal BPM range (100-140) gets +10% boost
+
+        Args:
+            features: Content features dictionary
+
+        Returns:
+            ColdStartPredictionResult with heuristic-based prediction
+        """
+        logger.info("Using Cold Start heuristic prediction (no trained model available)")
+
+        heuristic_factors = []
+        base_score = 0.5  # Neutral baseline
+
+        # Extract temporal info
+        hour, day_of_week = self._extract_hour_day_from_timestamp(
+            features.get("posted_at") or features.get("timestamp")
+        )
+
+        # === RULE 1: Hook Energy (40% weight) ===
+        hook_energy = features.get("hook_energy", 0.5)
+        if hook_energy >= 0.7:
+            hook_bonus = 0.4
+            heuristic_factors.append({
+                "factor": "Energía del Hook",
+                "value": hook_energy,
+                "impact": "+0.40",
+                "rule": "Hook energy ≥0.7 indicates strong opening"
+            })
+        elif hook_energy >= 0.4:
+            hook_bonus = 0.2
+            heuristic_factors.append({
+                "factor": "Energía del Hook",
+                "value": hook_energy,
+                "impact": "+0.20",
+                "rule": "Moderate hook energy"
+            })
+        else:
+            hook_bonus = -0.2
+            heuristic_factors.append({
+                "factor": "Energía del Hook",
+                "value": hook_energy,
+                "impact": "-0.20",
+                "rule": "Weak hook - consider stronger opening"
+            })
+        base_score += hook_bonus
+
+        # === RULE 2: Face in Hook (+20% boost) ===
+        face_in_hook = features.get("face_in_hook", 0)
+        if face_in_hook:
+            face_bonus = 0.2
+            heuristic_factors.append({
+                "factor": "Cara en Hook",
+                "value": 1,
+                "impact": "+0.20",
+                "rule": "Face-to-camera in first 3s increases trust & retention"
+            })
+            base_score += face_bonus
+
+        # === RULE 3: Post Type Hierarchy ===
+        post_type = features.get("post_type", features.get("content_format", "unknown")).lower()
+        type_bonuses = {
+            "reel": 0.25,
+            "video": 0.15,
+            "carousel": 0.05,
+            "static": -0.05,
+            "story": 0.0,
+            "unknown": 0.0
+        }
+        type_bonus = type_bonuses.get(post_type, 0.0)
+        if type_bonus != 0:
+            heuristic_factors.append({
+                "factor": "Tipo de Contenido",
+                "value": post_type,
+                "impact": f"{'+' if type_bonus > 0 else ''}{type_bonus:.2f}",
+                "rule": f"Reels have highest algorithmic priority in 2024"
+            })
+        base_score += type_bonus
+
+        # === RULE 4: Peak Hours (12-21h) ===
+        if 12 <= hour <= 21:
+            time_bonus = 0.15
+            heuristic_factors.append({
+                "factor": "Hora de Publicación",
+                "value": f"{hour}:00",
+                "impact": "+0.15",
+                "rule": "Peak engagement hours (12-21h)"
+            })
+        elif 8 <= hour <= 23:
+            time_bonus = 0.05
+            heuristic_factors.append({
+                "factor": "Hora de Publicación",
+                "value": f"{hour}:00",
+                "impact": "+0.05",
+                "rule": "Acceptable posting hours"
+            })
+        else:
+            time_bonus = -0.1
+            heuristic_factors.append({
+                "factor": "Hora de Publicación",
+                "value": f"{hour}:00",
+                "impact": "-0.10",
+                "rule": "Low engagement hours (late night/early morning)"
+            })
+        base_score += time_bonus
+
+        # === RULE 5: Optimal Tempo (100-140 BPM) ===
+        tempo = features.get("tempo", features.get("bpm", 0))
+        if tempo > 0:
+            if 100 <= tempo <= 140:
+                tempo_bonus = 0.1
+                heuristic_factors.append({
+                    "factor": "Tempo del Audio",
+                    "value": f"{tempo:.0f} BPM",
+                    "impact": "+0.10",
+                    "rule": "Optimal BPM range for engagement"
+                })
+            elif 80 <= tempo <= 160:
+                tempo_bonus = 0.05
+                heuristic_factors.append({
+                    "factor": "Tempo del Audio",
+                    "value": f"{tempo:.0f} BPM",
+                    "impact": "+0.05",
+                    "rule": "Acceptable BPM range"
+                })
+            else:
+                tempo_bonus = 0.0
+            base_score += tempo_bonus
+
+        # === RULE 6: Cut Rate in Hook ===
+        hook_cut_rate = features.get("hook_cut_rate", 0)
+        if 20 <= hook_cut_rate <= 60:
+            cut_bonus = 0.1
+            heuristic_factors.append({
+                "factor": "Cortes en Hook",
+                "value": f"{hook_cut_rate:.0f}/min",
+                "impact": "+0.10",
+                "rule": "Optimal cut rate maintains attention"
+            })
+            base_score += cut_bonus
+
+        # Clamp final score
+        final_score = np.clip(base_score, 0.0, 2.5)
+        raw_score = np.expm1(max(0, final_score))
+
+        # Build explanation
+        positive_factors = [f["factor"] for f in heuristic_factors if f["impact"].startswith("+")]
+        negative_factors = [f["factor"] for f in heuristic_factors if f["impact"].startswith("-")]
+
+        explanation_parts = []
+        if positive_factors:
+            explanation_parts.append(f"Factores positivos: {', '.join(positive_factors[:3])}")
+        if negative_factors:
+            explanation_parts.append(f"Factores a mejorar: {', '.join(negative_factors[:2])}")
+
+        explanation = ". ".join(explanation_parts) if explanation_parts else "Predicción basada en heurísticas estándar"
+
+        # Generate recommendation
+        if final_score >= 1.2:
+            recommendation = "Contenido prometedor. Considere publicar en hora pico para maximizar alcance."
+        elif final_score >= 0.8:
+            recommendation = "Buen potencial. Revise el hook inicial para captar más atención."
+        else:
+            recommendation = "Considere mejorar el hook (primeros 3 segundos) y usar formato Reel."
+
+        return ColdStartPredictionResult(
+            predicted_rpi_score=final_score,
+            predicted_rpi_raw=raw_score,
+            confidence_level="low",
+            heuristic_factors=heuristic_factors,
+            explanation_text=explanation,
+            is_cold_start=True,
+            recommendation=recommendation
+        )
+
+    def predict(self, features: Dict[str, Any], allow_cold_start: bool = True) -> float:
         """
         Predice el RPI score para un conjunto de features.
 
         Args:
             features: Diccionario con las features del contenido.
+            allow_cold_start: If True, use heuristic prediction when model not trained.
 
         Returns:
             RPI score predicho (log-transformed).
 
         Raises:
-            RuntimeError: Si el modelo no está entrenado.
+            RuntimeError: If model not trained and allow_cold_start is False.
         """
         if not self.is_trained:
-            raise RuntimeError("Model is not trained. Call train() first.")
+            if allow_cold_start:
+                cold_result = self._cold_start_predict(features)
+                return cold_result.predicted_rpi_score
+            raise RuntimeError(
+                "Model is not trained and cold start is disabled. "
+                f"Train with at least {MINIMUM_TRAINING_SAMPLES} samples first."
+            )
 
         X = self._prepare_features(features, fit_scaler=False)
         return float(self._model.predict(X)[0])
@@ -690,7 +1113,8 @@ class GrowthPredictionEngine:
     def predict_with_explanation(
         self,
         features: Dict[str, Any],
-        top_k: int = 5
+        top_k: int = 5,
+        allow_cold_start: bool = True
     ) -> PredictionResult:
         """
         Predice con explicación SHAP completa.
@@ -698,18 +1122,28 @@ class GrowthPredictionEngine:
         Esta es la función principal que devuelve no solo la predicción,
         sino también la contribución de cada variable usando SHAP values.
 
+        When no trained model is available and allow_cold_start is True,
+        returns a heuristic-based prediction converted to PredictionResult format.
+
         Args:
             features: Diccionario con las features del contenido.
             top_k: Número de features top a mostrar en la explicación.
+            allow_cold_start: If True, use heuristic prediction when model not trained.
 
         Returns:
             PredictionResult con predicción y explicación detallada.
 
         Raises:
-            RuntimeError: Si el modelo no está entrenado.
+            RuntimeError: If model not trained and allow_cold_start is False.
         """
         if not self.is_trained:
-            raise RuntimeError("Model is not trained. Call train() first.")
+            if allow_cold_start:
+                cold_result = self._cold_start_predict(features)
+                return cold_result.to_prediction_result()
+            raise RuntimeError(
+                "Model is not trained and cold start is disabled. "
+                f"Train with at least {MINIMUM_TRAINING_SAMPLES} samples first."
+            )
 
         # Preparar features
         hour, day_of_week = self._extract_hour_day_from_timestamp(
@@ -848,6 +1282,21 @@ class GrowthPredictionEngine:
 
         return self._training_metrics.feature_importance
 
+    def predict_cold_start(self, features: Dict[str, Any]) -> ColdStartPredictionResult:
+        """
+        Public method to explicitly request Cold Start heuristic prediction.
+
+        Use this when you know you don't have a trained model and want
+        heuristic-based predictions without triggering model loading attempts.
+
+        Args:
+            features: Content features dictionary
+
+        Returns:
+            ColdStartPredictionResult with rule-based prediction
+        """
+        return self._cold_start_predict(features)
+
     def get_model_status(self) -> Dict[str, Any]:
         """
         Obtiene el estado actual del modelo.
@@ -855,8 +1304,10 @@ class GrowthPredictionEngine:
         Returns:
             Diccionario con información del estado del modelo.
         """
+        status = "trained" if self.is_trained else "cold_start"
         return {
             "is_trained": self.is_trained,
+            "mode": status,
             "model_version": self.MODEL_VERSION,
             "feature_count": len(self.feature_columns),
             "features": self.feature_columns,
@@ -868,134 +1319,6 @@ class GrowthPredictionEngine:
                 "cv_folds": self.config.cv_folds
             }
         }
-
-    def generate_synthetic_training_data(
-        self,
-        n_samples: int = 1000,
-        random_state: int = 42
-    ) -> List[Dict[str, Any]]:
-        """
-        Genera datos sintéticos para entrenamiento implementando HOOK THEORY.
-
-        Los datos simulan patrones realistas del algoritmo TikTok/IG 2024:
-        - Hook energy (0-3s) es el factor MÁS IMPORTANTE
-        - Face-to-camera en hook aumenta engagement significativamente
-        - Cortes en hook valen 10x más que cortes después
-        - Horas pico (12-21h) tienen mejor rendimiento
-        - Reels/videos tienden a tener mejor engagement
-
-        Args:
-            n_samples: Número de muestras a generar.
-            random_state: Semilla para reproducibilidad.
-
-        Returns:
-            Lista de diccionarios con datos sintéticos (Hook Theory aligned).
-        """
-        np.random.seed(random_state)
-
-        data = []
-
-        for _ in range(n_samples):
-            # Metadata
-            hour = np.random.randint(0, 24)
-            day_of_week = np.random.randint(0, 7)
-            post_type = np.random.choice(self.POST_TYPES, p=[0.4, 0.2, 0.2, 0.1, 0.05, 0.05])
-
-            # ================================================================
-            # TEMPORAL FEATURES (Hook Theory)
-            # ================================================================
-            # Hook energy es CRÍTICO - si es bajo, el video muere
-            hook_energy = np.clip(np.random.beta(3, 4), 0, 1)  # Sesgo hacia valores altos
-            retention_energy = np.clip(np.random.beta(2, 5), 0, 1)
-
-            # Cortes en hook (ponderados 10x en el modelo)
-            hook_cut_rate = np.clip(np.random.exponential(20), 0, 200)  # Por minuto en hook
-            retention_cut_rate = np.clip(np.random.exponential(5), 0, 30)
-
-            # Face in hook - 40% de videos tienen cara
-            face_in_hook = 1 if np.random.random() < 0.4 else 0
-
-            # ================================================================
-            # GLOBAL FEATURES
-            # ================================================================
-            tempo = np.clip(np.random.normal(120, 30), 60, 180)
-            brightness_variance = np.clip(np.random.beta(2, 3), 0, 1)
-
-            # Semantic PCA (aproximadamente normal)
-            pca_features = {
-                f"sem_pca_{i}": np.random.normal(0, 1)
-                for i in range(1, 11)
-            }
-
-            # ================================================================
-            # CALCULAR RPI SCORE SINTÉTICO (Algoritmo 2024)
-            # ================================================================
-
-            # Hook energy es el factor MÁS IMPORTANTE (peso 0.8)
-            # Si hook_energy < 0.3, el video está prácticamente muerto
-            hook_energy_bonus = hook_energy * 0.8  # CRÍTICO
-            if hook_energy < 0.3:
-                hook_energy_bonus -= 0.5  # Penalización severa por hook débil
-
-            # Retention energy tiene menos peso (0.2)
-            retention_bonus = retention_energy * 0.2
-
-            # Face in hook da bonus significativo (+0.3)
-            face_bonus = 0.3 if face_in_hook else 0
-
-            # Cortes en hook - óptimo es moderado (20-60 por minuto)
-            hook_cuts_bonus = 0.2 if 20 <= hook_cut_rate <= 60 else 0
-
-            # Mayor engagement en horas pico
-            hour_bonus = 0.25 if 12 <= hour <= 21 else 0
-
-            # Reels tienen mejor engagement
-            type_bonus = 0.35 if post_type == "reel" else 0.15 if post_type == "video" else 0
-
-            # Tempo moderado-alto (100-140 BPM) es óptimo
-            tempo_bonus = 0.2 if 100 <= tempo <= 140 else 0.05
-
-            # Componente semántico (PC1 y PC2 más importantes)
-            semantic_bonus = pca_features["sem_pca_1"] * 0.08 + pca_features["sem_pca_2"] * 0.04
-
-            # RPI base + bonuses + ruido
-            base_rpi = 0.4
-            noise = np.random.normal(0, 0.12)
-
-            rpi_score = np.clip(
-                base_rpi + hook_energy_bonus + retention_bonus + face_bonus +
-                hook_cuts_bonus + hour_bonus + type_bonus + tempo_bonus +
-                semantic_bonus + noise,
-                0, 3  # Limitar a rango realista de log1p(RPI)
-            )
-
-            record = {
-                # Metadata
-                "hour": hour,
-                "day_of_week": day_of_week,
-                "post_type": post_type,
-
-                # Temporal Features (Hook Theory)
-                "hook_energy": hook_energy,
-                "retention_energy": retention_energy,
-                "hook_cut_rate": hook_cut_rate,
-                "retention_cut_rate": retention_cut_rate,
-                "face_in_hook": face_in_hook,
-
-                # Global Features
-                "tempo": tempo,
-                "brightness_variance": brightness_variance,
-
-                # Target
-                "rpi_score": rpi_score,
-
-                # Semantic PCA
-                **pca_features
-            }
-
-            data.append(record)
-
-        return data
 
     def predict_with_account_health(
         self,
