@@ -25,6 +25,25 @@ class ContentStatus(str, enum.Enum):
     ARCHIVED = "archived"
 
 
+class FeedbackStatus(str, enum.Enum):
+    """
+    Status of performance feedback for ML training loop.
+
+    PENDING: Content published, awaiting performance data
+    COLLECTED: Performance metrics collected, awaiting analysis
+    ANALYZED: Delta calculated between predicted and actual
+    HIGH_PRIORITY: Flagged for next training cycle (>20% delta)
+    USED_FOR_TRAINING: Already incorporated into model training
+    SKIPPED: Not enough data or invalid for training
+    """
+    PENDING = "pending"
+    COLLECTED = "collected"
+    ANALYZED = "analyzed"
+    HIGH_PRIORITY = "high_priority"
+    USED_FOR_TRAINING = "used_for_training"
+    SKIPPED = "skipped"
+
+
 class GeneratedContent(Base):
     __tablename__ = "generated_content"
 
@@ -63,6 +82,49 @@ class GeneratedContent(Base):
     engagement_explanation = Column(Text, nullable=True)  # "Este Reel tiene 87% porque..."
     similar_viral_posts = Column(JSON, default=[])  # References to competitor posts
     ml_prediction_data = Column(JSON, default={})  # Full ML prediction with SHAP explanation
+
+    # ==========================================================================
+    # FEEDBACK LOOP - Human-in-the-Loop Reinforcement Learning
+    # ==========================================================================
+    # These fields store real performance data after publication for model retraining
+
+    # Actual performance metrics from Instagram Graph API / platform analytics
+    actual_performance_metrics = Column(JSON, default=None)
+    # Schema: {
+    #   "likes": int,
+    #   "comments": int,
+    #   "saves": int,
+    #   "shares": int,
+    #   "views": int,
+    #   "reach": int,
+    #   "impressions": int,
+    #   "retention_rate": float (0-1),
+    #   "watch_time_seconds": float,
+    #   "engagement_rate": float,
+    #   "collected_at": ISO timestamp,
+    #   "hours_since_posted": int
+    # }
+
+    # Calculated actual engagement score (same formula as predicted)
+    actual_engagement_score = Column(Float, nullable=True)
+
+    # Performance delta: (actual - predicted) / predicted * 100
+    # Positive = model underestimated, Negative = model overestimated
+    performance_delta_percent = Column(Float, nullable=True)
+
+    # Feedback loop status for ML training
+    feedback_status = Column(Enum(FeedbackStatus), default=None, nullable=True)
+
+    # Priority score for training (higher = more valuable for learning)
+    # Based on: delta magnitude, content type diversity, recency
+    training_priority_score = Column(Float, default=0.0)
+
+    # When performance was collected and analyzed
+    performance_collected_at = Column(DateTime, nullable=True)
+    feedback_analyzed_at = Column(DateTime, nullable=True)
+
+    # Notes from analysis (why this sample is valuable for training)
+    feedback_notes = Column(Text, nullable=True)
 
     # Patterns used
     patterns_used = Column(JSON, default=[])  # IDs of ExtractedPattern used

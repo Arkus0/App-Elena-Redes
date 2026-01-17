@@ -98,6 +98,30 @@ class VideoConfig:
     face_min_neighbors: int = 4  # Minimum neighbors for detection
     face_min_size: Tuple[int, int] = (30, 30)  # Minimum face size
 
+    # ==========================================================================
+    # QUALITY GATE CONFIGURATION - Camera Instability Detection
+    # ==========================================================================
+    # Distinguishes "dynamic editing" (intentional cuts/motion) from
+    # "bad filming" (unintended camera shake, poor stabilization)
+
+    # Optical flow parameters (Farneback algorithm)
+    optical_flow_pyr_scale: float = 0.5  # Pyramid scale for flow computation
+    optical_flow_levels: int = 3  # Number of pyramid levels
+    optical_flow_winsize: int = 15  # Averaging window size
+    optical_flow_iterations: int = 3  # Iterations at each pyramid level
+    optical_flow_poly_n: int = 5  # Polynomial expansion neighborhood
+    optical_flow_poly_sigma: float = 1.1  # Std for polynomial expansion
+
+    # Instability thresholds
+    instability_threshold_low: float = 0.02  # Below this = stable footage
+    instability_threshold_high: float = 0.08  # Above this = severe shake
+    instability_penalty_max: float = 0.6  # Maximum penalty (60% reduction)
+
+    # Production quality scoring
+    min_brightness_threshold: float = 0.15  # Below this = too dark
+    max_brightness_threshold: float = 0.85  # Above this = overexposed
+    min_contrast_threshold: float = 0.05  # Below this = washed out
+
 
 @dataclass(frozen=True)
 class AudioConfig:
@@ -344,6 +368,11 @@ class EfficientFeatureExtractor:
         self._retention_frame_diffs: List[float] = []
         self._retention_cuts: int = 0
 
+        # Quality Gate accumulators - Camera Instability Detection
+        self._global_motion_magnitudes: List[float] = []  # Global camera translation
+        self._local_motion_variances: List[float] = []  # Local motion variance (editing)
+        self._contrast_values: List[float] = []  # Frame contrast values
+
     def _calculate_frame_diff(self, current: np.ndarray) -> float:
         """
         Calculate mean absolute difference between consecutive frames.
@@ -389,13 +418,256 @@ class EfficientFeatureExtractor:
 
         return correlation < self.config.cut_threshold
 
+    def _analyze_optical_flow(self, current_frame: np.ndarray) -> Tuple[float, float]:
+        """
+        Analyze optical flow to distinguish camera shake from intentional motion.
+
+        Uses Farneback dense optical flow to compute:
+        1. Global motion magnitude: Mean flow vector (camera translation/shake)
+        2. Local motion variance: Variance of flow vectors (editing/subject motion)
+
+        KEY INSIGHT:
+        - Camera shake = HIGH global motion + LOW local variance (whole frame moves together)
+        - Dynamic editing = Variable global + HIGH local variance (subjects move differently)
+
+        Args:
+            current_frame: Current grayscale frame (float32, 0-1)
+
+        Returns:
+            Tuple of (global_motion_magnitude, local_motion_variance)
+        """
+        if self._prev_frame is None:
+            return 0.0, 0.0
+
+        try:
+            # Convert to uint8 for optical flow computation
+            prev_uint8 = (self._prev_frame * 255).astype(np.uint8)
+            curr_uint8 = (current_frame * 255).astype(np.uint8)
+
+            # Compute dense optical flow using Farneback algorithm
+            flow = cv2.calcOpticalFlowFarneback(
+                prev_uint8,
+                curr_uint8,
+                None,
+                pyr_scale=self.config.optical_flow_pyr_scale,
+                levels=self.config.optical_flow_levels,
+                winsize=self.config.optical_flow_winsize,
+                iterations=self.config.optical_flow_iterations,
+                poly_n=self.config.optical_flow_poly_n,
+                poly_sigma=self.config.optical_flow_poly_sigma,
+                flags=0
+            )
+
+            # Separate flow into x and y components
+            flow_x = flow[..., 0]
+            flow_y = flow[..., 1]
+
+            # Calculate magnitude at each pixel
+            magnitude = np.sqrt(flow_x**2 + flow_y**2)
+
+            # GLOBAL MOTION: Mean flow vector magnitude
+            # High value = whole frame is shifting (camera shake or pan)
+            mean_flow_x = float(np.mean(flow_x))
+            mean_flow_y = float(np.mean(flow_y))
+            global_motion = float(np.sqrt(mean_flow_x**2 + mean_flow_y**2))
+
+            # LOCAL MOTION VARIANCE: Standard deviation of magnitudes
+            # High value = different parts moving differently (editing, subject motion)
+            # Low value = uniform motion (camera shake)
+            local_variance = float(np.std(magnitude))
+
+            # Normalize by frame diagonal to make resolution-independent
+            frame_diagonal = np.sqrt(current_frame.shape[0]**2 + current_frame.shape[1]**2)
+            global_motion_normalized = global_motion / frame_diagonal
+            local_variance_normalized = local_variance / frame_diagonal
+
+            return global_motion_normalized, local_variance_normalized
+
+        except Exception as e:
+            logger.debug(f"Optical flow computation failed: {e}")
+            return 0.0, 0.0
+
+    def _calculate_instability_score(self) -> Tuple[float, float]:
+        """
+        Calculate camera instability score from accumulated motion data.
+
+        Instability is HIGH when:
+        - Global motion is high (camera moving)
+        - Local variance is low (uniform movement = shake, not editing)
+
+        Returns:
+            Tuple of (instability_score 0-1, shake_ratio)
+        """
+        if not self._global_motion_magnitudes or not self._local_motion_variances:
+            return 0.0, 0.0
+
+        mean_global_motion = float(np.mean(self._global_motion_magnitudes))
+        mean_local_variance = float(np.mean(self._local_motion_variances))
+
+        # Shake ratio: high global motion with low local variance = camera shake
+        # When local variance is high relative to global motion, it's editing
+        if mean_global_motion > 0:
+            # Ratio of "uniform motion" vs "differential motion"
+            shake_ratio = mean_global_motion / (mean_local_variance + 0.001)
+        else:
+            shake_ratio = 0.0
+
+        # Normalize instability score to 0-1
+        # Higher when: high global motion AND low local variance
+        raw_instability = mean_global_motion * (1.0 / (mean_local_variance + 0.01))
+
+        # Apply sigmoid-like normalization to clamp between 0 and 1
+        instability_score = min(1.0, raw_instability / 5.0)
+
+        return instability_score, shake_ratio
+
+    def _calculate_production_quality(
+        self,
+        instability_score: float,
+        brightness_values: List[float],
+        contrast_values: List[float]
+    ) -> Dict[str, float]:
+        """
+        Calculate production quality score (0-1) based on filming quality metrics.
+
+        Quality is INVERSELY proportional to:
+        - Unintended camera shake (instability)
+        - Poor brightness (too dark or overexposed)
+        - Low contrast (washed out footage)
+
+        Args:
+            instability_score: Camera shake score (0-1)
+            brightness_values: List of mean brightness values per frame
+            contrast_values: List of contrast (std dev) values per frame
+
+        Returns:
+            Dict with quality metrics including production_quality_score
+        """
+        # === INSTABILITY PENALTY ===
+        # Smoothly penalize instability, max penalty at threshold_high
+        if instability_score <= self.config.instability_threshold_low:
+            instability_penalty = 0.0
+        elif instability_score >= self.config.instability_threshold_high:
+            instability_penalty = self.config.instability_penalty_max
+        else:
+            # Linear interpolation between thresholds
+            range_size = self.config.instability_threshold_high - self.config.instability_threshold_low
+            normalized = (instability_score - self.config.instability_threshold_low) / range_size
+            instability_penalty = normalized * self.config.instability_penalty_max
+
+        # === BRIGHTNESS QUALITY ===
+        if brightness_values:
+            mean_brightness = float(np.mean(brightness_values))
+            brightness_std = float(np.std(brightness_values))
+
+            # Penalize if too dark or too bright
+            if mean_brightness < self.config.min_brightness_threshold:
+                # Too dark: penalize proportionally
+                brightness_quality = mean_brightness / self.config.min_brightness_threshold
+            elif mean_brightness > self.config.max_brightness_threshold:
+                # Overexposed: penalize proportionally
+                brightness_quality = (1.0 - mean_brightness) / (1.0 - self.config.max_brightness_threshold)
+            else:
+                # Good range: no penalty
+                brightness_quality = 1.0
+
+            # Penalize excessive brightness variance (flickering)
+            if brightness_std > 0.15:
+                brightness_quality *= 0.9
+        else:
+            mean_brightness = 0.0
+            brightness_std = 0.0
+            brightness_quality = 0.0
+
+        # === CONTRAST QUALITY ===
+        if contrast_values:
+            mean_contrast = float(np.mean(contrast_values))
+
+            # Penalize low contrast (washed out footage)
+            if mean_contrast < self.config.min_contrast_threshold:
+                contrast_quality = mean_contrast / self.config.min_contrast_threshold
+            else:
+                contrast_quality = 1.0
+        else:
+            mean_contrast = 0.0
+            contrast_quality = 0.0
+
+        # === COMPOSITE PRODUCTION QUALITY SCORE ===
+        # Weighted combination: instability (50%), brightness (25%), contrast (25%)
+        stability_score = 1.0 - instability_penalty
+
+        production_quality_score = (
+            0.50 * stability_score +
+            0.25 * brightness_quality +
+            0.25 * contrast_quality
+        )
+
+        # Clamp to 0-1
+        production_quality_score = max(0.0, min(1.0, production_quality_score))
+
+        return {
+            "production_quality_score": round(production_quality_score, 4),
+            "camera_stability_score": round(stability_score, 4),
+            "brightness_quality": round(brightness_quality, 4),
+            "contrast_quality": round(contrast_quality, 4),
+            "mean_brightness": round(mean_brightness, 4),
+            "mean_contrast": round(mean_contrast, 4),
+            "instability_score": round(instability_score, 4),
+            "instability_penalty": round(instability_penalty, 4),
+        }
+
+    def _apply_instability_penalty(
+        self,
+        raw_energy: float,
+        instability_score: float
+    ) -> float:
+        """
+        Apply instability penalty to visual energy score.
+
+        Reduces visual energy when camera shake is detected, preventing
+        shaky footage from being scored as "high energy content".
+
+        Args:
+            raw_energy: Original visual energy score
+            instability_score: Camera instability score (0-1)
+
+        Returns:
+            Adjusted visual energy with penalty applied
+        """
+        if instability_score <= self.config.instability_threshold_low:
+            # No penalty for stable footage
+            return raw_energy
+
+        if instability_score >= self.config.instability_threshold_high:
+            # Maximum penalty for very shaky footage
+            penalty = self.config.instability_penalty_max
+        else:
+            # Linear interpolation
+            range_size = self.config.instability_threshold_high - self.config.instability_threshold_low
+            normalized = (instability_score - self.config.instability_threshold_low) / range_size
+            penalty = normalized * self.config.instability_penalty_max
+
+        adjusted_energy = raw_energy * (1.0 - penalty)
+        logger.debug(
+            f"Visual energy adjusted: {raw_energy:.4f} -> {adjusted_energy:.4f} "
+            f"(instability: {instability_score:.4f}, penalty: {penalty:.2%})"
+        )
+
+        return adjusted_energy
+
     def extract_video_features(self, video_path: str) -> Dict[str, float]:
         """
-        Extract all video features with TEMPORAL HOOK THEORY segmentation.
+        Extract all video features with TEMPORAL HOOK THEORY segmentation
+        and QUALITY GATE for camera instability detection.
 
         Separates features into:
         - Hook zone (0-3 seconds): Critical for algorithm retention
         - Retention zone (3+ seconds): Secondary importance
+
+        Quality Gate:
+        - Detects camera shake vs intentional editing using optical flow
+        - Applies penalty to visual_energy when shake is detected
+        - Calculates production_quality_score based on stability, brightness, contrast
 
         Args:
             video_path: Path to video file
@@ -405,6 +677,8 @@ class EfficientFeatureExtractor:
             - hook_energy, retention_energy
             - hook_cut_rate, retention_cut_rate (weighted)
             - face_in_hook
+            - visual_energy (with instability penalty applied)
+            - production_quality_score (0-1, quality gate metric)
             - Plus legacy global features for backward compatibility
         """
         self._reset_accumulators()
@@ -422,9 +696,14 @@ class EfficientFeatureExtractor:
                     is_hook = timestamp <= hook_duration
 
                     # Accumulate brightness (mean luminance)
-                    self._brightness_values.append(float(np.mean(frame)))
+                    mean_brightness = float(np.mean(frame))
+                    self._brightness_values.append(mean_brightness)
 
-                    # Calculate motion energy
+                    # Accumulate contrast (standard deviation = local contrast)
+                    frame_contrast = float(np.std(frame))
+                    self._contrast_values.append(frame_contrast)
+
+                    # Calculate motion energy (raw frame diff)
                     frame_diff = self._calculate_frame_diff(frame)
                     if frame_diff > 0:
                         self._frame_diffs.append(frame_diff)
@@ -434,6 +713,13 @@ class EfficientFeatureExtractor:
                             self._hook_frame_diffs.append(frame_diff)
                         else:
                             self._retention_frame_diffs.append(frame_diff)
+
+                    # === QUALITY GATE: Optical Flow Analysis ===
+                    # Distinguish camera shake from intentional motion
+                    global_motion, local_variance = self._analyze_optical_flow(frame)
+                    if global_motion > 0 or local_variance > 0:
+                        self._global_motion_magnitudes.append(global_motion)
+                        self._local_motion_variances.append(local_variance)
 
                     # Histogram-based cut detection
                     hist = self._calculate_histogram(frame)
@@ -473,8 +759,8 @@ class EfficientFeatureExtractor:
                 if self._retention_frame_diffs else 0.0
             )
 
-            # Global visual energy (backward compatibility)
-            visual_energy = (
+            # Global visual energy (raw, before instability penalty)
+            raw_visual_energy = (
                 float(np.mean(self._frame_diffs))
                 if self._frame_diffs else 0.0
             )
@@ -483,6 +769,37 @@ class EfficientFeatureExtractor:
             brightness_variance = (
                 float(np.std(self._brightness_values))
                 if self._brightness_values else 0.0
+            )
+
+            # =================================================================
+            # QUALITY GATE: Camera Instability Detection & Penalty
+            # =================================================================
+            # Distinguish "dynamic editing" (good) from "bad filming" (shake)
+
+            instability_score, shake_ratio = self._calculate_instability_score()
+
+            # Apply instability penalty to visual energy
+            # Shaky footage should NOT be scored as "high energy content"
+            visual_energy = self._apply_instability_penalty(
+                raw_visual_energy,
+                instability_score
+            )
+
+            # Apply same penalty to hook/retention energy for consistency
+            adjusted_hook_energy = self._apply_instability_penalty(
+                hook_energy,
+                instability_score
+            )
+            adjusted_retention_energy = self._apply_instability_penalty(
+                retention_energy,
+                instability_score
+            )
+
+            # Calculate production quality score
+            quality_metrics = self._calculate_production_quality(
+                instability_score=instability_score,
+                brightness_values=self._brightness_values,
+                contrast_values=self._contrast_values
             )
 
             # =================================================================
@@ -516,17 +833,30 @@ class EfficientFeatureExtractor:
 
             return {
                 # === TEMPORAL FEATURES (Hook Theory) ===
-                "hook_energy": round(hook_energy, 6),
-                "retention_energy": round(retention_energy, 6),
+                # Note: hook_energy and retention_energy now have instability penalty applied
+                "hook_energy": round(adjusted_hook_energy, 6),
+                "retention_energy": round(adjusted_retention_energy, 6),
                 "hook_cut_rate": round(hook_cut_rate, 2),
                 "retention_cut_rate": round(retention_cut_rate, 2),
                 "face_in_hook": 1 if self._hook_face_detected else 0,
                 "weighted_cut_score": round(weighted_cut_score, 2),
 
-                # === GLOBAL FEATURES (Backward Compatibility) ===
+                # === GLOBAL FEATURES (with Quality Gate) ===
+                # visual_energy now has instability penalty applied
                 "visual_energy": round(visual_energy, 6),
+                "visual_energy_raw": round(raw_visual_energy, 6),  # Original for debugging
                 "brightness_variance": round(brightness_variance, 6),
                 "cut_density": round(cut_density, 2),
+
+                # === PRODUCTION QUALITY METRICS (Quality Gate) ===
+                "production_quality_score": quality_metrics["production_quality_score"],
+                "camera_stability_score": quality_metrics["camera_stability_score"],
+                "instability_score": quality_metrics["instability_score"],
+                "instability_penalty": quality_metrics["instability_penalty"],
+                "brightness_quality": quality_metrics["brightness_quality"],
+                "contrast_quality": quality_metrics["contrast_quality"],
+                "mean_brightness": quality_metrics["mean_brightness"],
+                "mean_contrast": quality_metrics["mean_contrast"],
 
                 # === METADATA ===
                 "duration_seconds": round(duration, 2),
@@ -800,7 +1130,7 @@ class AnalyticsEngine:
         }
 
         try:
-            # Video features (now with Hook Theory temporal features)
+            # Video features (now with Hook Theory temporal features + Quality Gate)
             if include_video:
                 video_features = self.video_extractor.extract_video_features(media_path)
                 result.update({
@@ -812,12 +1142,17 @@ class AnalyticsEngine:
                     "face_in_hook": video_features.get("face_in_hook", 0),
                     "weighted_cut_score": video_features.get("weighted_cut_score", 0.0),
 
-                    # Global features (backward compatibility)
+                    # Global features (with Quality Gate instability penalty)
                     "visual_energy": video_features.get("visual_energy", 0.0),
                     "brightness_variance": video_features.get("brightness_variance", 0.0),
                     "cut_density": video_features.get("cut_density", 0.0),
                     "duration_seconds": video_features.get("duration_seconds", 0.0),
-                    "frames_analyzed": video_features.get("frames_analyzed", 0)
+                    "frames_analyzed": video_features.get("frames_analyzed", 0),
+
+                    # Production Quality metrics (Quality Gate)
+                    "production_quality_score": video_features.get("production_quality_score", 0.0),
+                    "camera_stability_score": video_features.get("camera_stability_score", 0.0),
+                    "instability_score": video_features.get("instability_score", 0.0),
                 })
 
             # Audio features
@@ -851,9 +1186,10 @@ class AnalyticsEngine:
         Extract ALL features: Video DNA + Audio DNA + Text Intelligence.
 
         This is the comprehensive extraction method that combines:
-        - Visual features (energy, brightness, cuts)
+        - Visual features (energy, brightness, cuts) with Quality Gate
         - Audio features (tempo, onset strength)
         - Text features (transcription, OCR, semantic PCA)
+        - Production quality scoring (camera stability, brightness, contrast)
 
         Args:
             media_path: Path to video/audio file
@@ -870,17 +1206,21 @@ class AnalyticsEngine:
                 "source": "video.mp4",
                 "status": "success",
                 # === TEMPORAL FEATURES (Hook Theory) ===
-                "hook_energy": 0.065,      # Energy in first 3 seconds (CRITICAL)
+                "hook_energy": 0.065,      # Energy in first 3s (with instability penalty)
                 "retention_energy": 0.042,  # Energy after 3 seconds
                 "hook_cut_rate": 120.0,    # Cuts/min in hook (weighted 10x)
                 "retention_cut_rate": 8.0,  # Cuts/min after hook
                 "face_in_hook": 1,         # Face detected in first 3s
                 "weighted_cut_score": 12.0, # Total weighted cuts
-                # === GLOBAL FEATURES (Backward Compatibility) ===
-                "visual_energy": 0.045,
+                # === GLOBAL FEATURES (with Quality Gate) ===
+                "visual_energy": 0.045,     # Has instability penalty applied
                 "brightness_variance": 0.12,
                 "cut_density": 8.5,
                 "duration_seconds": 15.2,
+                # === PRODUCTION QUALITY (Quality Gate) ===
+                "production_quality_score": 0.85,  # 0-1, overall quality
+                "camera_stability_score": 0.92,    # 0-1, inverse of shake
+                "instability_score": 0.03,         # Camera shake detected
                 # Audio DNA
                 "tempo": 128.0,
                 "onset_strength": 0.85,
@@ -903,12 +1243,13 @@ class AnalyticsEngine:
         }
 
         try:
-            # Video DNA features (with Hook Theory temporal segmentation)
+            # Video DNA features (with Hook Theory + Quality Gate)
             if include_video:
                 video_features = self.video_extractor.extract_video_features(media_path)
                 result.update({
                     # === TEMPORAL FEATURES (Hook Theory) ===
                     # Critical for algorithm - first 3 seconds determine 90% of success
+                    # Note: These now have instability penalty applied
                     "hook_energy": video_features.get("hook_energy", 0.0),
                     "retention_energy": video_features.get("retention_energy", 0.0),
                     "hook_cut_rate": video_features.get("hook_cut_rate", 0.0),
@@ -916,12 +1257,21 @@ class AnalyticsEngine:
                     "face_in_hook": video_features.get("face_in_hook", 0),
                     "weighted_cut_score": video_features.get("weighted_cut_score", 0.0),
 
-                    # === GLOBAL FEATURES (Backward Compatibility) ===
+                    # === GLOBAL FEATURES (with Quality Gate) ===
+                    # visual_energy has instability penalty applied
                     "visual_energy": video_features.get("visual_energy", 0.0),
                     "brightness_variance": video_features.get("brightness_variance", 0.0),
                     "cut_density": video_features.get("cut_density", 0.0),
                     "duration_seconds": video_features.get("duration_seconds", 0.0),
-                    "frames_analyzed": video_features.get("frames_analyzed", 0)
+                    "frames_analyzed": video_features.get("frames_analyzed", 0),
+
+                    # === PRODUCTION QUALITY METRICS (Quality Gate) ===
+                    # Distinguishes "dynamic editing" from "bad filming"
+                    "production_quality_score": video_features.get("production_quality_score", 0.0),
+                    "camera_stability_score": video_features.get("camera_stability_score", 0.0),
+                    "instability_score": video_features.get("instability_score", 0.0),
+                    "brightness_quality": video_features.get("brightness_quality", 0.0),
+                    "contrast_quality": video_features.get("contrast_quality", 0.0),
                 })
 
             # Audio DNA features
