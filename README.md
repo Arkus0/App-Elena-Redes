@@ -1,4 +1,4 @@
-# BrandPulse AI 🚀
+# BrandPulse AI
 
 > **El co-piloto definitivo para generar contenido de ALTO ENGAGEMENT para negocios locales**
 
@@ -36,30 +36,30 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - Adaptación de trends globales a negocios locales.
 - Generación de ideas reactivas (POVs, newsjacking).
 
-## 🏢 Tipos de Negocio Soportados
+## Tipos de Negocio Soportados
 
-- 🏠 Inmobiliarias (Real Estate)
-- 💐 Floristerías
-- ☕ Cafeterías
-- 💇 Peluquerías
-- 🛍️ Tiendas Locales
-- 🍽️ Restaurantes
-- 💪 Gimnasios
-- 🏥 Clínicas
-- ✨ Y más...
+- Inmobiliarias (Real Estate)
+- Floristerías
+- Cafeterías
+- Peluquerías
+- Tiendas Locales
+- Restaurantes
+- Gimnasios
+- Clínicas
+- Y más...
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 ### Backend
 - **Python 3.11** (Requerido)
 - **FastAPI** - Framework web async
 - **SQLAlchemy 2.0** - ORM con soporte async
-- **Grok (xAI)** - Motor LLM principal (via `openai` client)
-- **XGBoost & Scikit-learn** - Modelos de ML clásico
-- **SHAP** - Interpretabilidad de modelos
-- **Faster-Whisper** - Speech-to-Text eficiente
-- **EasyOCR** - Reconocimiento óptico de caracteres
-- **OpenCV** - Procesamiento de video
+- **SQLite/PostgreSQL** - Base de datos
+- **XGBoost** - Modelo de predicción
+- **SHAP** - Explicabilidad de predicciones
+- **Anthropic Claude** - IA para análisis y generación
+- **Apify Client** - Scraping de redes sociales
+- **NumPy/Pandas** - Procesamiento de datos
 
 ### Frontend
 - **React 18** con TypeScript
@@ -68,7 +68,7 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - **Zustand** - State management
 - **React Query** - Data fetching
 
-## 🚀 Instalación
+## Instalación
 
 ### Prerrequisitos
 
@@ -156,7 +156,7 @@ npm run dev
 
 El frontend estará disponible en: http://localhost:5173
 
-## 📖 Guía de Uso
+## Guía de Uso
 
 ### 1. Onboarding y Competidores
 Configura tu negocio y añade competidores. El sistema iniciará el scraping y el **Pattern Extractor** analizará miles de posts para encontrar qué funciona en tu nicho.
@@ -196,7 +196,7 @@ El sistema utiliza modelos entrenados específicamente para redes sociales:
 
 Los modelos se re-entrenan automáticamente con nuevos datos de scraping para mantenerse actualizados con el algoritmo.
 
-## 📄 Licencia
+## Licencia
 
 MIT License - ver [LICENSE](LICENSE) para detalles.
 
