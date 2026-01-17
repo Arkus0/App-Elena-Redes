@@ -21,9 +21,9 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./brandpulse.db"
 
-    # AI - Anthropic Claude
-    ANTHROPIC_API_KEY: str = ""
-    CLAUDE_MODEL: str = "claude-sonnet-4-20250514"
+    # AI - Grok
+    GROK_API_KEY: str = ""
+    GROK_MODEL: str = "grok-4-1-fast-reasoning"
 
     # Apify - Primary data source
     APIFY_API_KEY: str = ""
