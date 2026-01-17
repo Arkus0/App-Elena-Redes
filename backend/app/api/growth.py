@@ -4,6 +4,8 @@ Growth Prediction API - Endpoints for RPI Score Prediction and Model Training
 Endpoints para el motor de predicción de crecimiento (GrowthPredictionEngine):
 - POST /predict: Predice RPI score con explicación SHAP
 - POST /predict/batch: Predicción en batch
+- POST /predict/calibrated: Predicción calibrada con salud de cuenta
+- POST /account-health: Evalúa la salud de una cuenta
 - POST /train: Entrena o re-entrena el modelo
 - GET /status: Estado del modelo
 - GET /features/importance: Importancia de features
@@ -26,9 +28,27 @@ from app.schemas.growth import (
     ConfidenceIntervalSchema,
     ModelConfigSchema,
 )
+from app.schemas.account_health import (
+    AccountHealthRequest,
+    AccountHealthResponse,
+    AccountHealthMetricsSchema,
+    CalibrationInfoSchema,
+    AnalysisInfoSchema,
+    UserFeedbackSchema,
+    CalibratedPredictionRequest,
+    CalibratedPredictionResponse,
+    OriginalPredictionSchema,
+    CalibratedPredictionSchema,
+    CalibrationAppliedSchema,
+    AccountHealthSummaryResponse,
+)
 from app.services.growth_prediction_engine import (
     get_growth_prediction_engine,
     GrowthPredictionEngine,
+)
+from app.services.account_health_scoring import (
+    get_account_health_scoring,
+    AccountHealthScoring,
 )
 
 logger = logging.getLogger(__name__)
@@ -390,4 +410,296 @@ async def get_feature_importance() -> FeatureImportanceResponse:
     return FeatureImportanceResponse(
         importance=importance,
         top_features=top_features
+    )
+
+
+# =============================================================================
+# ACCOUNT HEALTH ENDPOINTS
+# =============================================================================
+
+def _get_health_scoring() -> AccountHealthScoring:
+    """Obtiene la instancia del motor de scoring de salud de cuenta."""
+    return get_account_health_scoring()
+
+
+@router.post(
+    "/account-health",
+    response_model=AccountHealthResponse,
+    summary="Evaluate Account Health",
+    description="""
+    Evalúa la salud de una cuenta basándose en sus posts recientes.
+
+    **Lógica de Autoridad:**
+    - Analiza los últimos 10 posts de la cuenta del usuario
+    - Calcula la media de views y la desviación estándar
+    - Clasifica según ratio views/seguidores:
+      - >= 10%: HEALTHY (sin penalización)
+      - < 10%: LOW_AUTHORITY (factor 0.3x)
+      - < 2%: POSSIBLE_SHADOWBAN (factor 0.1x)
+
+    **Uso recomendado:**
+    Llamar este endpoint ANTES de generar predicciones para calibrar
+    expectativas del usuario sobre su alcance real.
+    """
+)
+async def evaluate_account_health(request: AccountHealthRequest) -> AccountHealthResponse:
+    """Evalúa la salud de una cuenta de usuario."""
+    try:
+        health_scoring = _get_health_scoring()
+
+        # Convertir posts a formato esperado
+        posts_data = [
+            {
+                "post_id": p.post_id,
+                "views_count": p.views_count,
+                "likes_count": p.likes_count,
+                "comments_count": p.comments_count,
+                "shares_count": p.shares_count,
+                "saves_count": p.saves_count,
+                "posted_at": p.posted_at,
+            }
+            for p in request.recent_posts
+        ]
+
+        # Evaluar salud
+        result = health_scoring.evaluate_account_health(
+            recent_posts=posts_data,
+            follower_count=request.follower_count,
+            posts_to_analyze=request.posts_to_analyze
+        )
+
+        # Convertir a response schema
+        return AccountHealthResponse(
+            health_status=result.health_status.value,
+            authority_level=result.authority_level.value,
+            metrics=AccountHealthMetricsSchema(
+                avg_views=round(result.avg_views, 2),
+                std_views=round(result.std_views, 2),
+                follower_count=result.follower_count,
+                views_to_followers_ratio=round(result.views_to_followers_ratio * 100, 2)
+            ),
+            calibration=CalibrationInfoSchema(
+                prediction_penalty_factor=result.prediction_penalty_factor,
+                is_penalized=result.prediction_penalty_factor < 1.0
+            ),
+            analysis=AnalysisInfoSchema(
+                posts_analyzed=result.posts_analyzed,
+                min_posts_required=result.min_posts_required,
+                has_sufficient_data=result.posts_analyzed >= result.min_posts_required
+            ),
+            user_feedback=UserFeedbackSchema(
+                warning_message=result.warning_message,
+                recommendation=result.recommendation
+            ),
+            analyzed_at=result.analyzed_at
+        )
+
+    except Exception as e:
+        logger.error(f"Account health evaluation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to evaluate account health: {str(e)}"
+        )
+
+
+@router.post(
+    "/predict/calibrated",
+    response_model=CalibratedPredictionResponse,
+    summary="Calibrated Prediction with Account Health",
+    description="""
+    Predice RPI score CALIBRADO según la salud de la cuenta del usuario.
+
+    **IMPORTANTE:** Este endpoint combina:
+    1. Predicción XGBoost estándar con explicación SHAP
+    2. Análisis de salud de cuenta (últimos 10 posts)
+    3. Calibración automática de la predicción
+
+    **Calibración aplicada:**
+    - LOW_AUTHORITY: Factor 0.3x en views predichas
+    - POSSIBLE_SHADOWBAN: Factor 0.1x + alerta crítica
+    - HEALTHY: Sin modificación (factor 1.0x)
+
+    **Mensaje al Usuario:**
+    Si detectamos Low Authority, el response incluye una advertencia:
+    "Tu cuenta tiene baja tracción actualmente. Este video está optimizado,
+    pero necesitarás subir 5-10 así de constantes para reactivar el algoritmo."
+    """
+)
+async def predict_calibrated(request: CalibratedPredictionRequest) -> CalibratedPredictionResponse:
+    """Predicción calibrada con información de salud de cuenta."""
+    engine = _get_engine()
+
+    if not engine.is_trained:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model is not trained. Please train the model first using POST /growth/train"
+        )
+
+    try:
+        # Preparar features del contenido
+        features = {
+            "posted_at": request.posted_at,
+            "post_type": request.post_type,
+
+            # Temporal Features (Hook Theory)
+            "hook_energy": request.hook_energy,
+            "retention_energy": request.retention_energy,
+            "hook_cut_rate": request.hook_cut_rate,
+            "retention_cut_rate": request.retention_cut_rate,
+            "face_in_hook": request.face_in_hook,
+
+            # Global Features
+            "tempo": request.tempo,
+            "brightness_variance": request.brightness_variance,
+
+            # Semantic PCA
+            "sem_pca_1": request.sem_pca_1,
+            "sem_pca_2": request.sem_pca_2,
+            "sem_pca_3": request.sem_pca_3,
+            "sem_pca_4": request.sem_pca_4,
+            "sem_pca_5": request.sem_pca_5,
+            "sem_pca_6": request.sem_pca_6,
+            "sem_pca_7": request.sem_pca_7,
+            "sem_pca_8": request.sem_pca_8,
+            "sem_pca_9": request.sem_pca_9,
+            "sem_pca_10": request.sem_pca_10,
+        }
+
+        # Preparar posts para análisis de salud
+        posts_data = [
+            {
+                "post_id": p.post_id,
+                "views_count": p.views_count,
+                "likes_count": p.likes_count,
+                "comments_count": p.comments_count,
+                "shares_count": p.shares_count,
+                "saves_count": p.saves_count,
+            }
+            for p in request.recent_posts
+        ]
+
+        # Obtener predicción calibrada
+        calibrated = engine.predict_with_account_health(
+            features=features,
+            recent_posts=posts_data,
+            follower_count=request.follower_count
+        )
+
+        # Obtener también los factores SHAP de la predicción base
+        base_result = engine.predict_with_explanation(features)
+
+        # Construir response de salud de cuenta
+        health = calibrated.account_health
+        account_health_response = AccountHealthResponse(
+            health_status=health.health_status.value,
+            authority_level=health.authority_level.value,
+            metrics=AccountHealthMetricsSchema(
+                avg_views=round(health.avg_views, 2),
+                std_views=round(health.std_views, 2),
+                follower_count=health.follower_count,
+                views_to_followers_ratio=round(health.views_to_followers_ratio * 100, 2)
+            ),
+            calibration=CalibrationInfoSchema(
+                prediction_penalty_factor=health.prediction_penalty_factor,
+                is_penalized=health.prediction_penalty_factor < 1.0
+            ),
+            analysis=AnalysisInfoSchema(
+                posts_analyzed=health.posts_analyzed,
+                min_posts_required=health.min_posts_required,
+                has_sufficient_data=health.posts_analyzed >= health.min_posts_required
+            ),
+            user_feedback=UserFeedbackSchema(
+                warning_message=health.warning_message,
+                recommendation=health.recommendation
+            ),
+            analyzed_at=health.analyzed_at
+        )
+
+        return CalibratedPredictionResponse(
+            original_prediction=OriginalPredictionSchema(
+                rpi_score=round(calibrated.original_rpi_score, 4),
+                rpi_raw=round(calibrated.original_rpi_raw, 4)
+            ),
+            calibrated_prediction=CalibratedPredictionSchema(
+                rpi_score=round(calibrated.calibrated_rpi_score, 4),
+                rpi_raw=round(calibrated.calibrated_rpi_raw, 4)
+            ),
+            calibration_applied=CalibrationAppliedSchema(
+                penalty_factor=calibrated.penalty_factor,
+                was_penalized=calibrated.penalty_factor < 1.0
+            ),
+            account_health=account_health_response,
+            combined_message=calibrated.combined_message,
+            explanation=base_result.explanation_text,
+            top_positive_factors=[
+                {
+                    "feature": c.feature_name,
+                    "contribution": c.contribution,
+                    "value": c.feature_value,
+                    "direction": c.direction
+                }
+                for c in base_result.top_positive_contributions
+            ],
+            top_negative_factors=[
+                {
+                    "feature": c.feature_name,
+                    "contribution": c.contribution,
+                    "value": c.feature_value,
+                    "direction": c.direction
+                }
+                for c in base_result.top_negative_contributions
+            ]
+        )
+
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Calibrated prediction error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Calibrated prediction failed: {str(e)}"
+        )
+
+
+@router.get(
+    "/account-health/summary/{health_status}",
+    response_model=AccountHealthSummaryResponse,
+    summary="Get Health Status Summary",
+    description="Obtiene un resumen descriptivo de un estado de salud específico."
+)
+async def get_health_summary(health_status: str) -> AccountHealthSummaryResponse:
+    """Obtiene descripción de un estado de salud."""
+    from app.services.account_health_scoring import AccountHealthStatus, AuthorityLevel
+
+    status_map = {
+        "healthy": (AccountHealthStatus.HEALTHY, AuthorityLevel.NORMAL, 1.0),
+        "low_authority": (AccountHealthStatus.LOW_AUTHORITY, AuthorityLevel.LOW, 0.3),
+        "possible_shadowban": (AccountHealthStatus.POSSIBLE_SHADOWBAN, AuthorityLevel.CRITICAL, 0.1),
+        "insufficient_data": (AccountHealthStatus.INSUFFICIENT_DATA, AuthorityLevel.NORMAL, 1.0),
+    }
+
+    if health_status.lower() not in status_map:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid health status. Valid values: {list(status_map.keys())}"
+        )
+
+    health_enum, authority, penalty = status_map[health_status.lower()]
+
+    summaries = {
+        "healthy": "La cuenta tiene buena tracción. Las predicciones reflejan el potencial real del contenido sin ajustes.",
+        "low_authority": "La cuenta tiene baja tracción. Las predicciones se ajustan con factor 0.3x. Se recomienda publicar 5-10 videos consistentes para reactivar el algoritmo.",
+        "possible_shadowban": "ALERTA: La cuenta muestra señales de posible shadowban. Views muy por debajo de lo esperado. Factor de ajuste 0.1x aplicado.",
+        "insufficient_data": "No hay suficientes datos para evaluar la cuenta. Se necesitan al menos 5 posts recientes con métricas de views.",
+    }
+
+    return AccountHealthSummaryResponse(
+        summary=summaries[health_status.lower()],
+        health_status=health_enum.value,
+        authority_level=authority.value,
+        penalty_factor=penalty,
+        needs_attention=health_status.lower() in ["low_authority", "possible_shadowban"]
     )

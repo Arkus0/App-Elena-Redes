@@ -21,7 +21,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import joblib
 import numpy as np
@@ -30,6 +30,9 @@ import xgboost as xgb
 from sklearn.model_selection import KFold, cross_val_score, train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+if TYPE_CHECKING:
+    from app.services.account_health_scoring import AccountHealthResult, CalibratedPrediction
 
 logger = logging.getLogger(__name__)
 
@@ -993,6 +996,100 @@ class GrowthPredictionEngine:
             data.append(record)
 
         return data
+
+    def predict_with_account_health(
+        self,
+        features: Dict[str, Any],
+        recent_posts: List[Dict[str, Any]],
+        follower_count: int
+    ) -> "CalibratedPrediction":
+        """
+        Realiza una predicción calibrada según la salud de la cuenta del usuario.
+
+        Este método combina:
+        1. La predicción XGBoost estándar con explicación SHAP
+        2. El análisis de salud de la cuenta (últimos 10 posts)
+        3. Calibración de la predicción según nivel de autoridad
+
+        LÓGICA DE CALIBRACIÓN:
+        - Si media views < 10% seguidores -> Low_Authority -> factor 0.3x
+        - Si media views < 2% seguidores -> Possible_Shadowban -> factor 0.1x
+        - Incluye mensaje de advertencia para el usuario
+
+        Args:
+            features: Features del contenido a predecir (igual que predict_with_explanation)
+            recent_posts: Lista de los últimos 10 posts del usuario con views_count
+            follower_count: Número de seguidores de la cuenta
+
+        Returns:
+            CalibratedPrediction con predicción ajustada e información de salud.
+
+        Raises:
+            RuntimeError: Si el modelo no está entrenado.
+        """
+        # Import aquí para evitar circular imports
+        from app.services.account_health_scoring import (
+            get_account_health_scoring,
+            CalibratedPrediction
+        )
+
+        # 1. Obtener predicción base
+        base_result = self.predict_with_explanation(features)
+
+        # 2. Evaluar salud de la cuenta
+        health_scoring = get_account_health_scoring()
+        account_health = health_scoring.evaluate_account_health(
+            recent_posts=recent_posts,
+            follower_count=follower_count,
+            posts_to_analyze=10
+        )
+
+        # 3. Calibrar predicción según salud
+        calibrated = health_scoring.calibrate_prediction(
+            original_score=base_result.predicted_rpi_score,
+            original_raw=base_result.predicted_rpi_raw,
+            account_health=account_health,
+            prediction_explanation=base_result.explanation_text
+        )
+
+        logger.info(
+            f"Calibrated prediction: original_raw={base_result.predicted_rpi_raw:.2f}, "
+            f"calibrated_raw={calibrated.calibrated_rpi_raw:.2f}, "
+            f"penalty_factor={account_health.prediction_penalty_factor}, "
+            f"health_status={account_health.health_status.value}"
+        )
+
+        return calibrated
+
+    def get_calibration_factor(
+        self,
+        recent_posts: List[Dict[str, Any]],
+        follower_count: int
+    ) -> Tuple[float, str]:
+        """
+        Obtiene el factor de calibración sin hacer predicción.
+
+        Útil para pre-evaluar la salud de una cuenta antes de generar contenido.
+
+        Args:
+            recent_posts: Últimos posts del usuario
+            follower_count: Número de seguidores
+
+        Returns:
+            Tuple de (factor de penalización, mensaje de estado)
+        """
+        from app.services.account_health_scoring import get_account_health_scoring
+
+        health_scoring = get_account_health_scoring()
+        account_health = health_scoring.evaluate_account_health(
+            recent_posts=recent_posts,
+            follower_count=follower_count
+        )
+
+        return (
+            account_health.prediction_penalty_factor,
+            account_health.health_status.value
+        )
 
 
 # Singleton instance para uso en la aplicación
