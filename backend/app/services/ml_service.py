@@ -50,36 +50,49 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import semantic embedding extractor
+# Import semantic embedding extractor (now with configurable precision)
 try:
     from ml.features_embeddings import (
         get_embedding_extractor,
         get_embedding_features,
-        EMBEDDING_FEATURE_COLUMNS,
-        PCA_COMPONENTS
+        get_embedding_feature_names,
+        EMBEDDING_DIM,
+        PRECISION_TO_DIMS,
+        DEFAULT_PRECISION,
     )
     EMBEDDINGS_AVAILABLE = True
+    # Default: full 384 dims (safe for SMB volumes)
+    EMBEDDING_FEATURE_COLUMNS = get_embedding_feature_names(EMBEDDING_DIM)
 except ImportError:
     EMBEDDINGS_AVAILABLE = False
-    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(30)]
-    PCA_COMPONENTS = 30
+    EMBEDDING_DIM = 384
+    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(384)]
+    PRECISION_TO_DIMS = {"low": 128, "medium": 256, "high": 384, "max": 384}
+    DEFAULT_PRECISION = "max"
 
-# Import multimodal fusion module
+# Import multimodal fusion module (now with configurable precision)
 try:
     from backend.ml.multimodal_fusion import (
         get_multimodal_extractor,
-        TRANSCRIPT_FEATURE_COLUMNS,
-        OCR_FEATURE_COLUMNS,
-        INTERACTION_FEATURE_COLUMNS,
-        MULTIMODAL_FEATURE_COLUMNS,
-        TRANSCRIPT_PCA_DIM,
-        OCR_PCA_DIM,
+        get_transcript_feature_names,
+        get_ocr_feature_names,
+        get_interaction_feature_names,
+        get_multimodal_feature_names,
+        TRANSCRIPT_DEFAULT_DIM,
+        OCR_DEFAULT_DIM,
     )
     MULTIMODAL_AVAILABLE = True
+    # Default: full dims
+    TRANSCRIPT_FEATURE_COLUMNS = get_transcript_feature_names(TRANSCRIPT_DEFAULT_DIM)
+    OCR_FEATURE_COLUMNS = get_ocr_feature_names(OCR_DEFAULT_DIM)
+    INTERACTION_FEATURE_COLUMNS = get_interaction_feature_names()
+    MULTIMODAL_FEATURE_COLUMNS = get_multimodal_feature_names()
 except ImportError:
     MULTIMODAL_AVAILABLE = False
-    TRANSCRIPT_FEATURE_COLUMNS = [f"transcript_emb_{i+1}" for i in range(20)]
-    OCR_FEATURE_COLUMNS = [f"ocr_emb_{i+1}" for i in range(20)]
+    TRANSCRIPT_DEFAULT_DIM = 384
+    OCR_DEFAULT_DIM = 384
+    TRANSCRIPT_FEATURE_COLUMNS = [f"transcript_emb_{i+1}" for i in range(384)]
+    OCR_FEATURE_COLUMNS = [f"ocr_emb_{i+1}" for i in range(384)]
     INTERACTION_FEATURE_COLUMNS = [
         "interaction_hook_x_sentiment",
         "interaction_hook_x_is_reel",
@@ -89,10 +102,10 @@ except ImportError:
         "interaction_transcript_richness",
         "interaction_ocr_richness",
         "interaction_multimodal_text_density",
+        "interaction_semantic_hook_x_vader",
+        "interaction_semantic_hook_x_cta_strong",
     ]
     MULTIMODAL_FEATURE_COLUMNS = TRANSCRIPT_FEATURE_COLUMNS + OCR_FEATURE_COLUMNS + INTERACTION_FEATURE_COLUMNS
-    TRANSCRIPT_PCA_DIM = 20
-    OCR_PCA_DIM = 20
 
 # Import semantic hook detection module
 try:
