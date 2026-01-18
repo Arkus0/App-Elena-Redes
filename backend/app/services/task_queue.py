@@ -57,6 +57,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 import threading
 
+import aiosqlite
+
 logger = logging.getLogger(__name__)
 
 
@@ -193,13 +195,18 @@ class TaskPersistence:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
-        self._lock = threading.Lock()
+        self._conn: Optional[aiosqlite.Connection] = None
+        self._lock = asyncio.Lock()
 
-    def initialize(self):
+    async def initialize(self):
         """Create database and tables if they don't exist."""
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._conn.execute("""
+        self._conn = await aiosqlite.connect(self.db_path)
+
+        # Enable WAL mode for better concurrency
+        await self._conn.execute("PRAGMA journal_mode=WAL;")
+        await self._conn.execute("PRAGMA synchronous=NORMAL;")  # Safe enough for WAL
+
+        await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
                 video_path TEXT NOT NULL,
@@ -216,16 +223,16 @@ class TaskPersistence:
                 caption TEXT DEFAULT ''
             )
         """)
-        self._conn.commit()
+        await self._conn.commit()
         logger.info(f"Task persistence initialized: {self.db_path}")
 
-    def save_task(self, task: VideoTask):
+    async def save_task(self, task: VideoTask):
         """Save or update a task in the database."""
         if not self._conn:
             return
 
-        with self._lock:
-            self._conn.execute("""
+        async with self._lock:
+            await self._conn.execute("""
                 INSERT OR REPLACE INTO tasks
                 (task_id, video_path, task_type, status, progress, result,
                  error, metadata, created_at, started_at, completed_at,
@@ -246,20 +253,20 @@ class TaskPersistence:
                 task.retry_count,
                 task.caption,
             ))
-            self._conn.commit()
+            await self._conn.commit()
 
-    def load_pending_tasks(self) -> List[VideoTask]:
+    async def load_pending_tasks(self) -> List[VideoTask]:
         """Load all pending and processing tasks (for crash recovery)."""
         if not self._conn:
             return []
 
-        with self._lock:
-            cursor = self._conn.execute("""
+        async with self._lock:
+            async with self._conn.execute("""
                 SELECT * FROM tasks
                 WHERE status IN ('pending', 'processing')
                 ORDER BY created_at ASC
-            """)
-            rows = cursor.fetchall()
+            """) as cursor:
+                rows = await cursor.fetchall()
 
         tasks = []
         for row in rows:
@@ -282,17 +289,17 @@ class TaskPersistence:
 
         return tasks
 
-    def get_task(self, task_id: str) -> Optional[VideoTask]:
+    async def get_task(self, task_id: str) -> Optional[VideoTask]:
         """Get a task by ID."""
         if not self._conn:
             return None
 
-        with self._lock:
-            cursor = self._conn.execute(
+        async with self._lock:
+            async with self._conn.execute(
                 "SELECT * FROM tasks WHERE task_id = ?",
                 (task_id,)
-            )
-            row = cursor.fetchone()
+            ) as cursor:
+                row = await cursor.fetchone()
 
         if not row:
             return None
@@ -313,24 +320,24 @@ class TaskPersistence:
             caption=row[12] if len(row) > 12 else "",
         )
 
-    def cleanup_old_tasks(self, hours: int):
+    async def cleanup_old_tasks(self, hours: int):
         """Remove completed/failed tasks older than N hours."""
         if not self._conn:
             return
 
         cutoff = time.time() - (hours * 3600)
-        with self._lock:
-            self._conn.execute("""
+        async with self._lock:
+            await self._conn.execute("""
                 DELETE FROM tasks
                 WHERE status IN ('completed', 'failed', 'cancelled')
                 AND completed_at < ?
             """, (cutoff,))
-            self._conn.commit()
+            await self._conn.commit()
 
-    def close(self):
+    async def close(self):
         """Close database connection."""
         if self._conn:
-            self._conn.close()
+            await self._conn.close()
             self._conn = None
 
 
@@ -425,10 +432,10 @@ class VideoTaskQueue:
 
         # Initialize persistence if enabled
         if self._persistence:
-            self._persistence.initialize()
+            await self._persistence.initialize()
 
             # Recover pending tasks from previous session
-            pending_tasks = self._persistence.load_pending_tasks()
+            pending_tasks = await self._persistence.load_pending_tasks()
             for task in pending_tasks:
                 if task.retry_count <= self.config.max_retries:
                     logger.info(f"Recovering task {task.task_id} (retry {task.retry_count})")
@@ -438,7 +445,7 @@ class VideoTaskQueue:
                     logger.warning(f"Dropping task {task.task_id} (exceeded max retries)")
                     task.status = TaskStatus.FAILED
                     task.error = "Exceeded maximum retry attempts"
-                    self._persistence.save_task(task)
+                    await self._persistence.save_task(task)
 
         self._running = True
         self._worker_task = asyncio.create_task(self._worker_loop())
@@ -474,7 +481,7 @@ class VideoTaskQueue:
                 pass
 
         if self._persistence:
-            self._persistence.close()
+            await self._persistence.close()
 
         logger.info("Video task queue stopped")
 
@@ -526,7 +533,7 @@ class VideoTaskQueue:
 
         # Persist if enabled
         if self._persistence:
-            self._persistence.save_task(task)
+            await self._persistence.save_task(task)
 
         logger.info(f"Task submitted: {task.task_id} ({task_type.value})")
         return task.task_id
@@ -549,7 +556,7 @@ class VideoTaskQueue:
 
         # Check persistence if not in memory
         if self._persistence:
-            task = self._persistence.get_task(task_id)
+            task = await self._persistence.get_task(task_id)
             if task:
                 return task.to_dict()
 
@@ -587,7 +594,7 @@ class VideoTaskQueue:
                 task.completed_at = time.time()
 
                 if self._persistence:
-                    self._persistence.save_task(task)
+                    await self._persistence.save_task(task)
 
                 logger.info(f"Task cancelled: {task_id}")
                 return True
@@ -659,7 +666,7 @@ class VideoTaskQueue:
         task.progress = 0
 
         if self._persistence:
-            self._persistence.save_task(task)
+            await self._persistence.save_task(task)
 
         try:
             # Run processing in executor to avoid blocking
@@ -716,7 +723,7 @@ class VideoTaskQueue:
         finally:
             # Always persist final state
             if self._persistence:
-                self._persistence.save_task(task)
+                await self._persistence.save_task(task)
 
             # Update in-memory registry
             async with self._lock:
