@@ -27,6 +27,7 @@ import os
 import re
 import logging
 import hashlib
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -43,6 +44,25 @@ from sklearn.metrics import mean_squared_error, accuracy_score, r2_score, mean_a
 import xgboost as xgb
 import shap
 import joblib
+
+# Add project root to path for ml module imports
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Import semantic embedding extractor
+try:
+    from ml.features_embeddings import (
+        get_embedding_extractor,
+        get_embedding_features,
+        EMBEDDING_FEATURE_COLUMNS,
+        PCA_COMPONENTS
+    )
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    EMBEDDINGS_AVAILABLE = False
+    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(30)]
+    PCA_COMPONENTS = 30
 
 # VADER Sentiment Analysis
 try:
@@ -375,6 +395,26 @@ class FeatureExtractor:
         # === Business Type (will be encoded) ===
         features["business_type"] = content.get("business_type", "otros")
 
+        # ==========================================================================
+        # SEMANTIC EMBEDDINGS (Modern NLP features replacing manual heuristics)
+        # ==========================================================================
+        # Uses sentence-transformers/all-MiniLM-L6-v2 for 384-dim embeddings
+        # Reduced to 30 dimensions via PCA for XGBoost compatibility
+        # These features capture semantic meaning that heuristics cannot
+
+        if EMBEDDINGS_AVAILABLE:
+            try:
+                embedding_features = get_embedding_features(caption)
+                features.update(embedding_features)
+            except Exception as e:
+                logger.warning(f"Embedding extraction failed: {e}. Using zeros.")
+                for i in range(PCA_COMPONENTS):
+                    features[f"embedding_{i+1}"] = 0.0
+        else:
+            # Fallback: zeros when embeddings not available
+            for i in range(PCA_COMPONENTS):
+                features[f"embedding_{i+1}"] = 0.0
+
         return features
 
     @classmethod
@@ -390,7 +430,8 @@ class MLPredictor:
     Provides engagement scoring, format recommendation, and trigger suggestions
     """
 
-    FEATURE_COLUMNS = [
+    # Manual heuristic features (kept as backup, but embeddings are prioritized)
+    MANUAL_FEATURE_COLUMNS = [
         "caption_length", "caption_words", "caption_lines", "avg_word_length",
         "emoji_count", "emoji_density", "hashtag_count", "hashtag_density",
         "mention_count",
@@ -407,6 +448,9 @@ class MLPredictor:
         "hour_of_day", "day_of_week", "is_weekend", "is_prime_time",
         "business_type_encoded",
     ]
+
+    # Combined feature columns: embeddings (prioritized) + manual heuristics (backup)
+    FEATURE_COLUMNS = EMBEDDING_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
 
     FORMAT_CLASSES = ["reel", "carousel", "static_image", "tiktok_video"]
 
