@@ -10,6 +10,11 @@ from app.services.ml_service import (
     FeatureExtractor,
     get_ml_predictor,
 )
+from app.services.prediction_engine import (
+    PredictionEngine,
+    ViralClusterer,
+    get_prediction_engine
+)
 
 __all__ = [
     "ApifyService",
@@ -19,4 +24,7 @@ __all__ = [
     "MLPredictor",
     "FeatureExtractor",
     "get_ml_predictor",
+    "PredictionEngine",
+    "ViralClusterer",
+    "get_prediction_engine",
 ]
