@@ -8,6 +8,11 @@ import type {
   ContentCalendar,
   ContentPiece,
   EngagementPrediction,
+  EngagementWeights,
+  KPIWeightsConfig,
+  KPITemplate,
+  KPIWeightsPreview,
+  MultiOutputPredictionResponse,
   OnboardingResponse,
   ScrapedPost,
   User,
@@ -432,6 +437,179 @@ export const viralApi = {
       best_posting_times: string[]
       ready_to_film: boolean
     }>(`/viral/${businessId}/quick-idea`, null, { params: { trend_type: trendType } })
+    return data
+  },
+}
+
+// ============ KPI WEIGHTS (Multi-Objective) ============
+
+export const kpiApi = {
+  getWeights: async (businessId: number, niche?: string) => {
+    const { data } = await api.get<KPIWeightsConfig>('/kpi/weights', {
+      params: { business_id: businessId, niche },
+    })
+    return data
+  },
+
+  getAllWeights: async () => {
+    const { data } = await api.get<KPIWeightsConfig[]>('/kpi/weights/all')
+    return data
+  },
+
+  saveWeights: async (
+    businessId: number,
+    weights: EngagementWeights,
+    options?: {
+      niche?: string
+      template_name?: string
+      description?: string
+    }
+  ) => {
+    const { data } = await api.post<KPIWeightsConfig>('/kpi/weights', {
+      business_id: businessId,
+      weights,
+      ...options,
+    })
+    return data
+  },
+
+  createFromTemplate: async (
+    businessId: number,
+    templateName: string,
+    niche?: string,
+    description?: string
+  ) => {
+    const { data } = await api.post<KPIWeightsConfig>(
+      '/kpi/weights/from-template',
+      null,
+      {
+        params: {
+          business_id: businessId,
+          template_name: templateName,
+          niche,
+          description,
+        },
+      }
+    )
+    return data
+  },
+
+  deleteWeights: async (weightsId: number) => {
+    await api.delete(`/kpi/weights/${weightsId}`)
+  },
+
+  getTemplates: async () => {
+    const { data } = await api.get<{ templates: KPITemplate[] }>('/kpi/templates')
+    return data.templates
+  },
+
+  previewWeights: async (
+    weights: EngagementWeights,
+    sampleMetrics?: {
+      likes?: number
+      comments?: number
+      shares?: number
+      saves?: number
+      views?: number
+    }
+  ) => {
+    const { data } = await api.post<KPIWeightsPreview>(
+      '/kpi/preview',
+      null,
+      {
+        params: {
+          ...weights,
+          sample_likes: sampleMetrics?.likes || 100,
+          sample_comments: sampleMetrics?.comments || 10,
+          sample_shares: sampleMetrics?.shares || 5,
+          sample_saves: sampleMetrics?.saves || 15,
+          sample_views: sampleMetrics?.views || 1000,
+        },
+      }
+    )
+    return data
+  },
+}
+
+// ============ MULTI-OUTPUT PREDICTIONS ============
+
+export interface MultiOutputPredictionRequest {
+  caption?: string
+  hashtags?: string[]
+  content_format?: string
+  video_duration_seconds?: number
+  hook_energy?: number
+  retention_energy?: number
+  face_in_hook?: boolean
+  tempo?: number
+  posted_at?: string
+  business_id?: number
+  business_type?: string
+  custom_weights?: EngagementWeights
+  author_avg_likes?: number
+  author_avg_comments?: number
+  author_avg_shares?: number
+  author_avg_saves?: number
+  author_avg_views?: number
+}
+
+export const multiOutputApi = {
+  predict: async (request: MultiOutputPredictionRequest) => {
+    const { data } = await api.post<MultiOutputPredictionResponse>(
+      '/multi-output/predict',
+      request
+    )
+    return data
+  },
+
+  predictBatch: async (requests: MultiOutputPredictionRequest[]) => {
+    const { data } = await api.post<MultiOutputPredictionResponse[]>(
+      '/multi-output/predict/batch',
+      requests
+    )
+    return data
+  },
+
+  getModelStatus: async (niche = 'general') => {
+    const { data } = await api.get<{
+      is_trained: boolean
+      niche: string
+      model_version: string
+      feature_count: number
+      targets: string[]
+      is_multi_output: boolean
+      training_metrics: Record<string, any> | null
+    }>('/multi-output/status', { params: { niche } })
+    return data
+  },
+
+  trainModel: async (niche = 'general', useSynthetic = true, nSamples = 1000) => {
+    const { data } = await api.post<{
+      success: boolean
+      message: string
+      metrics: Record<string, any>
+    }>('/multi-output/train', null, {
+      params: { niche, use_synthetic: useSynthetic, n_samples: nSamples },
+    })
+    return data
+  },
+
+  compareWeights: async (
+    request: MultiOutputPredictionRequest,
+    weightsConfigs: EngagementWeights[]
+  ) => {
+    const { data } = await api.post<{
+      comparisons: Array<{
+        weights: Record<string, number>
+        weighted_rpi: number
+        predicted_metrics: Record<string, number>
+      }>
+      best_config: any
+      rpi_range: { min: number; max: number }
+    }>('/multi-output/compare-weights', {
+      ...request,
+      weights_configs: weightsConfigs,
+    })
     return data
   },
 }
