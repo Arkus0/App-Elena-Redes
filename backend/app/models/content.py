@@ -48,8 +48,9 @@ class GeneratedContent(Base):
     __tablename__ = "generated_content"
 
     id = Column(Integer, primary_key=True, index=True)
-    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False)
-    calendar_id = Column(Integer, ForeignKey("content_calendars.id"), nullable=True)
+    # Bolt Optimization: Added index=True to business_id and calendar_id for faster filtering
+    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False, index=True)
+    calendar_id = Column(Integer, ForeignKey("content_calendars.id"), nullable=True, index=True)
 
     # Content identification
     title = Column(String(255), nullable=False)  # Internal reference
@@ -159,7 +160,8 @@ class ContentCalendar(Base):
     __tablename__ = "content_calendars"
 
     id = Column(Integer, primary_key=True, index=True)
-    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False)
+    # Bolt Optimization: Added index=True to business_id for faster filtering by business
+    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False, index=True)
 
     # Calendar info
     name = Column(String(255), nullable=False)  # "Enero 2026 - Floristería Rosa"
