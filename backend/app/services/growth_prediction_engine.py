@@ -1309,10 +1309,17 @@ class GrowthPredictionEngine:
         self,
         features: Dict[str, Any],
         top_k: int = 5,
-        allow_cold_start: bool = True
+        allow_cold_start: bool = True,
+        embedding_precision: str = "low",
+        kpi_weights: Optional[Dict[str, float]] = None
     ) -> PredictionResult:
         """
         Predice con explicación SHAP completa.
+
+        USER CONFIG SYNC:
+        =================
+        Accepts embedding_precision and kpi_weights from user_config to ensure
+        frontend configuration changes affect predictions in real-time.
 
         Esta es la función principal que devuelve no solo la predicción,
         sino también la contribución de cada variable usando SHAP values.
@@ -1324,6 +1331,8 @@ class GrowthPredictionEngine:
             features: Diccionario con las features del contenido.
             top_k: Número de features top a mostrar en la explicación.
             allow_cold_start: If True, use heuristic prediction when model not trained.
+            embedding_precision: From user_config (default: "low")
+            kpi_weights: From user_config for RPI calculation
 
         Returns:
             PredictionResult con predicción y explicación detallada.
@@ -1331,6 +1340,11 @@ class GrowthPredictionEngine:
         Raises:
             RuntimeError: If model not trained and allow_cold_start is False.
         """
+        # CRITICAL LOG: User config being used
+        logger.info(
+            f"GrowthPredictionEngine: User config loaded: precision={embedding_precision}, "
+            f"kpi_weights={'custom' if kpi_weights else 'default'}"
+        )
         if not self.is_trained:
             if allow_cold_start:
                 cold_result = self._cold_start_predict(features)

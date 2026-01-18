@@ -2,7 +2,10 @@
 BrandPulse AI - API Routes
 """
 from fastapi import APIRouter
-from app.api import auth, business, competitors, content, viral, ml, growth, trends, abtest, kpi, multi_output, embeddings, extension, light_mode
+from app.api import (
+    auth, business, competitors, content, viral, ml, growth, trends,
+    abtest, kpi, multi_output, embeddings, extension, light_mode, user_config
+)
 
 api_router = APIRouter()
 
@@ -21,3 +24,6 @@ api_router.include_router(multi_output.router, prefix="/multi-output", tags=["Mu
 api_router.include_router(embeddings.router, tags=["Embedding Configuration"])
 api_router.include_router(extension.router, prefix="/extension", tags=["Extension Sync"])
 api_router.include_router(light_mode.router, prefix="/light-mode", tags=["Light Mode Configuration"])
+
+# Unified User Config - sincroniza TODAS las configs frontend-backend
+api_router.include_router(user_config.router, prefix="/user", tags=["User Configuration"])

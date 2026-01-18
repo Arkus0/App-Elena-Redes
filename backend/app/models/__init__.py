@@ -9,6 +9,13 @@ from app.models.content import GeneratedContent, ContentCalendar
 from app.models.user import User
 from app.models.abtest import ABTestLog, PredictionLog
 from app.models.kpi_weights import UserKPIWeights, MultiOutputModelMetrics
+from app.models.user_config import (
+    UserConfig,
+    EmbeddingPrecision,
+    MultimodalMode,
+    PRECISION_TO_DIMS,
+    DEFAULT_KPI_WEIGHTS,
+)
 
 __all__ = [
     "Business",
@@ -22,4 +29,10 @@ __all__ = [
     "PredictionLog",
     "UserKPIWeights",
     "MultiOutputModelMetrics",
+    # Unified User Config
+    "UserConfig",
+    "EmbeddingPrecision",
+    "MultimodalMode",
+    "PRECISION_TO_DIMS",
+    "DEFAULT_KPI_WEIGHTS",
 ]

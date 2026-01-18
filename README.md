@@ -625,6 +625,282 @@ import { KPIConfiguration } from './components/KPIConfiguration'
 />
 ```
 
+### 🔧 Configuración Unificada de Usuario (Nuevo)
+
+Sistema centralizado para gestionar TODAS las configuraciones de usuario que afectan los pipelines ML (ingest/train/inference). Elimina hardcodes y garantiza sincronización real-time entre frontend y backend.
+
+#### Arquitectura de Sincronización
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              UNIFIED USER CONFIG - REAL-TIME SYNC                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐                      ┌─────────────────────────────────┐  │
+│  │   Frontend   │  POST /user/config   │        UserConfigService        │  │
+│  │   Dashboard  │ ────────────────────►│   (Central Source of Truth)     │  │
+│  │              │                      │                                 │  │
+│  │ - Embedding  │◄─────────────────────│   ┌─────────────────────────┐  │  │
+│  │ - KPI Weights│  GET /user/config    │   │    UserConfig Model     │  │  │
+│  │ - Multimodal │                      │   │   (DB Persistence)      │  │  │
+│  │ - Own Profile│                      │   └─────────────────────────┘  │  │
+│  └──────────────┘                      │              │                  │  │
+│                                        └──────────────┼──────────────────┘  │
+│                                                       │                      │
+│                                                       ▼                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │                    ALL BACKEND PIPELINES USE CONFIG                     │ │
+│  ├────────────────────────────────────────────────────────────────────────┤ │
+│  │  ingest.py ──────► own_username (feedback detection)                    │ │
+│  │                    multimodal_mode (light/full processing)              │ │
+│  │                                                                          │ │
+│  │  ml_service.py ──► embedding_precision (64-384 dims)                    │ │
+│  │                    kpi_weights (RPI calculation)                        │ │
+│  │                                                                          │ │
+│  │  growth_engine ──► embedding_precision + kpi_weights                    │ │
+│  │                                                                          │ │
+│  │  train.py ───────► embedding_precision for training                     │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  Critical Logging: "User config loaded: precision={X}, multimodal={Y},      │
+│                     own=@{Z}"                                                │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Campos de Configuración
+
+| Campo | Tipo | Descripción | Afecta a |
+|-------|------|-------------|----------|
+| `embedding_precision` | Enum | ultra_low/low/medium/high/max | ML Service, Train, Growth Engine |
+| `multimodal_mode` | Enum | light (~5s) / full (~20s) | Ingest Pipeline |
+| `kpi_weights` | Object | likes, comments, shares, saves, views (0-20) | RPI Calculation |
+| `own_instagram_username` | String | Tu username (sin @) | Human-in-the-Loop Feedback |
+| `own_tiktok_username` | String | Tu username TikTok | Human-in-the-Loop Feedback |
+| `discovery` | Object | hashtags, location, niche keywords | Discovery Script |
+| `light_mode_config` | Object | whisper_model, ocr_max_frames | Multimodal Processing |
+
+#### API Endpoints
+
+```bash
+# Obtener config actual (crea con defaults si no existe)
+GET /api/v1/user/config?business_id=1
+
+# Respuesta:
+{
+  "id": 1,
+  "user_id": 1,
+  "business_id": 1,
+  "embedding_precision": "low",
+  "embedding_dims": 128,
+  "multimodal_mode": "light",
+  "kpi_weights": {
+    "likes": 1.0,
+    "comments": 2.0,
+    "shares": 10.0,
+    "saves": 5.0,
+    "views": 3.0
+  },
+  "own_instagram_username": "mi_negocio",
+  "discovery": {
+    "hashtags": ["inmobiliariaalmeria"],
+    "location_keywords": ["almeria"]
+  },
+  "is_active": true
+}
+
+# Guardar/actualizar config
+POST /api/v1/user/config?business_id=1
+{
+  "embedding_precision": "medium",
+  "kpi_weights": {
+    "likes": 1.0,
+    "comments": 3.0,
+    "shares": 10.0,
+    "saves": 12.0,
+    "views": 2.0
+  },
+  "own_instagram_username": "mi_inmobiliaria"
+}
+
+# Obtener opciones disponibles (para dropdowns)
+GET /api/v1/user/config/info
+
+# Respuesta:
+{
+  "precision_options": [
+    {"value": "ultra_low", "label": "Ultra Baja (64 dims)", "dimensions": 64, ...},
+    {"value": "low", "label": "Baja (128 dims) - Recomendada", "is_recommended": true},
+    ...
+  ],
+  "multimodal_options": [...],
+  "kpi_templates": [
+    {"name": "brand_awareness", "display_name": "Brand Awareness", ...},
+    {"name": "leads", "display_name": "Generación de Leads", ...},
+    ...
+  ]
+}
+
+# Validar config sin guardar (preview)
+POST /api/v1/user/config/validate
+{
+  "embedding_precision": "max",
+  "kpi_weights": {"likes": 0, "comments": 0, "shares": 0, "saves": 0, "views": 0}
+}
+
+# Respuesta:
+{
+  "valid": false,
+  "warnings": ["Todos los pesos KPI son 0 - RPI será siempre 0"],
+  "info": ["Precisión 'max' requiere más RAM (~2GB)"]
+}
+
+# Resetear a defaults
+DELETE /api/v1/user/config?business_id=1
+
+# Config para pipelines (uso interno)
+GET /api/v1/user/config/pipeline?business_id=1
+```
+
+#### Uso en Pipelines (Backend)
+
+```python
+# En cualquier pipeline: ingest.py, ml_service.py, etc.
+from app.services.user_config_service import get_pipeline_config
+
+# Cargar config del usuario
+config = await get_pipeline_config(user_id=1, business_id=1, db=session)
+
+# Log crítico (siempre presente)
+logger.info(f"User config loaded: precision={config.embedding_precision}, "
+            f"multimodal={config.multimodal_mode}, own=@{config.own_instagram_username}")
+
+# Usar en embeddings
+from ml.features_embeddings import EmbeddingExtractor
+extractor = EmbeddingExtractor(precision=config.embedding_precision)
+
+# Usar en RPI
+rpi = config.get_weighted_rpi(
+    likes=100, comments=20, shares=5, saves=10, views=1000
+)
+
+# Detectar perfil propio (Human-in-the-Loop)
+is_own = config.is_own_profile("mi_negocio", platform="instagram")
+if is_own:
+    # Añadir a dataset de feedback para reentrenamiento
+    mark_as_feedback_sample(post)
+```
+
+#### PipelineConfig Schema
+
+El schema `PipelineConfig` proporciona acceso simplificado a la config en pipelines:
+
+```python
+class PipelineConfig:
+    # Identificación
+    user_id: int
+    business_id: int
+
+    # Embeddings
+    embedding_precision: str  # "low", "medium", "high", "max"
+    embedding_dims: int       # 64, 128, 256, 384
+
+    # Multimodal
+    multimodal_mode: str      # "light", "full"
+    light_mode_enabled: bool
+    whisper_model: str        # "tiny", "base"
+    ocr_max_frames: int
+
+    # KPI Weights
+    kpi_weights: Dict[str, float]            # Raw weights
+    kpi_weights_normalized: Dict[str, float]  # Suma = 1.0
+
+    # Own profile (para feedback loop)
+    own_instagram_username: Optional[str]
+    own_tiktok_username: Optional[str]
+
+    # Discovery
+    discovery_hashtags: List[str]
+    discovery_niche_keywords: List[str]
+
+    # Helper methods
+    def is_own_profile(self, username: str, platform: str) -> bool
+    def get_weighted_rpi(self, likes, comments, shares, saves, views) -> float
+```
+
+#### Componente Frontend
+
+```tsx
+import { UnifiedConfiguration } from './components/UnifiedConfiguration'
+
+<UnifiedConfiguration
+  businessId={business.id}
+  userId={currentUser.id}
+  onConfigSaved={(config) => {
+    console.log('Config guardada:', config)
+    // Todos los pipelines ahora usan la nueva config
+  }}
+/>
+```
+
+El componente `UnifiedConfiguration.tsx` incluye:
+- **Sección Perfil Propio**: Input para @username de Instagram/TikTok
+- **Sección Embedding**: Radio buttons con dims y estimaciones de RAM
+- **Sección KPI Weights**: Sliders 0-20 + templates predefinidos
+- **Sección Multimodal**: Toggle light/full con tiempos estimados
+- **Sección Discovery**: Tags para hashtags, location, niche keywords
+- **Validación en tiempo real** antes de guardar
+- **Indicadores visuales** de config actual vs cambios pendientes
+
+#### Human-in-the-Loop Feedback
+
+El campo `own_instagram_username` habilita el feedback loop automático:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    HUMAN-IN-THE-LOOP FEEDBACK                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. Usuario configura @mi_negocio en UnifiedConfiguration                   │
+│                                                                              │
+│  2. Ingest Pipeline detecta automáticamente posts propios:                  │
+│     if config.is_own_profile(post.username):                               │
+│         post.is_feedback_sample = True                                      │
+│                                                                              │
+│  3. Sistema compara predicción vs engagement real:                          │
+│     predicted_rpi = 72.5                                                    │
+│     actual_rpi = 85.3  ← calculado con métricas reales                     │
+│     delta = +17.7%                                                          │
+│                                                                              │
+│  4. Si delta > 10%, sample se prioriza para reentrenamiento:                │
+│     - Online learning: update inmediato (River)                            │
+│     - Batch: cola para próximo retrain (XGBoost)                           │
+│                                                                              │
+│  5. Modelo mejora con datos REALES del propio usuario                       │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Cache y Rendimiento
+
+El servicio incluye cache en memoria con TTL de 60 segundos:
+
+```python
+# Cache automático para configs frecuentes
+class UserConfigService:
+    _config_cache: Dict[str, tuple] = {}
+    _cache_ttl_seconds = 60
+
+    # Se invalida automáticamente cuando se guarda nueva config
+    def _invalidate_cache(self, user_id, business_id):
+        ...
+```
+
+Esto permite:
+- Múltiples pipelines leyendo la misma config sin queries repetidas
+- Latencia <1ms para lecturas cacheadas
+- Consistencia garantizada (cache se invalida en cada update)
+
 ### 📊 Análisis de Competidores
 - Scraping automático de Instagram, TikTok y LinkedIn via **Apify API**.
 - Extracción de patrones ganadores: Hooks, CTAs, Pilares de contenido.
@@ -1003,6 +1279,14 @@ Detecta tendencias emergentes y genera scripts adaptados a tu negocio usando la 
 ### Elena Bridge (Extensión)
 - `POST /api/ingest/raw` - Ingestar contenido desde la extensión (posts, reels, videos, perfiles)
 - `GET /api/ingest/status` - Verificar estado del endpoint de ingesta
+
+### User Config (Configuración Unificada)
+- `GET /api/v1/user/config` - Obtener config actual del usuario (crea defaults si no existe)
+- `POST /api/v1/user/config` - Guardar/actualizar configuración
+- `GET /api/v1/user/config/info` - Obtener opciones disponibles (precision, multimodal, templates)
+- `GET /api/v1/user/config/pipeline` - Config optimizada para pipelines (uso interno)
+- `POST /api/v1/user/config/validate` - Validar config sin guardar (preview)
+- `DELETE /api/v1/user/config` - Resetear a valores por defecto
 
 ### KPI Weights (Multi-Objetivo)
 - `GET /api/v1/kpi/weights` - Obtener pesos configurados para un negocio
