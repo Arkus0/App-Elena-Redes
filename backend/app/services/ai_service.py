@@ -1,6 +1,20 @@
 """
-AI Service - Grok-powered content analysis and generation
-The brain behind high-engagement content creation
+AI Service - Grok (xAI) Powered Content Analysis and Generation
+================================================================
+
+IMPORTANT: Grok (xAI) is the PRIMARY and ONLY LLM used for all AI operations.
+- Model: grok-4-1-fast-reasoning
+- API: https://api.x.ai/v1 (OpenAI-compatible)
+- API Key: GROK_API_KEY environment variable
+
+This service handles:
+- Pattern analysis from competitor posts
+- High-engagement content generation
+- Engagement prediction and explanation
+- Viral idea generation
+
+All creative analysis and content generation flows through Grok.
+No other LLM providers (Claude, GPT, etc.) are used.
 """
 import json
 import logging

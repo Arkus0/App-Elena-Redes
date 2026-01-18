@@ -11,6 +11,7 @@ import {
   X,
   Sparkles,
   CheckCircle,
+  Shield,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { businessApi } from '../services/api'
@@ -34,6 +35,7 @@ const STEPS = [
   { title: 'Redes sociales', description: 'Tus handles' },
   { title: 'Competidores', description: 'A quién analizamos' },
   { title: 'Objetivos', description: 'Qué quieres lograr' },
+  { title: 'Privacidad', description: 'GDPR y consentimiento' },
 ]
 
 export default function Onboarding() {
@@ -56,6 +58,9 @@ export default function Onboarding() {
     content_goals: ['engagement'] as string[],
     posting_frequency: '3-5_per_week',
     brand_voice: 'friendly_professional',
+    gdpr_consent: false,
+    data_processing_consent: false,
+    marketing_consent: false,
   })
 
   const [newCompetitor, setNewCompetitor] = useState({ platform: 'instagram', handle: '' })
@@ -118,6 +123,8 @@ export default function Onboarding() {
         return formData.competitors.length >= 3
       case 3:
         return formData.content_goals.length > 0
+      case 4:
+        return formData.gdpr_consent && formData.data_processing_consent
       default:
         return true
     }
@@ -428,6 +435,110 @@ export default function Onboarding() {
                   <option value="multiple_daily">Varias veces al día</option>
                 </select>
               </div>
+            </div>
+          )}
+
+          {/* Step 4: Privacy & GDPR Consent */}
+          {step === 4 && (
+            <div className="space-y-6">
+              <div className="bg-gray-700/50 rounded-lg p-4 flex items-start gap-3">
+                <Shield className="w-6 h-6 text-brand-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="font-medium text-white">Protección de Datos (GDPR)</h3>
+                  <p className="text-sm text-gray-300 mt-1">
+                    BrandPulse AI procesa datos de redes sociales públicas para analizar patrones
+                    de contenido. Tus datos están protegidos según el Reglamento General de
+                    Protección de Datos (RGPD/GDPR).
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                {/* Required: GDPR Consent */}
+                <label className="flex items-start gap-3 p-4 rounded-lg border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={formData.gdpr_consent}
+                    onChange={(e) => updateFormData({ gdpr_consent: e.target.checked })}
+                    className="mt-1 w-5 h-5 rounded border-gray-600 text-brand-500 focus:ring-brand-500 focus:ring-offset-gray-800"
+                  />
+                  <div>
+                    <span className="text-white font-medium">
+                      Acepto la Política de Privacidad *
+                    </span>
+                    <p className="text-sm text-gray-400 mt-1">
+                      He leído y acepto la{' '}
+                      <a href="/privacy" className="text-brand-400 hover:underline">
+                        Política de Privacidad
+                      </a>{' '}
+                      y los{' '}
+                      <a href="/terms" className="text-brand-400 hover:underline">
+                        Términos de Servicio
+                      </a>
+                      .
+                    </p>
+                  </div>
+                </label>
+
+                {/* Required: Data Processing Consent */}
+                <label className="flex items-start gap-3 p-4 rounded-lg border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={formData.data_processing_consent}
+                    onChange={(e) => updateFormData({ data_processing_consent: e.target.checked })}
+                    className="mt-1 w-5 h-5 rounded border-gray-600 text-brand-500 focus:ring-brand-500 focus:ring-offset-gray-800"
+                  />
+                  <div>
+                    <span className="text-white font-medium">
+                      Consiento el procesamiento de datos *
+                    </span>
+                    <p className="text-sm text-gray-400 mt-1">
+                      Autorizo a BrandPulse AI a procesar datos públicos de redes sociales
+                      (posts de competidores, métricas de engagement) para generar análisis
+                      y recomendaciones de contenido. Los datos se anonimizan para el
+                      entrenamiento de modelos ML.
+                    </p>
+                  </div>
+                </label>
+
+                {/* Optional: Marketing Consent */}
+                <label className="flex items-start gap-3 p-4 rounded-lg border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={formData.marketing_consent}
+                    onChange={(e) => updateFormData({ marketing_consent: e.target.checked })}
+                    className="mt-1 w-5 h-5 rounded border-gray-600 text-brand-500 focus:ring-brand-500 focus:ring-offset-gray-800"
+                  />
+                  <div>
+                    <span className="text-white font-medium">
+                      Comunicaciones de marketing (opcional)
+                    </span>
+                    <p className="text-sm text-gray-400 mt-1">
+                      Acepto recibir emails con tips, novedades y mejores prácticas para
+                      redes sociales. Puedo darme de baja en cualquier momento.
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <div className="bg-gray-700/30 rounded-lg p-4 text-sm text-gray-400">
+                <p className="font-medium text-gray-300 mb-2">Tus derechos GDPR:</p>
+                <ul className="space-y-1 list-disc list-inside">
+                  <li>Derecho de acceso a tus datos</li>
+                  <li>Derecho de rectificación</li>
+                  <li>Derecho de supresión ("derecho al olvido")</li>
+                  <li>Derecho a la portabilidad de datos</li>
+                  <li>Derecho a retirar el consentimiento en cualquier momento</li>
+                </ul>
+                <p className="mt-2">
+                  Contacto DPO:{' '}
+                  <a href="mailto:privacy@brandpulse.ai" className="text-brand-400 hover:underline">
+                    privacy@brandpulse.ai
+                  </a>
+                </p>
+              </div>
+
+              <p className="text-xs text-gray-500">* Campos obligatorios</p>
             </div>
           )}
 

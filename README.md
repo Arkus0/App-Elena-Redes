@@ -9,9 +9,16 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 ## ✨ Características Principales
 
 ### 🧠 Arquitectura Híbrida ML/LLM
-- **Grok-Powered**: Generación de guiones y copys creativos usando el modelo `grok-4-1-fast-reasoning`.
+- **Grok (xAI) - Motor LLM principal para análisis creativo y generación de contenido**: Usando el modelo `grok-4-1-fast-reasoning` para guiones, copys y análisis de patrones.
 - **Growth Prediction Engine**: Motor XGBoost que predice el **RPI Score** (Relative Performance Index) de cada idea.
-- **Explicabilidad SHAP**: Entiende *por qué* un contenido funcionará (ej: "El score es alto porque el hook visual es intenso y el tempo es rápido").
+- **Explicabilidad SHAP**: Entiende *por qué* un contenido funcionará con Top 5 factores (ej: "RPI alto por: pregunta en caption (+22%), hora 20:00 (+18%), formato Reel (+15%)").
+
+### 📊 Feature Engineering Avanzado
+- **Análisis de Caption**: longitud, emoji_count, hashtag_count, has_question (regex), has_strong_cta (Comenta, Guarda, DM, Visita, Taggea), lexical_richness.
+- **Análisis de Sentimiento**: VADER (nltk) para score emocional (-1 a +1). Contenido emocional/positivo impulsa engagement.
+- **Features Temporales**: post_hour, post_day_of_week, is_weekend, is_prime_time.
+- **Formato**: One-hot encoding (Reel, Carousel, Static, TikTok).
+- **Niche Flags**: Detección de keywords por vertical (inmobiliaria: "casa", "tour", "Triana"; floristería: "flores", "arreglo", "ramo").
 
 ### 👁️ Video & Audio Analytics (Edge Optimized)
 - **Hook Theory Analysis**: Análisis crítico de los primeros 3 segundos (energía visual, cortes, presencia de caras).
@@ -20,6 +27,12 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
   - **EasyOCR**: Detección de texto en pantalla (overlays).
   - **Semantic PCA**: Comprensión profunda del significado del contenido.
 - **Optimización Edge**: Procesamiento eficiente con bajo consumo de memoria (stride frames, float32).
+
+### 📈 A/B Testing & Governance
+- **A/B Test Logging**: Tabla `ab_test_logs` para tracking de predicciones vs resultados reales.
+- **Prediction Logs**: Registro anonimizado (hash de usernames) para auditoría y mejora continua.
+- **GDPR Compliance**: Checkbox de consentimiento obligatorio en onboarding.
+- **Endpoint de resultados**: `POST /api/v1/abtest/log-result` para reportar engagement real.
 
 ### 📊 Análisis de Competidores
 - Scraping automático de Instagram, TikTok y LinkedIn via **Apify API**.
@@ -57,7 +70,8 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - **SQLite/PostgreSQL** - Base de datos
 - **XGBoost** - Modelo de predicción
 - **SHAP** - Explicabilidad de predicciones
-- **Anthropic Claude** - IA para análisis y generación
+- **Grok (xAI)** - Motor LLM principal para análisis creativo y generación de contenido
+- **NLTK VADER** - Análisis de sentimiento
 - **Apify Client** - Scraping de redes sociales
 - **NumPy/Pandas** - Procesamiento de datos
 
@@ -97,6 +111,9 @@ source venv/bin/activate  # Linux/Mac
 # Instalar dependencias (incluye librerías de ML pesadas)
 pip install -r requirements.txt
 
+# Descargar datos de NLTK para VADER
+python -c "import nltk; nltk.download('vader_lexicon')"
+
 # Configurar variables de entorno
 cp .env.example .env
 # Edita .env con tus claves API
@@ -119,7 +136,8 @@ cp .env.example .env.local
 Edita `backend/.env`:
 
 ```env
-# REQUERIDO: Grok (xAI) para IA Generativa
+# REQUERIDO: Grok (xAI) - Motor LLM principal
+# Obtén tu clave en https://console.x.ai
 GROK_API_KEY=xai-tu-clave-aqui
 GROK_MODEL=grok-4-1-fast-reasoning
 
@@ -159,17 +177,23 @@ El frontend estará disponible en: http://localhost:5173
 ## Guía de Uso
 
 ### 1. Onboarding y Competidores
-Configura tu negocio y añade competidores. El sistema iniciará el scraping y el **Pattern Extractor** analizará miles de posts para encontrar qué funciona en tu nicho.
+Configura tu negocio y añade competidores. Acepta el consentimiento GDPR para el procesamiento de datos. El sistema iniciará el scraping y el **Pattern Extractor** analizará miles de posts para encontrar qué funciona en tu nicho.
 
 ### 2. Análisis de Drafts
 Usa la herramienta de "Analizar Draft" para pasar tu idea por el **Growth Prediction Engine**.
 - Obtendrás un **RPI Score** predicho.
-- Verás explicaciones detalladas: *"Añade más cortes en los primeros 3 segundos"* o *"Usa una pregunta en el overlay"*.
+- Verás explicaciones SHAP detalladas con Top 5 factores: *"RPI alto por: pregunta en caption (+22%), hora 20:00 (+18%), formato Reel (+15%)"*.
 
 ### 3. Generación de Contenido
 Genera calendarios completos donde cada post ha sido optimizado por **Grok** siguiendo los patrones detectados y validado por los modelos de ML.
 
-### 4. Viral Scanner
+### 4. A/B Testing
+Registra los resultados reales de tus publicaciones para mejorar las predicciones:
+- El sistema compara predicciones vs engagement real.
+- Muestras con >20% de diferencia se priorizan para reentrenamiento.
+- Las predicciones mejoran continuamente con datos reales.
+
+### 5. Viral Scanner
 Detecta tendencias emergentes y genera scripts adaptados a tu negocio usando la inteligencia semántica del sistema.
 
 ## 🔌 API Endpoints Principales
@@ -178,6 +202,10 @@ Detecta tendencias emergentes y genera scripts adaptados a tu negocio usando la 
 - `POST /api/v1/growth/predict` - Predicción de RPI Score con explicación SHAP
 - `POST /api/v1/ml/analyze-draft` - Análisis completo de borrador (Score + Roadmap de mejora)
 - `POST /api/v1/ml/predict/format` - Recomendación de formato (Reel vs Carousel)
+
+### A/B Testing & Feedback
+- `POST /api/v1/abtest/log-result` - Registrar resultado real de contenido publicado
+- `GET /api/v1/abtest/stats` - Estadísticas de predicciones vs realidad
 
 ### Contenido & Análisis
 - `POST /api/v1/content/{business_id}/generate-calendar` - Generar calendario con IA
@@ -190,11 +218,22 @@ Detecta tendencias emergentes y genera scripts adaptados a tu negocio usando la 
 ## 🧪 Modelos ML
 
 El sistema utiliza modelos entrenados específicamente para redes sociales:
-- **Engagement Model (XGBoost)**: Predice likes/comments/shares.
+- **Engagement Model (XGBoost)**: Predice likes/comments/shares con métricas R², RMSE, MAE.
 - **Growth Model (XGBoost)**: Predice RPI (Relative Performance Index).
-- **Format Classifier (Random Forest)**: Recomienda el mejor formato.
+- **Format Classifier (Random Forest)**: Recomienda el mejor formato con ROC-AUC para clasificación binaria.
+- **Sentiment Analyzer (VADER)**: Detecta tono emocional para optimizar engagement.
 
-Los modelos se re-entrenan automáticamente con nuevos datos de scraping para mantenerse actualizados con el algoritmo.
+### Reentrenamiento
+- Time-based train/test split para evitar data leakage.
+- Evaluación vs baseline (media histórica) para medir mejora real.
+- Feedback loop con Human-in-the-Loop para aprendizaje continuo.
+
+## 🔒 Privacidad y GDPR
+
+- **Consentimiento explícito**: Checkbox obligatorio en onboarding.
+- **Anonimización**: Usernames hasheados en logs de predicción.
+- **Retención de datos**: Configurable según normativa local.
+- **Derecho al olvido**: Endpoint para eliminación de datos de usuario.
 
 ## Licencia
 
@@ -202,4 +241,4 @@ MIT License - ver [LICENSE](LICENSE) para detalles.
 
 ---
 
-**Hecho con ❤️ para negocios locales** | Powered by **Grok** & **BrandPulse ML Engine**
+**Hecho con ❤️ para negocios locales** | Powered by **Grok (xAI)** & **BrandPulse ML Engine**
