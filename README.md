@@ -104,7 +104,7 @@ cd backend
 
 # Crear entorno virtual con Python 3.11
 # Asegúrate de tener python 3.11 instalado
-python3.11 -m venv venv
+py -3.11 -m venv venv
 source venv/bin/activate  # Linux/Mac
 # o en Windows: venv\Scripts\activate
 
