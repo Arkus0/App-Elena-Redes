@@ -64,6 +64,36 @@ except ImportError:
     EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(30)]
     PCA_COMPONENTS = 30
 
+# Import multimodal fusion module
+try:
+    from backend.ml.multimodal_fusion import (
+        get_multimodal_extractor,
+        TRANSCRIPT_FEATURE_COLUMNS,
+        OCR_FEATURE_COLUMNS,
+        INTERACTION_FEATURE_COLUMNS,
+        MULTIMODAL_FEATURE_COLUMNS,
+        TRANSCRIPT_PCA_DIM,
+        OCR_PCA_DIM,
+    )
+    MULTIMODAL_AVAILABLE = True
+except ImportError:
+    MULTIMODAL_AVAILABLE = False
+    TRANSCRIPT_FEATURE_COLUMNS = [f"transcript_emb_{i+1}" for i in range(20)]
+    OCR_FEATURE_COLUMNS = [f"ocr_emb_{i+1}" for i in range(20)]
+    INTERACTION_FEATURE_COLUMNS = [
+        "interaction_hook_x_sentiment",
+        "interaction_hook_x_is_reel",
+        "interaction_hook_x_cta_count",
+        "interaction_sentiment_x_cta_count",
+        "interaction_is_reel_x_video_optimal",
+        "interaction_transcript_richness",
+        "interaction_ocr_richness",
+        "interaction_multimodal_text_density",
+    ]
+    MULTIMODAL_FEATURE_COLUMNS = TRANSCRIPT_FEATURE_COLUMNS + OCR_FEATURE_COLUMNS + INTERACTION_FEATURE_COLUMNS
+    TRANSCRIPT_PCA_DIM = 20
+    OCR_PCA_DIM = 20
+
 # VADER Sentiment Analysis
 try:
     from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -415,6 +445,67 @@ class FeatureExtractor:
             for i in range(PCA_COMPONENTS):
                 features[f"embedding_{i+1}"] = 0.0
 
+        # ==========================================================================
+        # MULTIMODAL FEATURES (for video/reel content)
+        # ==========================================================================
+        # Extracts embeddings from:
+        # - whisper_transcript: Audio transcription
+        # - easyocr_text: Visual text overlay
+        # Also generates cross-modal interaction features
+
+        is_video = features.get("is_reel", 0) == 1 or content.get("media_type", "").lower() in ["reel", "video", "tiktok"]
+
+        if MULTIMODAL_AVAILABLE and is_video:
+            try:
+                extractor = get_multimodal_extractor()
+
+                # Extract transcript embeddings
+                whisper_transcript = content.get("whisper_transcript", "") or ""
+                if whisper_transcript.strip():
+                    transcript_features = extractor.get_transcript_features(whisper_transcript)
+                    features.update(transcript_features)
+                else:
+                    for col in TRANSCRIPT_FEATURE_COLUMNS:
+                        features[col] = 0.0
+
+                # Extract OCR embeddings
+                easyocr_text = content.get("easyocr_text", "") or ""
+                if easyocr_text.strip():
+                    ocr_features = extractor.get_ocr_features(easyocr_text)
+                    features.update(ocr_features)
+                else:
+                    for col in OCR_FEATURE_COLUMNS:
+                        features[col] = 0.0
+
+                # Generate interaction features
+                hook_score = content.get("hook_score", 0) or sum(
+                    features.get(f"hook_{h}", 0) for h in ["pov", "question", "number", "bold_claim", "story", "how_to", "reveal"]
+                ) / 7
+
+                features["interaction_hook_x_sentiment"] = hook_score * features.get("sentiment_compound", 0)
+                features["interaction_hook_x_is_reel"] = hook_score * features.get("is_reel", 0)
+                features["interaction_hook_x_cta_count"] = hook_score * features.get("cta_count", 0)
+                features["interaction_sentiment_x_cta_count"] = features.get("sentiment_compound", 0) * features.get("cta_count", 0)
+                features["interaction_is_reel_x_video_optimal"] = features.get("is_reel", 0) * features.get("video_optimal_length", 0)
+
+                # Text richness metrics
+                features["interaction_transcript_richness"] = min(len(whisper_transcript) / 500, 1.0)
+                features["interaction_ocr_richness"] = min(len(easyocr_text) / 100, 1.0)
+
+                total_text = len(caption) + len(whisper_transcript) + len(easyocr_text)
+                features["interaction_multimodal_text_density"] = min(total_text / 1000, 1.0)
+
+                logger.debug(f"Multimodal features extracted for video content")
+
+            except Exception as e:
+                logger.warning(f"Multimodal feature extraction failed: {e}. Using zeros.")
+                for col in MULTIMODAL_FEATURE_COLUMNS:
+                    features[col] = 0.0
+        else:
+            # Non-video content or multimodal not available - add zeros for consistency
+            for col in MULTIMODAL_FEATURE_COLUMNS:
+                features[col] = 0.0
+
         return features
 
     @classmethod
@@ -434,7 +525,8 @@ class MLPredictor:
     MANUAL_FEATURE_COLUMNS = [
         "caption_length", "caption_words", "caption_lines", "avg_word_length",
         "emoji_count", "emoji_density", "hashtag_count", "hashtag_density",
-        "mention_count",
+        "mention_count", "lexical_richness", "has_question", "has_strong_cta",
+        "sentiment_compound", "sentiment_positive", "sentiment_negative", "sentiment_neutral",
         "trigger_question", "trigger_urgency", "trigger_social_proof",
         "trigger_value", "trigger_curiosity", "trigger_action",
         "trigger_emotion", "trigger_transformation",
@@ -446,11 +538,18 @@ class MLPredictor:
         "video_duration", "video_optimal_length",
         "has_audio", "is_trending_audio",
         "hour_of_day", "day_of_week", "is_weekend", "is_prime_time",
+        "niche_inmobiliaria", "niche_floristeria", "niche_cafeteria",
+        "niche_peluqueria", "niche_restaurante", "niche_gimnasio", "niche_clinica",
         "business_type_encoded",
     ]
 
-    # Combined feature columns: embeddings (prioritized) + manual heuristics (backup)
-    FEATURE_COLUMNS = EMBEDDING_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
+    # Combined feature columns: embeddings + multimodal + manual heuristics
+    # Total: 30 (caption) + 20 (transcript) + 20 (ocr) + 8 (interactions) + ~58 (manual) ≈ 136 features
+    FEATURE_COLUMNS = (
+        EMBEDDING_FEATURE_COLUMNS +
+        MULTIMODAL_FEATURE_COLUMNS +
+        MANUAL_FEATURE_COLUMNS
+    )
 
     FORMAT_CLASSES = ["reel", "carousel", "static_image", "tiktok_video"]
 
@@ -715,11 +814,19 @@ class MLPredictor:
             X, y_engagement, test_size=0.2, random_state=42
         )
 
+        # Adjusted hyperparameters for multimodal features (~136 features)
+        # max_depth increased from 6 to 7 to capture cross-modal interactions
         self.engagement_model = xgb.XGBRegressor(
             n_estimators=100,
-            max_depth=6,
+            max_depth=7,  # Increased for multimodal feature interactions
             learning_rate=0.1,
             objective="reg:squarederror",
+            min_child_weight=3,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            gamma=0.1,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
             random_state=42,
             n_jobs=-1,
         )
@@ -1002,6 +1109,7 @@ class MLPredictor:
         Output format: "RPI alto por: pregunta en caption (+22%), hora 20:00 (+18%), formato Reel (+15%)"
         """
         feature_descriptions = {
+            # Manual heuristics
             "emoji_count": "uso de emojis",
             "emoji_density": "densidad de emojis",
             "hashtag_count": "número de hashtags",
@@ -1032,6 +1140,15 @@ class MLPredictor:
             "niche_restaurante": "keywords restaurante",
             "niche_gimnasio": "keywords gimnasio",
             "niche_clinica": "keywords clínica",
+            # Multimodal interaction features
+            "interaction_hook_x_sentiment": "sinergia hook+sentimiento",
+            "interaction_hook_x_is_reel": "hook potenciado por Reel",
+            "interaction_hook_x_cta_count": "hook + CTAs",
+            "interaction_sentiment_x_cta_count": "sentimiento + CTAs",
+            "interaction_is_reel_x_video_optimal": "Reel con duración óptima",
+            "interaction_transcript_richness": "riqueza de transcripción",
+            "interaction_ocr_richness": "texto visual en video",
+            "interaction_multimodal_text_density": "densidad de texto multimodal",
         }
 
         # Combine all factors and sort by absolute impact

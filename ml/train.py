@@ -62,6 +62,33 @@ except ImportError:
     EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(30)]
     PCA_COMPONENTS = 30
 
+# Import multimodal fusion module
+try:
+    from backend.ml.multimodal_fusion import (
+        fuse_multimodal_features,
+        add_multimodal_features_conditional,
+        TRANSCRIPT_FEATURE_COLUMNS,
+        OCR_FEATURE_COLUMNS,
+        INTERACTION_FEATURE_COLUMNS,
+        MULTIMODAL_FEATURE_COLUMNS,
+    )
+    MULTIMODAL_AVAILABLE = True
+except ImportError:
+    MULTIMODAL_AVAILABLE = False
+    TRANSCRIPT_FEATURE_COLUMNS = [f"transcript_emb_{i+1}" for i in range(20)]
+    OCR_FEATURE_COLUMNS = [f"ocr_emb_{i+1}" for i in range(20)]
+    INTERACTION_FEATURE_COLUMNS = [
+        "interaction_hook_x_sentiment",
+        "interaction_hook_x_is_reel",
+        "interaction_hook_x_cta_count",
+        "interaction_sentiment_x_cta_count",
+        "interaction_is_reel_x_video_optimal",
+        "interaction_transcript_richness",
+        "interaction_ocr_richness",
+        "interaction_multimodal_text_density",
+    ]
+    MULTIMODAL_FEATURE_COLUMNS = TRANSCRIPT_FEATURE_COLUMNS + OCR_FEATURE_COLUMNS + INTERACTION_FEATURE_COLUMNS
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -116,9 +143,9 @@ MANUAL_FEATURE_COLUMNS = [
     "business_type_encoded",
 ]
 
-# Combined feature columns: semantic embeddings (prioritized) + manual heuristics (backup)
-# Embeddings capture semantic meaning, manual features capture surface patterns
-FEATURE_COLUMNS = EMBEDDING_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
+# Combined feature columns: embeddings + multimodal + manual heuristics
+# Total: 30 (caption) + 20 (transcript) + 20 (ocr) + 8 (interactions) + ~58 (manual) ≈ 136 features
+FEATURE_COLUMNS = EMBEDDING_FEATURE_COLUMNS + MULTIMODAL_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
 
 BUSINESS_TYPES = [
     "inmobiliaria", "floristeria", "cafeteria", "peluqueria",
@@ -223,6 +250,62 @@ def add_embedding_features(df: pd.DataFrame, caption_column: str = "caption") ->
     return df
 
 
+def add_multimodal_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add multimodal fusion features for video/reel content.
+
+    Applies late fusion combining:
+    - Transcript embeddings (20 dims from Whisper transcription)
+    - OCR embeddings (20 dims from EasyOCR text detection)
+    - Cross-modal interaction features (8 features)
+
+    Args:
+        df: DataFrame with optional columns:
+            - whisper_transcript: Audio transcription text
+            - easyocr_text: Visual text overlay
+            - media_type or is_reel: To detect video content
+
+    Returns:
+        DataFrame with multimodal features added
+    """
+    if not MULTIMODAL_AVAILABLE:
+        logger.warning("Multimodal fusion not available. Adding zero columns.")
+        for col in MULTIMODAL_FEATURE_COLUMNS:
+            df[col] = 0.0
+        return df
+
+    # Check if we have video content
+    has_video = False
+    if 'media_type' in df.columns:
+        has_video = df['media_type'].str.lower().isin(['reel', 'video', 'tiktok']).any()
+    elif 'is_reel' in df.columns:
+        has_video = df['is_reel'].sum() > 0
+
+    # Check if we have multimodal text columns
+    has_transcript = 'whisper_transcript' in df.columns
+    has_ocr = 'easyocr_text' in df.columns
+
+    if has_video and (has_transcript or has_ocr):
+        logger.info("Applying multimodal late fusion...")
+        logger.info(f"  - Transcript column: {has_transcript}")
+        logger.info(f"  - OCR column: {has_ocr}")
+
+        try:
+            df = fuse_multimodal_features(df, fit_pca_if_needed=True, save_pca=True)
+            logger.info(f"Multimodal features added: {len(MULTIMODAL_FEATURE_COLUMNS)} columns")
+        except Exception as e:
+            logger.error(f"Multimodal fusion failed: {e}. Using zeros.")
+            for col in MULTIMODAL_FEATURE_COLUMNS:
+                df[col] = 0.0
+    else:
+        # No video content or no multimodal columns - add zeros for consistency
+        logger.info("No multimodal data detected. Adding zero multimodal features.")
+        for col in MULTIMODAL_FEATURE_COLUMNS:
+            df[col] = 0.0
+
+    return df
+
+
 def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
     """
     Prepare features and target for training.
@@ -276,10 +359,16 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
             for col in EMBEDDING_FEATURE_COLUMNS:
                 df[col] = 0.0
 
+    # Add multimodal features for video content
+    if not any(col in df.columns for col in MULTIMODAL_FEATURE_COLUMNS):
+        df = add_multimodal_features(df)
+
     # Select feature columns that exist
     feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
     X = df[feature_cols].fillna(0)
     y = df["engagement_rate"]
+
+    logger.info(f"Prepared features: {X.shape[1]} columns, {X.shape[0]} samples")
 
     return X, y
 
@@ -332,9 +421,11 @@ def train_from_scratch(
     logger.info("Training model from scratch (full training)...")
     logger.info(f"Training samples: {len(X_train)}, Test samples: {len(X_test)}")
 
+    # Hyperparameters adjusted for multimodal features (~136 total features)
+    # max_depth increased from 6 to 7 to capture cross-modal interactions
     model = xgb.XGBRegressor(
         n_estimators=FULL_TRAIN_N_ESTIMATORS,
-        max_depth=6,
+        max_depth=7,  # Increased for multimodal feature interactions
         learning_rate=FULL_TRAIN_LEARNING_RATE,
         objective="reg:squarederror",
         min_child_weight=3,

@@ -29,7 +29,275 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - **Formato**: One-hot encoding (Reel, Carousel, Static, TikTok).
 - **Niche Flags**: Detección de keywords por vertical (inmobiliaria: "casa", "tour", "Triana"; floristería: "flores", "arreglo", "ramo").
 
-> **Arquitectura de Features**: El sistema prioriza embeddings semánticos (30 features) y mantiene heurísticas manuales (43 features) como backup, resultando en **73 features totales** para XGBoost.
+> **Arquitectura de Features**: El sistema prioriza embeddings semánticos (30 features) + multimodales (48 features) y mantiene heurísticas manuales (~58 features), resultando en **~136 features totales** para XGBoost.
+
+### 🎬 Multimodal Late Fusion (Nuevo)
+
+Sistema robusto de fusión multimodal para maximizar predicción de engagement en Reels/TikTok. Combina información de múltiples fuentes (texto, audio transcrito, texto visual) para predicciones más precisas.
+
+#### Arquitectura Late Fusion
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        MULTIMODAL LATE FUSION PIPELINE                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐                                                           │
+│  │ Caption Text │ ──► MiniLM-L6-v2 ──► 384-dim ──► PCA ──► 30-dim ─────┐   │
+│  └──────────────┘                                                       │   │
+│                                                                         │   │
+│  ┌──────────────┐                                                       │   │
+│  │   Whisper    │ ──► MiniLM-L6-v2 ──► 384-dim ──► PCA ──► 20-dim ─────┼──►│CONCAT│──► XGBoost
+│  │  Transcript  │                                                       │   │       │     │
+│  └──────────────┘                                                       │   │       │     │
+│                                                                         │   │       │     ▼
+│  ┌──────────────┐                                                       │   │       │   Score
+│  │   EasyOCR    │ ──► MiniLM-L6-v2 ──► 384-dim ──► PCA ──► 20-dim ─────┤   │       │   0-100
+│  │  Visual Text │                                                       │   │       │     +
+│  └──────────────┘                                                       │   │       │   SHAP
+│                                                                         │   │
+│  ┌──────────────┐                                                       │   │
+│  │ Heuristics   │ ──► ~58 features (hooks, CTAs, timing, etc.) ────────┤   │
+│  └──────────────┘                                                       │   │
+│                                                                         │   │
+│  ┌──────────────┐                                                       │   │
+│  │ Interactions │ ──► 8 cross-modal synergy features ──────────────────┘   │
+│  └──────────────┘                                                           │
+│                                                                              │
+│  Total: 30 + 20 + 20 + 58 + 8 = ~136 features                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### ¿Por qué Late Fusion?
+
+| Aspecto | Ventaja |
+|---------|---------|
+| **Compatibilidad XGBoost** | Features heterogéneos funcionan perfectamente con árboles de decisión |
+| **SHAP Explainability** | Preserva explicabilidad completa - puedes ver qué modalidad contribuye más |
+| **Degradación Graceful** | Si falta una modalidad (ej: sin audio), se rellena con zeros sin romper el modelo |
+| **Simplicidad** | Sin arquitecturas complejas de atención o transformers end-to-end |
+| **Entrenamiento Eficiente** | PCA offline, XGBoost rápido de entrenar |
+
+#### Componentes del Módulo
+
+**Ubicación:** `backend/ml/multimodal_fusion.py`
+
+```python
+# Imports principales
+from backend.ml.multimodal_fusion import (
+    # Función principal de fusión
+    fuse_multimodal_features,
+    add_multimodal_features_conditional,
+    is_video_content,
+
+    # Extractor de embeddings multimodales
+    MultimodalEmbeddingExtractor,
+    get_multimodal_extractor,
+
+    # Nombres de columnas de features
+    TRANSCRIPT_FEATURE_COLUMNS,   # 20 features
+    OCR_FEATURE_COLUMNS,          # 20 features
+    INTERACTION_FEATURE_COLUMNS,  # 8 features
+    MULTIMODAL_FEATURE_COLUMNS,   # 48 features total
+)
+```
+
+#### Features Generados (48 total)
+
+**1. Transcript Embeddings (20 dims) - Audio transcrito via Whisper:**
+```
+transcript_emb_1, transcript_emb_2, ..., transcript_emb_20
+```
+
+**2. OCR Embeddings (20 dims) - Texto visual via EasyOCR:**
+```
+ocr_emb_1, ocr_emb_2, ..., ocr_emb_20
+```
+
+**3. Cross-Modal Interaction Features (8 dims):**
+
+| Feature | Fórmula | Captura |
+|---------|---------|---------|
+| `interaction_hook_x_sentiment` | hook_score × sentiment_compound | Hook potente + tono positivo = viral |
+| `interaction_hook_x_is_reel` | hook_score × is_reel | Reels benefician más de hooks fuertes |
+| `interaction_hook_x_cta_count` | hook_score × cta_count | Hook + múltiples CTAs = máximo engagement |
+| `interaction_sentiment_x_cta_count` | sentiment × cta_count | Emoción positiva + CTAs = conversión |
+| `interaction_is_reel_x_video_optimal` | is_reel × video_optimal_length | Formato óptimo para Reels (15-60s) |
+| `interaction_transcript_richness` | min(len(transcript)/500, 1.0) | Densidad de contenido hablado |
+| `interaction_ocr_richness` | min(len(ocr)/100, 1.0) | Cantidad de texto visual overlay |
+| `interaction_multimodal_text_density` | min(total_text/1000, 1.0) | Coherencia caption/audio/visual |
+
+#### Uso Básico
+
+```python
+import pandas as pd
+from backend.ml.multimodal_fusion import fuse_multimodal_features
+
+# DataFrame con datos de video/reel
+df = pd.DataFrame({
+    'caption': ['Nuevo Reel! 3 trucos para tu negocio 🔥'],
+    'whisper_transcript': ['Hola a todos, hoy les traigo tres trucos que van a cambiar tu negocio...'],
+    'easyocr_text': ['3 TRUCOS | NEGOCIO'],
+    'hook_score': [0.85],
+    'sentiment_compound': [0.6],
+    'is_reel': [1],
+    'cta_count': [2],
+    'video_optimal_length': [1],
+    'caption_length': [42],
+    'media_type': ['reel'],
+})
+
+print(f"Shape antes: {df.shape}")  # (1, 10)
+
+# Aplicar fusión multimodal
+df_fused = fuse_multimodal_features(df, fit_pca_if_needed=True, save_pca=True)
+
+print(f"Shape después: {df_fused.shape}")  # (1, 58) - añade 48 columnas
+
+# Ver features de interacción
+print(df_fused['interaction_hook_x_sentiment'].iloc[0])  # 0.51 (0.85 × 0.6)
+print(df_fused['interaction_transcript_richness'].iloc[0])  # ~0.15 (74 chars / 500)
+```
+
+#### Uso Condicional (Video vs Imagen)
+
+```python
+from backend.ml.multimodal_fusion import add_multimodal_features_conditional
+
+# Automáticamente detecta si es video y aplica fusión completa
+# Para imágenes/texto solo: añade zeros para consistencia dimensional
+df_processed = add_multimodal_features_conditional(df)
+```
+
+#### Integración con Pipeline de Training
+
+El módulo se integra automáticamente en `ml/train.py`:
+
+```python
+from ml.train import prepare_features
+
+# El pipeline detecta columnas whisper_transcript y easyocr_text
+# y aplica fusión multimodal automáticamente
+X, y = prepare_features(df)
+
+# X ahora incluye ~136 features:
+# - 30 caption embeddings
+# - 20 transcript embeddings
+# - 20 OCR embeddings
+# - 8 interaction features
+# - ~58 heuristic features
+```
+
+#### Entrenamiento con Datos Multimodales
+
+```bash
+# El CSV debe incluir columnas:
+# - caption (requerido)
+# - whisper_transcript (opcional, para video)
+# - easyocr_text (opcional, para video)
+# - media_type o is_reel (para detectar video)
+
+python ml/train.py --niche restaurante --data-file data/reels_restaurante.csv
+```
+
+**Formato CSV esperado:**
+```csv
+caption,whisper_transcript,easyocr_text,media_type,engagement_rate,business_type
+"Mi Reel viral","Hola, hoy les muestro...","3 TIPS",reel,85.2,restaurante
+"POV: cuando el café...","El secreto está en...","CAFÉ PERFECTO",reel,72.1,cafeteria
+```
+
+#### SHAP Explainability con Features Multimodales
+
+Las explicaciones SHAP ahora incluyen features multimodales en español:
+
+```json
+{
+  "score": 78.5,
+  "explanation": {
+    "explanation_text": "RPI alto por: sinergia hook+sentimiento (+18%), hook potenciado por Reel (+15%), riqueza de transcripción (+12%), formato Reel (+10%), CTA fuerte (+8%)",
+    "top_positive_factors": [
+      {"feature": "interaction_hook_x_sentiment", "impact": 1.82},
+      {"feature": "interaction_hook_x_is_reel", "impact": 1.51},
+      {"feature": "interaction_transcript_richness", "impact": 1.23}
+    ]
+  }
+}
+```
+
+#### Manejo de Datos Faltantes
+
+El sistema maneja gracefully cuando faltan modalidades:
+
+| Escenario | Comportamiento |
+|-----------|----------------|
+| Sin `whisper_transcript` | Transcript embeddings = zeros (20 dims) |
+| Sin `easyocr_text` | OCR embeddings = zeros (20 dims) |
+| Texto vacío `""` | Embeddings = zeros para esa modalidad |
+| No es video (imagen/carousel) | Todos multimodal features = zeros |
+| Sin PCA entrenado | Fit PCA automático si hay suficientes samples |
+
+#### Configuración de PCA
+
+Los modelos PCA se guardan en `/models/`:
+
+```
+models/
+├── embedding_pca_30.pkl      # PCA para caption (30 dims)
+├── transcript_pca_20.pkl     # PCA para transcript (20 dims)
+├── ocr_pca_20.pkl            # PCA para OCR (20 dims)
+```
+
+**Fit manual de PCA (opcional):**
+```python
+from backend.ml.multimodal_fusion import get_multimodal_extractor
+
+extractor = get_multimodal_extractor()
+
+# Fit con corpus de transcripciones
+transcripts = ["texto1...", "texto2...", ...]
+extractor.fit_transcript_pca(transcripts, save=True)
+
+# Fit con corpus de OCR
+ocr_texts = ["TEXTO1", "TEXTO2", ...]
+extractor.fit_ocr_pca(ocr_texts, save=True)
+```
+
+#### Hiperparámetros XGBoost Ajustados
+
+Para el aumento de ~88 a ~136 features:
+
+```python
+# ml/train.py y ml_service.py
+xgb.XGBRegressor(
+    max_depth=7,          # Aumentado de 6 → 7 para interacciones cross-modal
+    n_estimators=100,
+    learning_rate=0.1,
+    colsample_bytree=0.8,  # Sampling de features para diversidad
+    subsample=0.8,
+    min_child_weight=3,
+    gamma=0.1,
+    reg_alpha=0.1,
+    reg_lambda=1.0,
+)
+```
+
+#### Tests
+
+```bash
+# Ejecutar tests del módulo multimodal
+pytest tests/test_multimodal_fusion.py -v
+
+# Tests incluidos:
+# - test_import_multimodal_fusion
+# - test_feature_column_names
+# - test_fuse_multimodal_features_basic
+# - test_fuse_without_multimodal_columns
+# - test_interaction_features_calculation
+# - test_is_video_content_detection
+# - test_empty_text_handling
+# - test_multimodal_extractor_singleton
+```
 
 ### 👁️ Video & Audio Analytics (Edge Optimized)
 - **Hook Theory Analysis**: Análisis crítico de los primeros 3 segundos (energía visual, cortes, presencia de caras).
