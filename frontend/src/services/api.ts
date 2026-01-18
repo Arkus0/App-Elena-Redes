@@ -736,4 +736,123 @@ export const extensionApi = {
   },
 }
 
+// ============ LIGHT MODE CONFIGURATION ============
+
+export interface LightModeOption {
+  value: string
+  label: string
+  description: string
+  whisper_model: string
+  max_duration_seconds: number
+  ocr_max_frames: number
+  estimated_time_seconds: number
+  estimated_ram_mb: number
+  is_recommended: boolean
+}
+
+export interface LightModeConfig {
+  business_id: number
+  light_mode_enabled: boolean
+  whisper_model: string
+  max_duration_seconds: number
+  ocr_max_frames: number
+  use_thumbnail: boolean
+  cache_enabled: boolean
+  skip_non_video: boolean
+  description: string
+}
+
+export interface LightModeBenchmark {
+  mode: string
+  estimated_time_seconds: number
+  estimated_ram_mb: number
+  whisper_model: string
+  ocr_frames: number
+  hook_duration: number
+  is_current: boolean
+  description: string
+}
+
+export interface LightModeBenchmarkResponse {
+  business_id: number
+  current_mode: string
+  benchmarks: Record<string, LightModeBenchmark>
+  recommendation: { mode: string; reason: string }
+  time_comparison: {
+    light_vs_full_seconds_saved: number
+    light_vs_full_percent_saved: number
+    example: string
+  }
+}
+
+export const lightModeApi = {
+  getInfo: async () => {
+    const { data } = await api.get<{
+      available_modes: LightModeOption[]
+      current_default: string
+      description: string
+    }>('/light-mode/info')
+    return data
+  },
+
+  getConfig: async (businessId: number) => {
+    const { data } = await api.get<LightModeConfig>(`/light-mode/${businessId}`)
+    return data
+  },
+
+  updateConfig: async (
+    businessId: number,
+    config: Partial<{
+      light_mode_enabled: boolean
+      whisper_model: string
+      max_duration_seconds: number
+      ocr_max_frames: number
+      use_thumbnail: boolean
+      cache_enabled: boolean
+      skip_non_video: boolean
+    }>
+  ) => {
+    const { data } = await api.put<LightModeConfig>(`/light-mode/${businessId}`, config)
+    return data
+  },
+
+  quickToggle: async (businessId: number, enabled: boolean) => {
+    const { data } = await api.post<{
+      success: boolean
+      business_id: number
+      light_mode_enabled: boolean
+      message: string
+      processing_estimate: string
+    }>(`/light-mode/quick-toggle/${businessId}`, null, {
+      params: { enabled },
+    })
+    return data
+  },
+
+  getBenchmark: async (businessId: number) => {
+    const { data } = await api.get<LightModeBenchmarkResponse>(
+      `/light-mode/${businessId}/benchmark`
+    )
+    return data
+  },
+
+  getCacheStats: async () => {
+    const { data } = await api.get<{
+      total_entries: number
+      cache_enabled: boolean
+      cache_file: string
+      ttl_hours: number
+    }>('/light-mode/cache/stats')
+    return data
+  },
+
+  clearCache: async () => {
+    const { data } = await api.post<{ success: boolean; message: string }>(
+      '/light-mode/cache/clear'
+    )
+    return data
+  },
+}
+
+export { api }
 export default api
