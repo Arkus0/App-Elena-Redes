@@ -2258,3 +2258,63 @@ def get_ml_predictor() -> MLPredictor:
 # real performance data is collected (minimum 30 samples).
 # Use register_performance_feedback() to collect training data from
 # actual content performance, then retrain_with_feedback() when ready.
+# Add at the end of backend/app/services/ml_service.py
+
+class SyntheticDataGenerator:
+    """
+    Generate synthetic data for cold start training
+    """
+    @staticmethod
+    def generate_dataset(n_samples: int = 500) -> List[Dict[str, Any]]:
+        """Generate synthetic training data"""
+        data = []
+        niches = MLPredictor.BUSINESS_NICHES
+
+        for _ in range(n_samples):
+            niche = np.random.choice(niches)
+            is_reel = np.random.choice([0, 1])
+            is_carousel = 0 if is_reel else np.random.choice([0, 1])
+
+            # Synthetic features
+            sample = {
+                "business_type": niche,
+                "caption": "Test caption " * np.random.randint(1, 10),
+                "hashtags": ["#test"] * np.random.randint(1, 10),
+                "content_format": "reel" if is_reel else "carousel" if is_carousel else "static_image",
+                "video_duration": np.random.randint(5, 60) if is_reel else 0,
+                "emoji_count": np.random.randint(0, 10),
+                "cta_count": np.random.choice([0, 1]),
+                "hook_question": np.random.choice([0, 1]),
+                "posted_at": (datetime.utcnow() - timedelta(days=np.random.randint(0, 30))).isoformat(),
+            }
+
+            # Synthetic metrics (correlated with features)
+            base_score = 50
+            if sample["cta_count"]: base_score += 10
+            if sample["hook_question"]: base_score += 10
+            if is_reel: base_score += 10
+
+            noise = np.random.normal(0, 10)
+            score = max(0, min(100, base_score + noise))
+
+            # Reverse engineer metrics from score
+            sample["likes"] = int(score * 10)
+            sample["comments"] = int(score)
+            sample["saves"] = int(score / 2)
+            sample["shares"] = int(score / 3)
+            sample["views"] = int(score * 100)
+
+            data.append(sample)
+
+        return data
+
+def train_initial_model():
+    """
+    Train the model with synthetic data if no models exist.
+    Called on startup or when model is needed but not found.
+    """
+    predictor = get_ml_predictor()
+    if not predictor.is_trained:
+        logger.info("Initializing model with synthetic data...")
+        data = SyntheticDataGenerator.generate_dataset(500)
+        predictor.train(data)

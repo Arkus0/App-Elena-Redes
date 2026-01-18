@@ -8,7 +8,9 @@ from app.services.pattern_extractor import PatternExtractor
 from app.services.ml_service import (
     MLPredictor,
     FeatureExtractor,
+    SyntheticDataGenerator,
     get_ml_predictor,
+    train_initial_model,
 )
 
 __all__ = [
@@ -18,5 +20,7 @@ __all__ = [
     "PatternExtractor",
     "MLPredictor",
     "FeatureExtractor",
+    "SyntheticDataGenerator",
     "get_ml_predictor",
+    "train_initial_model",
 ]
