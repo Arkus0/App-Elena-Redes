@@ -94,6 +94,23 @@ except ImportError:
     TRANSCRIPT_PCA_DIM = 20
     OCR_PCA_DIM = 20
 
+# Import semantic hook detection module
+try:
+    from backend.ml.semantic_hooks import (
+        compute_hook_score as compute_semantic_hook_score,
+        compute_combined_hook_score,
+        get_semantic_hook_scorer,
+        HIGH_HOOK_THRESHOLD,
+        MEDIUM_HOOK_THRESHOLD,
+    )
+    SEMANTIC_HOOKS_AVAILABLE = True
+    logger.info("Semantic hook detection loaded - using embeddings for hook scoring")
+except ImportError:
+    SEMANTIC_HOOKS_AVAILABLE = False
+    HIGH_HOOK_THRESHOLD = 0.7
+    MEDIUM_HOOK_THRESHOLD = 0.5
+    logger.warning("Semantic hooks not available - falling back to RegEx-only detection")
+
 # VADER Sentiment Analysis
 try:
     from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -362,12 +379,60 @@ class FeatureExtractor:
             count = sum(1 for word in words if word in caption_lower)
             features[f"trigger_{trigger_type}"] = count
 
-        # === Hook Detection ===
+        # === Hook Detection (RegEx as auxiliary/backup) ===
         first_line = caption.split("\n")[0] if caption else ""
         first_line_lower = first_line.lower()
 
         for hook_type, pattern in cls.HOOK_PATTERNS.items():
             features[f"hook_{hook_type}"] = 1 if re.search(pattern, first_line_lower, re.IGNORECASE) else 0
+
+        # Calculate legacy RegEx-based hook score (kept as auxiliary feature)
+        regex_hook_count = sum(features[f"hook_{h}"] for h in ["pov", "question", "number", "bold_claim", "story", "how_to", "reveal"])
+        features["hook_regex_score"] = min(regex_hook_count / 3.0, 1.0)  # Normalize to 0-1
+
+        # ==========================================================================
+        # SEMANTIC HOOK DETECTION (Primary - replaces naive RegEx)
+        # ==========================================================================
+        # Uses SentenceTransformer embeddings to detect hooks via cosine similarity
+        # Captures creative variations that keyword matching misses:
+        # - "De qué manera" instead of "cómo"
+        # - "Lo que nadie te dice" instead of "secreto"
+        # - Regional/Andalusian variations
+
+        if SEMANTIC_HOOKS_AVAILABLE:
+            try:
+                # Get transcript if available for combined scoring
+                whisper_transcript = content.get("whisper_transcript", "") or ""
+
+                # Compute semantic hook score
+                semantic_result = compute_semantic_hook_score(
+                    caption=caption,
+                    transcript=whisper_transcript if whisper_transcript.strip() else None,
+                    return_details=True
+                )
+
+                features["semantic_hook_score"] = semantic_result.get("score", 0.0)
+                features["semantic_hook_max_sim"] = semantic_result.get("max_similarity", 0.0)
+                features["semantic_hook_top3_avg"] = semantic_result.get("top3_avg", 0.0)
+
+                # Log for debugging high-value hooks
+                if features["semantic_hook_score"] >= HIGH_HOOK_THRESHOLD:
+                    top_match = semantic_result.get("top_matches", [{}])[0]
+                    logger.debug(
+                        f"Strong semantic hook detected (score={features['semantic_hook_score']:.3f}): "
+                        f"matched '{top_match.get('hook', 'N/A')[:40]}...'"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Semantic hook scoring failed: {e}. Using RegEx fallback.")
+                features["semantic_hook_score"] = features["hook_regex_score"]
+                features["semantic_hook_max_sim"] = 0.0
+                features["semantic_hook_top3_avg"] = 0.0
+        else:
+            # Fallback to RegEx-derived score when semantic not available
+            features["semantic_hook_score"] = features["hook_regex_score"]
+            features["semantic_hook_max_sim"] = 0.0
+            features["semantic_hook_top3_avg"] = 0.0
 
         # === CTA Detection ===
         for cta_type, pattern in cls.CTA_PATTERNS.items():
@@ -477,16 +542,20 @@ class FeatureExtractor:
                     for col in OCR_FEATURE_COLUMNS:
                         features[col] = 0.0
 
-                # Generate interaction features
-                hook_score = content.get("hook_score", 0) or sum(
-                    features.get(f"hook_{h}", 0) for h in ["pov", "question", "number", "bold_claim", "story", "how_to", "reveal"]
-                ) / 7
+                # Generate interaction features using SEMANTIC hook score (primary)
+                # semantic_hook_score is now the authoritative hook score (0-1 continuous)
+                hook_score = features.get("semantic_hook_score", 0.0)
 
+                # Interaction features with semantic hook (better for SHAP explainability)
                 features["interaction_hook_x_sentiment"] = hook_score * features.get("sentiment_compound", 0)
                 features["interaction_hook_x_is_reel"] = hook_score * features.get("is_reel", 0)
                 features["interaction_hook_x_cta_count"] = hook_score * features.get("cta_count", 0)
                 features["interaction_sentiment_x_cta_count"] = features.get("sentiment_compound", 0) * features.get("cta_count", 0)
                 features["interaction_is_reel_x_video_optimal"] = features.get("is_reel", 0) * features.get("video_optimal_length", 0)
+
+                # New semantic hook interactions (capture synergies with semantic understanding)
+                features["interaction_semantic_hook_x_vader"] = hook_score * abs(features.get("sentiment_compound", 0))
+                features["interaction_semantic_hook_x_cta_strong"] = hook_score * features.get("has_strong_cta", 0)
 
                 # Text richness metrics
                 features["interaction_transcript_richness"] = min(len(whisper_transcript) / 500, 1.0)
@@ -522,6 +591,7 @@ class MLPredictor:
     """
 
     # Manual heuristic features (kept as backup, but embeddings are prioritized)
+    # SEMANTIC HOOK FEATURES: semantic_hook_score is now the primary hook detection method
     MANUAL_FEATURE_COLUMNS = [
         "caption_length", "caption_words", "caption_lines", "avg_word_length",
         "emoji_count", "emoji_density", "hashtag_count", "hashtag_density",
@@ -530,8 +600,18 @@ class MLPredictor:
         "trigger_question", "trigger_urgency", "trigger_social_proof",
         "trigger_value", "trigger_curiosity", "trigger_action",
         "trigger_emotion", "trigger_transformation",
+        # RegEx hook features (auxiliary/backup)
         "hook_pov", "hook_question", "hook_number", "hook_bold_claim",
         "hook_story", "hook_how_to", "hook_reveal",
+        "hook_regex_score",  # Normalized RegEx hook score
+        # SEMANTIC HOOK FEATURES (primary - embedding-based detection)
+        "semantic_hook_score",     # Primary hook score (0-1 continuous, SHAP-friendly)
+        "semantic_hook_max_sim",   # Max cosine similarity to any base hook
+        "semantic_hook_top3_avg",  # Average similarity to top 3 hooks
+        # SEMANTIC HOOK INTERACTIONS (cross-feature synergies)
+        "interaction_semantic_hook_x_vader",      # Hook * |sentiment| synergy
+        "interaction_semantic_hook_x_cta_strong", # Hook * strong CTA synergy
+        # CTA features
         "cta_comment", "cta_save", "cta_share", "cta_follow", "cta_dm", "cta_link",
         "cta_count",
         "is_reel", "is_carousel", "is_static",
@@ -1116,8 +1196,9 @@ class MLPredictor:
             "cta_count": "llamadas a la acción",
             "cta_comment": "CTA de comentarios",
             "cta_save": "CTA de guardado",
-            "hook_question": "hook de pregunta",
-            "hook_pov": "formato POV",
+            "hook_question": "hook de pregunta (RegEx)",
+            "hook_pov": "formato POV (RegEx)",
+            "hook_regex_score": "hook score RegEx (backup)",
             "trigger_question": "preguntas en el texto",
             "trigger_action": "palabras de acción",
             "is_reel": "formato Reel",
@@ -1140,6 +1221,10 @@ class MLPredictor:
             "niche_restaurante": "keywords restaurante",
             "niche_gimnasio": "keywords gimnasio",
             "niche_clinica": "keywords clínica",
+            # SEMANTIC HOOK FEATURES (primary - high explainability value)
+            "semantic_hook_score": "alto hook semántico",  # Most important for SHAP
+            "semantic_hook_max_sim": "similitud con hook viral",
+            "semantic_hook_top3_avg": "coincidencia top-3 hooks",
             # Multimodal interaction features
             "interaction_hook_x_sentiment": "sinergia hook+sentimiento",
             "interaction_hook_x_is_reel": "hook potenciado por Reel",
@@ -1149,6 +1234,9 @@ class MLPredictor:
             "interaction_transcript_richness": "riqueza de transcripción",
             "interaction_ocr_richness": "texto visual en video",
             "interaction_multimodal_text_density": "densidad de texto multimodal",
+            # Semantic hook interactions
+            "interaction_semantic_hook_x_vader": "hook semántico + emoción",
+            "interaction_semantic_hook_x_cta_strong": "hook semántico + CTA fuerte",
         }
 
         # Combine all factors and sort by absolute impact

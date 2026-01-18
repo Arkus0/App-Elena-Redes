@@ -89,6 +89,17 @@ except ImportError:
     ]
     MULTIMODAL_FEATURE_COLUMNS = TRANSCRIPT_FEATURE_COLUMNS + OCR_FEATURE_COLUMNS + INTERACTION_FEATURE_COLUMNS
 
+# Import semantic hook detection module
+try:
+    from backend.ml.semantic_hooks import (
+        compute_hook_score,
+        get_semantic_hook_scorer,
+        VIRAL_HOOKS_DATABASE,
+    )
+    SEMANTIC_HOOKS_AVAILABLE = True
+except ImportError:
+    SEMANTIC_HOOKS_AVAILABLE = False
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -122,6 +133,7 @@ FULL_TRAIN_N_ESTIMATORS = 100
 FULL_TRAIN_LEARNING_RATE = 0.1
 
 # Manual heuristic features (kept as backup)
+# SEMANTIC HOOK FEATURES: semantic_hook_score is now the primary hook detection method
 MANUAL_FEATURE_COLUMNS = [
     "caption_length", "caption_words", "caption_lines", "avg_word_length",
     "emoji_count", "emoji_density", "hashtag_count", "hashtag_density",
@@ -130,8 +142,18 @@ MANUAL_FEATURE_COLUMNS = [
     "trigger_question", "trigger_urgency", "trigger_social_proof",
     "trigger_value", "trigger_curiosity", "trigger_action",
     "trigger_emotion", "trigger_transformation",
+    # RegEx hook features (auxiliary/backup)
     "hook_pov", "hook_question", "hook_number", "hook_bold_claim",
     "hook_story", "hook_how_to", "hook_reveal",
+    "hook_regex_score",  # Normalized RegEx hook score (backup)
+    # SEMANTIC HOOK FEATURES (primary - embedding-based detection)
+    "semantic_hook_score",     # Primary hook score (0-1 continuous, SHAP-friendly)
+    "semantic_hook_max_sim",   # Max cosine similarity to any base hook
+    "semantic_hook_top3_avg",  # Average similarity to top 3 hooks
+    # SEMANTIC HOOK INTERACTIONS
+    "interaction_semantic_hook_x_vader",      # Hook * |sentiment| synergy
+    "interaction_semantic_hook_x_cta_strong", # Hook * strong CTA synergy
+    # CTA features
     "cta_comment", "cta_save", "cta_share", "cta_follow", "cta_dm", "cta_link",
     "cta_count",
     "is_reel", "is_carousel", "is_static",
@@ -250,6 +272,111 @@ def add_embedding_features(df: pd.DataFrame, caption_column: str = "caption") ->
     return df
 
 
+def add_semantic_hook_features(df: pd.DataFrame, caption_column: str = "caption") -> pd.DataFrame:
+    """
+    Add semantic hook detection features to DataFrame.
+
+    Uses SentenceTransformer embeddings to compute cosine similarity
+    against a corpus of 100+ known viral hooks.
+
+    Args:
+        df: DataFrame with caption column
+        caption_column: Name of column containing text
+
+    Returns:
+        DataFrame with semantic hook features added:
+        - semantic_hook_score: Primary hook score (0-1)
+        - semantic_hook_max_sim: Max similarity to any base hook
+        - semantic_hook_top3_avg: Average of top 3 similarities
+        - hook_regex_score: Fallback RegEx-based score
+    """
+    if not SEMANTIC_HOOKS_AVAILABLE:
+        logger.warning("Semantic hooks not available. Adding zero columns.")
+        df["semantic_hook_score"] = 0.0
+        df["semantic_hook_max_sim"] = 0.0
+        df["semantic_hook_top3_avg"] = 0.0
+        df["hook_regex_score"] = 0.0
+        return df
+
+    logger.info("=" * 60)
+    logger.info("SEMANTIC HOOK DETECTION")
+    logger.info("=" * 60)
+    logger.info("Hook detection ahora semántica con embeddings")
+    logger.info(f"Base de hooks virales: {sum(len(v) for v in VIRAL_HOOKS_DATABASE.values())} hooks en {len(VIRAL_HOOKS_DATABASE)} categorías")
+    logger.info(f"Procesando {len(df)} samples...")
+
+    try:
+        scorer = get_semantic_hook_scorer()
+
+        # Get captions
+        captions = df[caption_column].fillna("").astype(str).tolist()
+
+        # Get transcripts if available
+        transcripts = None
+        if "whisper_transcript" in df.columns:
+            transcripts = df["whisper_transcript"].fillna("").astype(str).tolist()
+
+        # Compute semantic hook scores for all samples
+        semantic_scores = []
+        max_sims = []
+        top3_avgs = []
+
+        for i, caption in enumerate(captions):
+            transcript = transcripts[i] if transcripts else None
+            result = compute_hook_score(
+                caption=caption,
+                transcript=transcript,
+                return_details=True
+            )
+            semantic_scores.append(result.get("score", 0.0))
+            max_sims.append(result.get("max_similarity", 0.0))
+            top3_avgs.append(result.get("top3_avg", 0.0))
+
+        df["semantic_hook_score"] = semantic_scores
+        df["semantic_hook_max_sim"] = max_sims
+        df["semantic_hook_top3_avg"] = top3_avgs
+
+        # Calculate RegEx-based hook score as backup
+        regex_hook_cols = ["hook_pov", "hook_question", "hook_number", "hook_bold_claim",
+                          "hook_story", "hook_how_to", "hook_reveal"]
+        existing_regex_cols = [c for c in regex_hook_cols if c in df.columns]
+        if existing_regex_cols:
+            df["hook_regex_score"] = df[existing_regex_cols].sum(axis=1) / 3.0
+            df["hook_regex_score"] = df["hook_regex_score"].clip(0, 1)
+        else:
+            df["hook_regex_score"] = 0.0
+
+        # Calculate semantic hook interactions
+        sentiment = df.get("sentiment_compound", pd.Series([0.0] * len(df))).fillna(0)
+        has_strong_cta = df.get("has_strong_cta", pd.Series([0] * len(df))).fillna(0)
+
+        df["interaction_semantic_hook_x_vader"] = df["semantic_hook_score"] * abs(sentiment)
+        df["interaction_semantic_hook_x_cta_strong"] = df["semantic_hook_score"] * has_strong_cta
+
+        # Log statistics
+        high_hooks = (df["semantic_hook_score"] >= 0.7).sum()
+        medium_hooks = ((df["semantic_hook_score"] >= 0.5) & (df["semantic_hook_score"] < 0.7)).sum()
+        low_hooks = (df["semantic_hook_score"] < 0.5).sum()
+
+        logger.info(f"Semantic hook features added:")
+        logger.info(f"  - High hooks (>=0.7): {high_hooks} ({high_hooks/len(df)*100:.1f}%)")
+        logger.info(f"  - Medium hooks (0.5-0.7): {medium_hooks} ({medium_hooks/len(df)*100:.1f}%)")
+        logger.info(f"  - Low hooks (<0.5): {low_hooks} ({low_hooks/len(df)*100:.1f}%)")
+        logger.info(f"  - Mean semantic_hook_score: {df['semantic_hook_score'].mean():.3f}")
+        logger.info("=" * 60)
+
+    except Exception as e:
+        logger.error(f"Semantic hook detection failed: {e}. Using zeros.")
+        df["semantic_hook_score"] = 0.0
+        df["semantic_hook_max_sim"] = 0.0
+        df["semantic_hook_top3_avg"] = 0.0
+        df["hook_regex_score"] = 0.0
+        df["interaction_semantic_hook_x_vader"] = 0.0
+        df["interaction_semantic_hook_x_cta_strong"] = 0.0
+
+    return df
+
+
 def add_multimodal_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add multimodal fusion features for video/reel content.
@@ -343,21 +470,35 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
             lambda x: encoder.transform([x])[0] if x in known_types else len(BUSINESS_TYPES) - 1
         )
 
+    # Find caption column first (needed for embeddings and hooks)
+    caption_col = None
+    for col in ["caption", "text", "content", "post_caption", "description"]:
+        if col in df.columns:
+            caption_col = col
+            break
+
     # Add embedding features if not present
     if not any(col in df.columns for col in EMBEDDING_FEATURE_COLUMNS):
-        # Find caption column
-        caption_col = None
-        for col in ["caption", "text", "content", "post_caption", "description"]:
-            if col in df.columns:
-                caption_col = col
-                break
-
         if caption_col:
             df = add_embedding_features(df, caption_column=caption_col)
         else:
             logger.warning("No caption column found. Adding zero embeddings.")
             for col in EMBEDDING_FEATURE_COLUMNS:
                 df[col] = 0.0
+
+    # Add semantic hook features (primary hook detection method)
+    # This replaces naive RegEx with embedding-based similarity scoring
+    if "semantic_hook_score" not in df.columns:
+        if caption_col:
+            df = add_semantic_hook_features(df, caption_column=caption_col)
+        else:
+            logger.warning("No caption column found. Adding zero semantic hook features.")
+            df["semantic_hook_score"] = 0.0
+            df["semantic_hook_max_sim"] = 0.0
+            df["semantic_hook_top3_avg"] = 0.0
+            df["hook_regex_score"] = 0.0
+            df["interaction_semantic_hook_x_vader"] = 0.0
+            df["interaction_semantic_hook_x_cta_strong"] = 0.0
 
     # Add multimodal features for video content
     if not any(col in df.columns for col in MULTIMODAL_FEATURE_COLUMNS):

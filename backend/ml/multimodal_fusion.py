@@ -480,6 +480,9 @@ def get_interaction_feature_names() -> List[str]:
         f"{INTERACTION_PREFIX}transcript_richness",
         f"{INTERACTION_PREFIX}ocr_richness",
         f"{INTERACTION_PREFIX}multimodal_text_density",
+        # Semantic hook interactions (added for enhanced engagement prediction)
+        f"{INTERACTION_PREFIX}semantic_hook_x_vader",
+        f"{INTERACTION_PREFIX}semantic_hook_x_cta_strong",
     ]
 
 
@@ -632,16 +635,21 @@ def fuse_multimodal_features(
 
     logger.info("Generating cross-modal interaction features...")
 
-    # Hook score (composite or from individual hooks)
-    if 'hook_score' in df.columns:
+    # Prefer semantic_hook_score (primary method) over RegEx-based hook_score
+    if 'semantic_hook_score' in df.columns:
+        hook_score = df['semantic_hook_score'].fillna(0)
+        logger.info("  Using semantic_hook_score for interactions (embedding-based)")
+    elif 'hook_score' in df.columns:
         hook_score = df['hook_score'].fillna(0)
+        logger.info("  Using legacy hook_score for interactions")
     else:
-        # Calculate from individual hook features
-        hook_cols = [c for c in df.columns if c.startswith('hook_') and c != 'hook_score']
+        # Calculate from individual hook features (fallback)
+        hook_cols = [c for c in df.columns if c.startswith('hook_') and c not in ['hook_score', 'hook_regex_score']]
         if hook_cols:
             hook_score = df[hook_cols].sum(axis=1) / max(len(hook_cols), 1)
         else:
             hook_score = pd.Series([0.0] * n_samples)
+        logger.info("  Using calculated hook score from individual features")
 
     # Base features for interactions (with safe defaults)
     sentiment = df.get('sentiment_compound', pd.Series([0.0] * n_samples)).fillna(0)
@@ -668,6 +676,11 @@ def fuse_multimodal_features(
     # Combined text density (normalized)
     total_text_len = caption_len + transcript_len + ocr_len
     df[f'{INTERACTION_PREFIX}multimodal_text_density'] = np.minimum(total_text_len / 1000, 1.0)
+
+    # Semantic hook interactions (enhanced synergies with embedding-based hook detection)
+    has_strong_cta = df.get('has_strong_cta', pd.Series([0] * n_samples)).fillna(0)
+    df[f'{INTERACTION_PREFIX}semantic_hook_x_vader'] = hook_score * abs(sentiment)
+    df[f'{INTERACTION_PREFIX}semantic_hook_x_cta_strong'] = hook_score * has_strong_cta
 
     logger.info(f"Added {len(INTERACTION_FEATURE_COLUMNS)} interaction features")
 
