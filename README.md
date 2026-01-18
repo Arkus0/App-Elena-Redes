@@ -313,6 +313,192 @@ pytest tests/test_multimodal_fusion.py -v
 - **GDPR Compliance**: Checkbox de consentimiento obligatorio en onboarding.
 - **Endpoint de resultados**: `POST /api/v1/abtest/log-result` para reportar engagement real.
 
+### 🎯 Multi-Objective Engagement Prediction (Nuevo)
+
+Sistema de predicción multi-objetivo que permite a cada usuaria configurar los pesos de engagement según sus KPIs de negocio.
+
+#### Arquitectura Multi-Output
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    MULTI-OBJECTIVE PREDICTION PIPELINE                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐                      ┌─────────────────────────────────┐  │
+│  │   Features   │                      │   Multi-Output Predictions      │  │
+│  │   (~136)     │ ──► MultiOutput ──►  │   [log_likes, log_comments,    │  │
+│  │              │     XGBRegressor     │    log_shares, log_saves,       │  │
+│  └──────────────┘                      │    log_views]                   │  │
+│                                        └─────────────┬───────────────────┘  │
+│                                                      │                      │
+│  ┌──────────────┐                                   ▼                      │
+│  │   User KPI   │      Weighted RPI = dot(predictions, weights) / Σweights │
+│  │   Weights    │ ─────────────────────────────────────────────────────────│
+│  │              │                                   │                      │
+│  │ likes: 1.0   │                                   ▼                      │
+│  │ comments: 2.0│                      ┌─────────────────────────────────┐  │
+│  │ shares: 10.0 │                      │  RPI Score (0-100) + Per-Metric │  │
+│  │ saves: 5.0   │                      │  SHAP Explanations              │  │
+│  │ views: 3.0   │                      └─────────────────────────────────┘  │
+│  └──────────────┘                                                           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Pesos Configurables por Usuario
+
+Cada métrica tiene un peso configurable (0-20) que determina su importancia en el RPI:
+
+| Métrica | Default | Descripción |
+|---------|---------|-------------|
+| `likes_weight` | 1.0 | Engagement básico, fácil de obtener |
+| `comments_weight` | 2.0 | Indica engagement profundo y comunidad |
+| `shares_weight` | 10.0 | Potencial viral, amplificación orgánica |
+| `saves_weight` | 5.0 | Intención de compra, contenido valioso |
+| `views_weight` | 3.0 | Alcance, especialmente importante para Reels |
+
+#### Templates Predefinidos
+
+| Template | Uso Recomendado | Prioriza |
+|----------|-----------------|----------|
+| **Brand Awareness** | Negocios nuevos, lanzamientos | Views + Likes |
+| **Leads/Conversions** | Inmobiliarias, e-commerce | Saves + Shares |
+| **Community** | Restaurantes, cafeterías, locales | Comments |
+| **Viral** | Contenido educativo, entretenimiento | Shares |
+| **Balanced** | Uso general, A/B testing | Igual peso |
+
+#### Endpoints API
+
+```bash
+# Obtener pesos configurados
+GET /api/v1/kpi/weights?business_id=1
+
+# Guardar pesos personalizados
+POST /api/v1/kpi/weights
+{
+  "business_id": 1,
+  "weights": {
+    "likes_weight": 1.0,
+    "comments_weight": 3.0,
+    "shares_weight": 10.0,
+    "saves_weight": 12.0,
+    "views_weight": 2.0
+  }
+}
+
+# Crear desde template
+POST /api/v1/kpi/weights/from-template?business_id=1&template_name=leads_conversions
+
+# Preview de impacto
+POST /api/v1/kpi/preview
+# Muestra cómo los pesos afectan el RPI
+
+# Predicción multi-output
+POST /api/v1/multi-output/predict
+{
+  "caption": "3 dormitorios con vistas al mar...",
+  "content_format": "reel",
+  "business_id": 1
+}
+# Devuelve predicciones individuales + RPI ponderado + SHAP por métrica
+```
+
+#### Ejemplo de Uso
+
+```python
+# Backend: Predicción con pesos personalizados
+from app.services.multi_output_predictor import get_multi_output_predictor
+
+predictor = get_multi_output_predictor("inmobiliaria")
+
+# Pesos para inmobiliaria (prioriza leads)
+weights = {
+    "likes_weight": 1.0,
+    "comments_weight": 3.0,
+    "shares_weight": 10.0,
+    "saves_weight": 12.0,  # Alto: guardados = interés en propiedades
+    "views_weight": 2.0,
+}
+
+result = predictor.predict(features, weights)
+
+print(f"Predicted likes: {result.predicted_likes:.0f}")
+print(f"Predicted saves: {result.predicted_saves:.0f}")
+print(f"Weighted RPI: {result.weighted_rpi:.1f}")
+# vs RPI con defaults: 58.3 → con leads_conversions: 72.5
+```
+
+```typescript
+// Frontend: Configurar KPIs
+import { kpiApi } from './services/api'
+
+// Cargar template para inmobiliaria
+const config = await kpiApi.createFromTemplate(
+  businessId,
+  "leads_conversions"
+)
+
+// O configuración manual
+await kpiApi.saveWeights(businessId, {
+  likes_weight: 1,
+  comments_weight: 3,
+  shares_weight: 10,
+  saves_weight: 12,
+  views_weight: 2,
+})
+```
+
+#### SHAP Multi-Métrica
+
+El sistema proporciona explicaciones SHAP separadas para cada métrica:
+
+```json
+{
+  "prediction": {
+    "predicted_likes": 150,
+    "predicted_saves": 45,
+    "weighted_rpi": 72.5
+  },
+  "shap_likes": {
+    "hook_energy": 0.82,
+    "is_reel": 0.45,
+    "semantic_hook_score": 0.38
+  },
+  "shap_saves": {
+    "has_strong_cta": 0.91,
+    "caption_length": 0.52,
+    "niche_inmobiliaria": 0.41
+  },
+  "explanation": "RPI alto (72.5/100). Mayor predicción en likes (150). Por encima del promedio del autor (1.3x)."
+}
+```
+
+#### Backward Compatibility
+
+El sistema es **100% retrocompatible**:
+- Si un usuario no ha configurado pesos, se usan los defaults automáticamente
+- El endpoint `/api/v1/growth/predict` sigue funcionando igual
+- Los modelos single-output existentes siguen válidos
+
+#### Componente Frontend
+
+El componente `KPIConfiguration.tsx` proporciona:
+- Sliders para cada peso (1-20)
+- Selección rápida de templates con iconos
+- Preview en tiempo real del RPI resultante
+- Barra visual de distribución de pesos
+- Recomendaciones específicas por tipo de negocio
+
+```tsx
+import { KPIConfiguration } from './components/KPIConfiguration'
+
+<KPIConfiguration
+  businessId={business.id}
+  businessType="inmobiliaria"
+  onWeightsSaved={(weights) => console.log('Saved:', weights)}
+/>
+```
+
 ### 📊 Análisis de Competidores
 - Scraping automático de Instagram, TikTok y LinkedIn via **Apify API**.
 - Extracción de patrones ganadores: Hooks, CTAs, Pilares de contenido.
@@ -689,6 +875,20 @@ Detecta tendencias emergentes y genera scripts adaptados a tu negocio usando la 
 - `POST /api/ingest/raw` - Ingestar contenido desde la extensión (posts, reels, videos, perfiles)
 - `GET /api/ingest/status` - Verificar estado del endpoint de ingesta
 
+### KPI Weights (Multi-Objetivo)
+- `GET /api/v1/kpi/weights` - Obtener pesos configurados para un negocio
+- `POST /api/v1/kpi/weights` - Guardar/actualizar pesos personalizados
+- `GET /api/v1/kpi/templates` - Listar templates disponibles (brand_awareness, leads, etc.)
+- `POST /api/v1/kpi/preview` - Preview del impacto de pesos en RPI
+- `POST /api/v1/kpi/weights/from-template` - Crear configuración desde template
+
+### Multi-Output Predictions
+- `POST /api/v1/multi-output/predict` - Predicción multi-métrica con pesos configurables
+- `POST /api/v1/multi-output/predict/batch` - Predicciones batch
+- `GET /api/v1/multi-output/status` - Estado del modelo multi-output
+- `POST /api/v1/multi-output/train` - Entrenar modelo multi-output
+- `POST /api/v1/multi-output/compare-weights` - Comparar diferentes configuraciones de pesos
+
 ### Autenticación & Negocio
 - `POST /api/v1/auth/login`
 - `POST /api/v1/business/onboard`
@@ -817,6 +1017,43 @@ python ml/train.py --niche cafeteria --data-file data.csv --force-finetune
 
 # Threshold personalizado
 python ml/train.py --niche floristeria --data-file data.csv --threshold 200
+```
+
+#### 3. Entrenar Modelo Multi-Output (Nuevo)
+
+```bash
+# Entrenar modelo multi-output para predicción de múltiples métricas
+python ml/train_multi_output.py --niche restaurante --data-file data/posts.csv
+
+# Entrenar modelo base multi-output (sin filtro de nicho)
+python ml/train_multi_output.py --base-model --data-file data/all_posts.csv
+```
+
+**Targets del modelo multi-output:**
+- `log_likes` - log(likes + 1)
+- `log_comments` - log(comments + 1)
+- `log_shares` - log(shares + 1)
+- `log_saves` - log(saves + 1)
+- `log_views` - log(views + 1)
+
+**Métricas por target:**
+```
+PER-TARGET METRICS
+--------------------------------------------------
+likes       : RMSE=0.4521, R2=0.7823, MAE=0.3211
+comments    : RMSE=0.5123, R2=0.7156, MAE=0.3892
+shares      : RMSE=0.6234, R2=0.6543, MAE=0.4521
+saves       : RMSE=0.4892, R2=0.7412, MAE=0.3567
+views       : RMSE=0.5567, R2=0.6891, MAE=0.4123
+--------------------------------------------------
+COMBINED    : RMSE=0.5267, R2=0.7165
+```
+
+**CSV requerido para multi-output:**
+```csv
+caption,likes,comments,shares,saves,views,business_type
+"Mi Reel viral",1500,45,12,89,15000,restaurante
+"Nuevo plato del día",800,22,5,34,8000,restaurante
 ```
 
 **Fine-tuning (cold start):**

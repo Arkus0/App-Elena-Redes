@@ -8,6 +8,7 @@ from app.models.pattern import ExtractedPattern
 from app.models.content import GeneratedContent, ContentCalendar
 from app.models.user import User
 from app.models.abtest import ABTestLog, PredictionLog
+from app.models.kpi_weights import UserKPIWeights, MultiOutputModelMetrics
 
 __all__ = [
     "Business",
@@ -19,4 +20,6 @@ __all__ = [
     "User",
     "ABTestLog",
     "PredictionLog",
+    "UserKPIWeights",
+    "MultiOutputModelMetrics",
 ]

@@ -35,6 +35,18 @@ from app.schemas.ml import (
     ModelTrainingResponse,
     ModelStatusResponse,
 )
+from app.schemas.kpi_weights import (
+    EngagementWeights,
+    KPIWeightsCreate,
+    KPIWeightsResponse,
+    KPIWeightsPreview,
+    MultiOutputPrediction,
+    MultiOutputPredictionRequest,
+    MultiOutputPredictionResponse,
+    KPITemplate,
+    KPITemplatesResponse,
+    KPI_TEMPLATES,
+)
 
 __all__ = [
     "UserCreate",
@@ -66,4 +78,14 @@ __all__ = [
     "ModelTrainingRequest",
     "ModelTrainingResponse",
     "ModelStatusResponse",
+    "EngagementWeights",
+    "KPIWeightsCreate",
+    "KPIWeightsResponse",
+    "KPIWeightsPreview",
+    "MultiOutputPrediction",
+    "MultiOutputPredictionRequest",
+    "MultiOutputPredictionResponse",
+    "KPITemplate",
+    "KPITemplatesResponse",
+    "KPI_TEMPLATES",
 ]

@@ -284,3 +284,79 @@ export interface BusinessStatus {
   patterns_extracted: number
   ready_for_content: boolean
 }
+
+// =============================================================================
+// KPI Weights - Multi-Objective Engagement Configuration
+// =============================================================================
+
+export interface EngagementWeights {
+  likes_weight: number
+  comments_weight: number
+  shares_weight: number
+  saves_weight: number
+  views_weight: number
+}
+
+export interface KPIWeightsConfig {
+  id: number
+  user_id: number
+  business_id: number
+  niche: string | null
+  weights: EngagementWeights
+  template_name: string | null
+  description: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface KPITemplate {
+  name: string
+  display_name: string
+  description: string
+  weights: EngagementWeights
+  use_case: string
+  icon: string
+}
+
+export interface KPIWeightsPreview {
+  weights: EngagementWeights
+  sample_prediction: Record<string, number>
+  weighted_rpi: number
+  explanation: string
+  comparison_to_default: {
+    default_rpi: number
+    difference: number
+    percent_change: number
+  }
+}
+
+// Multi-Output Prediction Types
+export interface MultiOutputPrediction {
+  log_likes: number
+  log_comments: number
+  log_shares: number
+  log_saves: number
+  log_views: number
+  predicted_likes: number
+  predicted_comments: number
+  predicted_shares: number
+  predicted_saves: number
+  predicted_views: number
+  weighted_rpi: number
+  weights_used: EngagementWeights
+  relative_to_baseline: number | null
+}
+
+export interface MultiOutputPredictionResponse {
+  prediction: MultiOutputPrediction
+  shap_likes: Record<string, number> | null
+  shap_comments: Record<string, number> | null
+  shap_shares: Record<string, number> | null
+  shap_saves: Record<string, number> | null
+  shap_views: Record<string, number> | null
+  explanation: string
+  confidence_interval: Record<string, [number, number]>
+  model_version: string
+  is_multi_output: boolean
+}
