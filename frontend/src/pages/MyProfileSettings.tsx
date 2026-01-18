@@ -17,9 +17,13 @@ import {
   Brain,
   TrendingUp,
   Zap,
+  Key,
+  Copy,
+  Trash2,
+  Clock,
 } from 'lucide-react'
 import { useBusinessStore } from '../stores/businessStore'
-import { businessApi } from '../services/api'
+import { businessApi, extensionApi } from '../services/api'
 import clsx from 'clsx'
 
 interface OwnProfileConfig {
@@ -42,6 +46,16 @@ export default function MyProfileSettings() {
   const [instagramUsername, setInstagramUsername] = useState('')
   const [tiktokUsername, setTiktokUsername] = useState('')
 
+  // API Key state
+  const [apiKeyStatus, setApiKeyStatus] = useState<{
+    has_key: boolean
+    key_suffix: string | null
+    last_used_at: string | null
+  } | null>(null)
+  const [newApiKey, setNewApiKey] = useState<string | null>(null)
+  const [isGeneratingKey, setIsGeneratingKey] = useState(false)
+  const [copySuccess, setCopySuccess] = useState<string | null>(null)
+
   useEffect(() => {
     if (!currentBusiness) {
       navigate('/onboarding')
@@ -49,6 +63,7 @@ export default function MyProfileSettings() {
     }
 
     loadConfig()
+    loadApiKeyStatus()
   }, [currentBusiness, navigate])
 
   const loadConfig = async () => {
@@ -90,6 +105,69 @@ export default function MyProfileSettings() {
 
   // Clean username input (remove @ if present)
   const cleanUsername = (value: string) => value.replace(/^@/, '').trim()
+
+  // Load API key status
+  const loadApiKeyStatus = async () => {
+    if (!currentBusiness) return
+    try {
+      const status = await extensionApi.getApiKeyStatus(currentBusiness.id)
+      setApiKeyStatus(status)
+    } catch (error) {
+      console.error('Error loading API key status:', error)
+    }
+  }
+
+  // Generate new API key
+  const handleGenerateApiKey = async () => {
+    if (!currentBusiness) return
+    setIsGeneratingKey(true)
+    try {
+      const result = await extensionApi.generateApiKey(currentBusiness.id)
+      setNewApiKey(result.api_key)
+      setApiKeyStatus({ has_key: true, key_suffix: result.key_suffix, last_used_at: null })
+    } catch (error) {
+      console.error('Error generating API key:', error)
+      setSaveMessage({ type: 'error', text: 'Error al generar API key' })
+    } finally {
+      setIsGeneratingKey(false)
+    }
+  }
+
+  // Revoke API key
+  const handleRevokeApiKey = async () => {
+    if (!currentBusiness) return
+    if (!confirm('¿Seguro que quieres revocar la API key? La extensión dejará de poder sincronizar.')) return
+
+    try {
+      await extensionApi.revokeApiKey(currentBusiness.id)
+      setApiKeyStatus({ has_key: false, key_suffix: null, last_used_at: null })
+      setNewApiKey(null)
+      setSaveMessage({ type: 'success', text: 'API key revocada' })
+    } catch (error) {
+      console.error('Error revoking API key:', error)
+      setSaveMessage({ type: 'error', text: 'Error al revocar API key' })
+    }
+  }
+
+  // Copy to clipboard helper
+  const copyToClipboard = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopySuccess(label)
+      setTimeout(() => setCopySuccess(null), 2000)
+    } catch (error) {
+      console.error('Error copying:', error)
+    }
+  }
+
+  // Copy config as JSON for manual paste in extension
+  const handleCopyConfigJson = () => {
+    const configJson = JSON.stringify({
+      ownInstagramUsername: instagramUsername || undefined,
+      ownTiktokUsername: tiktokUsername || undefined,
+    }, null, 2)
+    copyToClipboard(configJson, 'config')
+  }
 
   if (!currentBusiness) {
     return null
@@ -315,25 +393,131 @@ export default function MyProfileSettings() {
         </ol>
       </div>
 
-      {/* Sync Extension Button (Optional) */}
-      <div className="card bg-gray-800/50">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="font-medium text-white">Sincronizar con Extensión</h3>
-            <p className="text-sm text-gray-400 mt-1">
-              La extensión carga la configuración automáticamente, pero puedes
-              forzar una sincronización manual.
-            </p>
+      {/* API Key Section */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <Key className="w-5 h-5 text-yellow-400" />
+          API Key para Extensión
+        </h2>
+        <p className="text-sm text-gray-400 mb-4">
+          Genera una API key para que la extensión pueda sincronizar automáticamente
+          tu configuración sin necesidad de copiar valores manualmente.
+        </p>
+
+        {/* Current API Key Status */}
+        {apiKeyStatus?.has_key ? (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-3 bg-gray-700/50 rounded-lg">
+              <div>
+                <div className="flex items-center gap-2 text-white">
+                  <CheckCircle className="w-4 h-4 text-green-400" />
+                  <span className="font-medium">API Key activa</span>
+                  <code className="text-xs bg-gray-600 px-2 py-0.5 rounded">
+                    ****{apiKeyStatus.key_suffix}
+                  </code>
+                </div>
+                {apiKeyStatus.last_used_at && (
+                  <div className="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                    <Clock className="w-3 h-3" />
+                    Última sync: {new Date(apiKeyStatus.last_used_at).toLocaleString()}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={handleRevokeApiKey}
+                className="p-2 text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
+                title="Revocar API key"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Show newly generated key */}
+            {newApiKey && (
+              <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                <div className="flex items-center gap-2 text-yellow-400 text-sm mb-2">
+                  <AlertCircle className="w-4 h-4" />
+                  <span className="font-medium">Copia esta key ahora - no se mostrará de nuevo</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 text-xs bg-gray-900 text-green-400 p-2 rounded font-mono overflow-x-auto">
+                    {newApiKey}
+                  </code>
+                  <button
+                    onClick={() => copyToClipboard(newApiKey, 'apiKey')}
+                    className={clsx(
+                      'p-2 rounded-lg transition-colors',
+                      copySuccess === 'apiKey'
+                        ? 'bg-green-500/20 text-green-400'
+                        : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                    )}
+                  >
+                    {copySuccess === 'apiKey' ? <CheckCircle className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={handleGenerateApiKey}
+              disabled={isGeneratingKey}
+              className="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300 transition-colors"
+            >
+              {isGeneratingKey ? 'Generando...' : 'Regenerar API Key'}
+            </button>
           </div>
+        ) : (
           <button
-            onClick={() => {
-              // This would trigger a message to the extension
-              // For now, just show an alert
-              alert('La extensión sincronizará la configuración en la próxima extracción.')
-            }}
-            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300 transition-colors"
+            onClick={handleGenerateApiKey}
+            disabled={isGeneratingKey}
+            className={clsx(
+              'w-full py-3 rounded-lg font-medium transition-colors',
+              isGeneratingKey
+                ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                : 'bg-yellow-600 hover:bg-yellow-500 text-white'
+            )}
           >
-            Sincronizar
+            {isGeneratingKey ? (
+              <span className="flex items-center justify-center gap-2">
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                Generando...
+              </span>
+            ) : (
+              <span className="flex items-center justify-center gap-2">
+                <Key className="w-4 h-4" />
+                Generar API Key
+              </span>
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* Copy Config Section */}
+      <div className="card bg-gray-800/50">
+        <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <Copy className="w-5 h-5 text-blue-400" />
+          Copiar Configuración
+        </h2>
+        <p className="text-sm text-gray-400 mb-4">
+          Opción manual: copia esta configuración JSON y pégala en el popup de la extensión.
+        </p>
+        <div className="flex items-center gap-2">
+          <code className="flex-1 text-xs bg-gray-900 text-gray-300 p-3 rounded font-mono overflow-x-auto">
+            {JSON.stringify({
+              ownInstagramUsername: instagramUsername || undefined,
+              ownTiktokUsername: tiktokUsername || undefined,
+            }, null, 2)}
+          </code>
+          <button
+            onClick={handleCopyConfigJson}
+            className={clsx(
+              'p-3 rounded-lg transition-colors',
+              copySuccess === 'config'
+                ? 'bg-green-500/20 text-green-400'
+                : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+            )}
+          >
+            {copySuccess === 'config' ? <CheckCircle className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
           </button>
         </div>
       </div>

@@ -641,4 +641,34 @@ export const multiOutputApi = {
   },
 }
 
+// ============ EXTENSION API (API Keys for sync) ============
+
+export const extensionApi = {
+  // Generate new API key for extension sync
+  generateApiKey: async (businessId: number) => {
+    const { data } = await api.post<{
+      api_key: string
+      key_suffix: string
+      message: string
+    }>(`/extension/api-key/${businessId}`)
+    return data
+  },
+
+  // Get API key status (has key, last used)
+  getApiKeyStatus: async (businessId: number) => {
+    const { data } = await api.get<{
+      has_key: boolean
+      key_suffix: string | null
+      last_used_at: string | null
+    }>(`/extension/api-key/${businessId}/status`)
+    return data
+  },
+
+  // Revoke API key
+  revokeApiKey: async (businessId: number) => {
+    const { data } = await api.delete(`/extension/api-key/${businessId}`)
+    return data
+  },
+}
+
 export default api
