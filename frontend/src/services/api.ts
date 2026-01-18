@@ -112,6 +112,33 @@ export const businessApi = {
     const { data } = await api.get<BusinessStatus>(`/business/${businessId}/status`)
     return data
   },
+
+  // Human-in-the-Loop: Own Profile Configuration
+  getOwnProfileConfig: async (businessId: number) => {
+    const { data } = await api.get<{
+      own_instagram_username: string | null
+      own_tiktok_username: string | null
+      feedback_loop_enabled: boolean
+      message: string
+    }>(`/business/${businessId}/own-profile-config`)
+    return data
+  },
+
+  updateOwnProfileConfig: async (
+    businessId: number,
+    config: {
+      own_instagram_username?: string | null
+      own_tiktok_username?: string | null
+    }
+  ) => {
+    const { data } = await api.put<{
+      own_instagram_username: string | null
+      own_tiktok_username: string | null
+      feedback_loop_enabled: boolean
+      message: string
+    }>(`/business/${businessId}/own-profile-config`, config)
+    return data
+  },
 }
 
 // ============ COMPETITORS ============

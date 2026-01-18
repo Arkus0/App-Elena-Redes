@@ -6,7 +6,66 @@
  * Todas las peticiones HTTP se hacen desde aquí para evitar problemas de CORS.
  */
 
-import type { ExtractionResult, ApiResponse, MessagePayload } from '../types';
+import type { ExtractionResult, ApiResponse, MessagePayload, UserConfig } from '../types';
+
+// ============================================================================
+// Human-in-the-Loop: User Configuration Management
+// ============================================================================
+
+/**
+ * Obtiene la configuración del usuario desde chrome.storage
+ * Incluye own_username para detectar posts propios
+ */
+async function getUserConfig(): Promise<UserConfig> {
+  return new Promise((resolve) => {
+    chrome.storage.sync.get(['userConfig'], (result) => {
+      resolve(result.userConfig || {});
+    });
+  });
+}
+
+/**
+ * Detecta si el contenido extraído es del perfil propio de la clienta
+ * Compara el autor del contenido con el username configurado
+ *
+ * @param data - Datos extraídos (contenido o perfil)
+ * @param config - Configuración del usuario con own_username
+ * @returns true si el contenido es del perfil propio
+ */
+function isOwnProfileContent(data: ExtractionResult, config: UserConfig): boolean {
+  if (!data.success) return false;
+
+  // Obtener el username del contenido/perfil
+  let contentUsername = '';
+  let platform = '';
+
+  if (data.content) {
+    contentUsername = data.content.author.username.toLowerCase().replace('@', '');
+    platform = data.content.platform;
+  } else if (data.profile) {
+    contentUsername = data.profile.username.toLowerCase().replace('@', '');
+    platform = data.profile.platform;
+  }
+
+  if (!contentUsername) return false;
+
+  // Comparar con el username configurado según la plataforma
+  let ownUsername = '';
+
+  if (platform === 'instagram' && config.ownInstagramUsername) {
+    ownUsername = config.ownInstagramUsername.toLowerCase().replace('@', '');
+  } else if (platform === 'tiktok' && config.ownTiktokUsername) {
+    ownUsername = config.ownTiktokUsername.toLowerCase().replace('@', '');
+  }
+
+  const isOwn = ownUsername !== '' && contentUsername === ownUsername;
+
+  if (isOwn) {
+    console.log(`[Elena Bridge SW] PERFIL PROPIO detectado: @${contentUsername} (${platform})`);
+  }
+
+  return isOwn;
+}
 
 // Configuración de la API
 const API_CONFIG = {
@@ -37,13 +96,18 @@ async function checkServerHealth(): Promise<boolean> {
 
 /**
  * Construye el payload para la API según el tipo de datos extraídos
+ *
+ * @param data - Datos extraídos del contenido/perfil
+ * @param isOwnProfile - True si el contenido es del perfil propio (activa feedback loop ML)
  */
-function buildPayload(data: ExtractionResult) {
+function buildPayload(data: ExtractionResult, isOwnProfile: boolean = false) {
   const basePayload = {
     source: 'elena_bridge_extension',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
-    pageType: data.pageType
+    pageType: data.pageType,
+    // Human-in-the-Loop: flag para activar feedback loop en backend
+    isOwnProfile
   };
 
   // Contenido individual (posts, reels, videos)
@@ -58,7 +122,9 @@ function buildPayload(data: ExtractionResult) {
         contentId: data.content.contentId,
         author: data.content.author.username,
         sourceUrl: data.content.sourceUrl,
-        extractionMethod: data.content.extractionMethod
+        extractionMethod: data.content.extractionMethod,
+        // Indica al backend que debe registrar métricas reales
+        isOwnProfile
       }
     };
   }
@@ -74,7 +140,8 @@ function buildPayload(data: ExtractionResult) {
         platform: data.profile.platform,
         username: data.profile.username,
         sourceUrl: data.profile.sourceUrl,
-        extractionMethod: data.profile.extractionMethod
+        extractionMethod: data.profile.extractionMethod,
+        isOwnProfile
       }
     };
   }
@@ -83,15 +150,25 @@ function buildPayload(data: ExtractionResult) {
   return {
     ...basePayload,
     type: 'unknown',
-    raw: data
+    raw: data,
+    isOwnProfile
   };
 }
 
 /**
  * Envía datos al backend con reintentos
+ * Detecta automáticamente si el contenido es del perfil propio para activar feedback loop
  */
 async function sendToApi(data: ExtractionResult): Promise<ApiResponse> {
-  const payload = buildPayload(data);
+  // Human-in-the-Loop: obtener configuración y detectar perfil propio
+  const userConfig = await getUserConfig();
+  const isOwnProfile = isOwnProfileContent(data, userConfig);
+
+  if (isOwnProfile) {
+    console.log('[Elena Bridge SW] Activando feedback loop ML - contenido de perfil propio');
+  }
+
+  const payload = buildPayload(data, isOwnProfile);
 
   let lastError: Error | null = null;
 
@@ -206,6 +283,26 @@ chrome.runtime.onMessage.addListener(
             serverOnline: online,
             apiUrl: API_CONFIG.baseUrl
           });
+        })();
+        return true;
+
+      // Human-in-the-Loop: guardar configuración de usuario
+      case 'SAVE_USER_CONFIG':
+        if (message.config) {
+          chrome.storage.sync.set({ userConfig: message.config }, () => {
+            console.log('[Elena Bridge SW] User config saved:', message.config);
+            sendResponse({ success: true });
+          });
+          return true;
+        }
+        sendResponse({ success: false, error: 'No config provided' });
+        break;
+
+      // Human-in-the-Loop: obtener configuración actual
+      case 'GET_USER_CONFIG':
+        (async () => {
+          const config = await getUserConfig();
+          sendResponse({ success: true, config });
         })();
         return true;
 

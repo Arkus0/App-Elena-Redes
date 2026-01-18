@@ -109,6 +109,25 @@ export interface ExtractionResult {
   // Para perfiles, lista de posts recientes
   recentPosts?: ExtractedPost[];
   error?: string;
+
+  // Human-in-the-Loop: indica si el contenido es del perfil propio de la clienta
+  // Cuando es true, el backend registra las métricas reales para feedback del modelo ML
+  isOwnProfile?: boolean;
+}
+
+// ============================================================================
+// Configuración de Usuario (chrome.storage)
+// ============================================================================
+
+// Configuración almacenada localmente en la extensión
+// Permite identificar cuando el contenido extraído es del perfil propio
+export interface UserConfig {
+  // Username de Instagram de la clienta (sin @) - ej: "inmoalmeria"
+  ownInstagramUsername?: string;
+  // Username de TikTok de la clienta (sin @) - ej: "inmoalmeria"
+  ownTiktokUsername?: string;
+  // Timestamp de última sincronización
+  lastSyncAt?: string;
 }
 
 // Para compatibilidad con lista de posts en perfiles
@@ -129,8 +148,10 @@ export interface ExtractedPost {
 // ============================================================================
 
 export interface MessagePayload {
-  action: 'EXTRACT_CONTENT' | 'SEND_TO_API' | 'GET_STATUS' | 'EXTRACTION_COMPLETE';
+  action: 'EXTRACT_CONTENT' | 'SEND_TO_API' | 'GET_STATUS' | 'EXTRACTION_COMPLETE' |
+          'SAVE_USER_CONFIG' | 'GET_USER_CONFIG';
   data?: ExtractionResult;
+  config?: UserConfig;
   error?: string;
 }
 
