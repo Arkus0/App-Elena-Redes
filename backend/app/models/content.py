@@ -152,6 +152,7 @@ class GeneratedContent(Base):
     business = relationship("Business", back_populates="generated_content")
     calendar = relationship("ContentCalendar", back_populates="content_pieces")
     variations = relationship("GeneratedContent", backref="original", remote_side=[id])
+    ab_test_logs = relationship("ABTestLog", back_populates="post", cascade="all, delete-orphan")
 
 
 class ContentCalendar(Base):

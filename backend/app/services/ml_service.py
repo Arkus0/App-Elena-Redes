@@ -1,6 +1,16 @@
 """
 ML Service - Hybrid ML/LLM Architecture for Cost-Efficient Predictions
-Uses XGBoost/RandomForest for fast predictions, LLM only for creative generation
+=======================================================================
+
+Uses XGBoost/RandomForest for fast predictions, Grok (xAI) only for creative generation.
+
+FEATURE ENGINEERING:
+====================
+- Caption analysis: length, emoji_count, hashtag_count, has_question, has_strong_cta, lexical_richness
+- Sentiment analysis: VADER compound score (-1 to +1)
+- Timing features: post_hour, post_day_of_week, is_weekend
+- Format: one-hot encoding (Reel, Carousel, Static, TikTok)
+- Niche flags: binary indicators for business-specific keywords
 
 FEEDBACK LOOP ARCHITECTURE (Human-in-the-Loop Reinforcement Learning):
 ======================================================================
@@ -29,10 +39,22 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import mean_squared_error, accuracy_score
+from sklearn.metrics import mean_squared_error, accuracy_score, r2_score, mean_absolute_error, roc_auc_score
 import xgboost as xgb
 import shap
 import joblib
+
+# VADER Sentiment Analysis
+try:
+    from nltk.sentiment.vader import SentimentIntensityAnalyzer
+    import nltk
+    try:
+        nltk.data.find('sentiment/vader_lexicon.zip')
+    except LookupError:
+        nltk.download('vader_lexicon', quiet=True)
+    VADER_AVAILABLE = True
+except ImportError:
+    VADER_AVAILABLE = False
 
 from app.core.config import settings
 
@@ -115,6 +137,14 @@ class FeatureExtractor:
     """
     Extract features from content for ML predictions
     Features are designed for local SMB social media content
+
+    FEATURES EXTRACTED:
+    ===================
+    - Caption: length, emoji_count, hashtag_count, has_question, has_strong_cta, lexical_richness
+    - Sentiment: VADER compound score (-1 to +1)
+    - Timing: post_hour, post_day_of_week, is_weekend
+    - Format: one-hot encoding
+    - Niche flags: binary for vertical-specific keywords
     """
 
     # Emoji patterns
@@ -130,6 +160,12 @@ class FeatureExtractor:
         flags=re.UNICODE
     )
 
+    # Question detection regex (Spanish)
+    QUESTION_PATTERN = re.compile(r'\?|¿|cuál|qué|cómo|por qué|quién|dónde|cuándo', re.IGNORECASE)
+
+    # Strong CTA keywords (high-engagement drivers)
+    STRONG_CTA_KEYWORDS = ["comenta", "guarda", "dm", "visita", "taggea", "etiqueta", "escríbeme", "guárdalo"]
+
     # Engagement trigger words (Spanish focused for local SMBs)
     TRIGGER_WORDS = {
         "question": ["?", "cuál", "qué", "cómo", "por qué", "quién", "dónde", "cuándo"],
@@ -141,6 +177,27 @@ class FeatureExtractor:
         "emotion": ["amor", "feliz", "alegría", "pasión", "sueño", "gracias"],
         "transformation": ["antes", "después", "transformación", "cambio", "resultado"],
     }
+
+    # Niche-specific keywords for business type detection
+    NICHE_KEYWORDS = {
+        "inmobiliaria": ["casa", "piso", "tour", "triana", "inmueble", "venta", "alquiler", "habitación", "propiedad", "reforma", "m²", "metros"],
+        "floristeria": ["flores", "arreglo", "ramo", "bouquet", "rosas", "tulipanes", "floristería", "planta", "decoración floral", "centro de mesa"],
+        "cafeteria": ["café", "coffee", "latte", "cappuccino", "barista", "espresso", "desayuno", "brunch", "pastelería", "dulce"],
+        "peluqueria": ["corte", "pelo", "cabello", "tinte", "mechas", "peinado", "estilista", "look", "color", "tratamiento capilar"],
+        "restaurante": ["plato", "menú", "cocina", "chef", "reserva", "cena", "comida", "gastronomía", "receta", "sabor"],
+        "gimnasio": ["entreno", "fitness", "ejercicio", "músculo", "cardio", "peso", "rutina", "gym", "entrenador", "clase"],
+        "clinica": ["salud", "doctor", "tratamiento", "consulta", "cita", "paciente", "bienestar", "medicina", "especialista"],
+    }
+
+    # Initialize VADER analyzer (singleton)
+    _vader_analyzer = None
+
+    @classmethod
+    def _get_vader(cls):
+        """Get or initialize VADER sentiment analyzer."""
+        if cls._vader_analyzer is None and VADER_AVAILABLE:
+            cls._vader_analyzer = SentimentIntensityAnalyzer()
+        return cls._vader_analyzer
 
     # Hook patterns
     HOOK_PATTERNS = {
@@ -168,19 +225,58 @@ class FeatureExtractor:
         """
         Extract all features from content
         Returns feature dict for ML model input
+
+        ENHANCED FEATURES:
+        - Caption: length, emoji_count, hashtag_count, has_question, has_strong_cta, lexical_richness
+        - Sentiment: VADER compound score (-1 to +1)
+        - Timing: post_hour, post_day_of_week, is_weekend
+        - Format: one-hot encoding
+        - Niche flags: binary for vertical-specific keywords
         """
         caption = content.get("caption", "") or ""
         caption_lower = caption.lower()
+        words = caption_lower.split()
 
         features = {}
 
         # === Text Length Features ===
         features["caption_length"] = len(caption)
-        features["caption_words"] = len(caption.split())
+        features["caption_words"] = len(words)
         features["caption_lines"] = caption.count("\n") + 1
         features["avg_word_length"] = (
-            np.mean([len(w) for w in caption.split()]) if caption.split() else 0
+            np.mean([len(w) for w in words]) if words else 0
         )
+
+        # === Lexical Richness (type-token ratio) ===
+        # Higher values = more diverse vocabulary = potentially more engaging
+        if len(words) > 0:
+            unique_words = set(words)
+            features["lexical_richness"] = len(unique_words) / len(words)
+        else:
+            features["lexical_richness"] = 0.0
+
+        # === Question Detection (regex) ===
+        features["has_question"] = 1 if cls.QUESTION_PATTERN.search(caption) else 0
+
+        # === Strong CTA Detection ===
+        # Keywords: Comenta, Guarda, DM, Visita, Taggea
+        has_strong_cta = any(kw in caption_lower for kw in cls.STRONG_CTA_KEYWORDS)
+        features["has_strong_cta"] = 1 if has_strong_cta else 0
+
+        # === VADER Sentiment Analysis ===
+        vader = cls._get_vader()
+        if vader:
+            sentiment_scores = vader.polarity_scores(caption)
+            features["sentiment_compound"] = sentiment_scores["compound"]  # -1 to +1
+            features["sentiment_positive"] = sentiment_scores["pos"]
+            features["sentiment_negative"] = sentiment_scores["neg"]
+            features["sentiment_neutral"] = sentiment_scores["neu"]
+        else:
+            # Fallback if VADER not available
+            features["sentiment_compound"] = 0.0
+            features["sentiment_positive"] = 0.0
+            features["sentiment_negative"] = 0.0
+            features["sentiment_neutral"] = 1.0
 
         # === Emoji Features ===
         emojis = cls.EMOJI_PATTERN.findall(caption)
@@ -191,6 +287,11 @@ class FeatureExtractor:
         hashtags = content.get("hashtags", []) or re.findall(r"#\w+", caption)
         features["hashtag_count"] = len(hashtags)
         features["hashtag_density"] = len(hashtags) / max(features["caption_words"], 1)
+
+        # === Niche Flags (binary indicators for business-specific keywords) ===
+        for niche, keywords in cls.NICHE_KEYWORDS.items():
+            niche_match = any(kw.lower() in caption_lower for kw in keywords)
+            features[f"niche_{niche}"] = 1 if niche_match else 0
 
         # === Mention Features ===
         mentions = content.get("mentions", []) or re.findall(r"@\w+", caption)
@@ -663,7 +764,11 @@ class MLPredictor:
         return {"note": "Explanation not available"}
 
     def _shap_to_text(self, positive: List[Dict], negative: List[Dict]) -> str:
-        """Convert SHAP values to human-readable text"""
+        """
+        Convert SHAP values to human-readable text with Top 5 features.
+
+        Output format: "RPI alto por: pregunta en caption (+22%), hora 20:00 (+18%), formato Reel (+15%)"
+        """
         feature_descriptions = {
             "emoji_count": "uso de emojis",
             "emoji_density": "densidad de emojis",
@@ -680,25 +785,109 @@ class MLPredictor:
             "video_optimal_length": "duración óptima del video",
             "is_prime_time": "horario prime",
             "caption_length": "longitud del caption",
+            "has_question": "pregunta en caption",
+            "has_strong_cta": "CTA fuerte",
+            "lexical_richness": "vocabulario diverso",
+            "sentiment_compound": "tono emocional",
+            "sentiment_positive": "sentimiento positivo",
+            "hour_of_day": "hora de publicación",
+            "day_of_week": "día de la semana",
+            "is_weekend": "fin de semana",
+            "niche_inmobiliaria": "keywords inmobiliaria",
+            "niche_floristeria": "keywords floristería",
+            "niche_cafeteria": "keywords cafetería",
+            "niche_peluqueria": "keywords peluquería",
+            "niche_restaurante": "keywords restaurante",
+            "niche_gimnasio": "keywords gimnasio",
+            "niche_clinica": "keywords clínica",
         }
 
-        parts = []
+        # Combine all factors and sort by absolute impact
+        all_factors = []
+        for p in positive:
+            all_factors.append({
+                "feature": p["feature"],
+                "impact": p["impact"],
+                "is_positive": True
+            })
+        for n in negative:
+            all_factors.append({
+                "feature": n["feature"],
+                "impact": n["impact"],
+                "is_positive": False
+            })
 
-        if positive:
-            pos_factors = [
-                feature_descriptions.get(p["feature"], p["feature"])
-                for p in positive[:2]
-            ]
-            parts.append(f"Factores positivos: {', '.join(pos_factors)}")
+        # Sort by absolute impact value
+        all_factors.sort(key=lambda x: abs(x["impact"]), reverse=True)
 
-        if negative:
-            neg_factors = [
-                feature_descriptions.get(n["feature"], n["feature"])
-                for n in negative[:2]
-            ]
-            parts.append(f"Áreas de mejora: {', '.join(neg_factors)}")
+        # Take Top 5
+        top_5 = all_factors[:5]
 
-        return ". ".join(parts) if parts else "Análisis basado en patrones de contenido exitoso"
+        if not top_5:
+            return "Análisis basado en patrones de contenido exitoso"
+
+        # Format as requested: "RPI alto por: factor1 (+X%), factor2 (+Y%), ..."
+        factor_strings = []
+        for f in top_5:
+            name = feature_descriptions.get(f["feature"], f["feature"])
+            # Convert impact to percentage (assuming impact is in score units, normalize to %)
+            pct = abs(f["impact"]) * 10  # Scale factor for readability
+            pct = min(pct, 50)  # Cap at 50%
+            sign = "+" if f["is_positive"] else "-"
+            factor_strings.append(f"{name} ({sign}{pct:.0f}%)")
+
+        return f"RPI alto por: {', '.join(factor_strings)}"
+
+    def _get_top5_shap_explanation(self, shap_values: np.ndarray, feature_names: List[str]) -> Dict[str, Any]:
+        """
+        Generate Top 5 SHAP-based explanation with percentage impacts.
+
+        Returns structured explanation with top 5 factors in format:
+        "RPI alto por: pregunta en caption (+22%), hora 20:00 (+18%), formato Reel (+15%)"
+        """
+        # Get indices sorted by absolute SHAP value
+        abs_values = np.abs(shap_values)
+        sorted_indices = np.argsort(abs_values)[::-1][:5]  # Top 5
+
+        top_factors = []
+        for idx in sorted_indices:
+            impact = shap_values[idx]
+            if abs(impact) > 0.001:  # Filter near-zero impacts
+                top_factors.append({
+                    "feature": feature_names[idx],
+                    "impact": float(impact),
+                    "impact_percent": float(abs(impact) * 10),  # Scale to percentage
+                    "direction": "positive" if impact > 0 else "negative"
+                })
+
+        # Generate human-readable text
+        feature_descriptions = {
+            "has_question": "pregunta en caption",
+            "hour_of_day": "hora de publicación",
+            "is_reel": "formato Reel",
+            "is_carousel": "formato Carousel",
+            "has_strong_cta": "CTA fuerte",
+            "sentiment_compound": "tono emocional",
+            "lexical_richness": "vocabulario diverso",
+            "emoji_count": "uso de emojis",
+            "is_prime_time": "horario prime",
+            "is_weekend": "fin de semana",
+        }
+
+        explanation_parts = []
+        for f in top_factors[:5]:
+            name = feature_descriptions.get(f["feature"], f["feature"].replace("_", " "))
+            sign = "+" if f["direction"] == "positive" else "-"
+            pct = min(f["impact_percent"], 50)
+            explanation_parts.append(f"{name} ({sign}{pct:.0f}%)")
+
+        explanation_text = f"RPI alto por: {', '.join(explanation_parts)}" if explanation_parts else "Análisis en progreso"
+
+        return {
+            "top_factors": top_factors,
+            "explanation_text": explanation_text,
+            "total_factors_analyzed": len(feature_names)
+        }
 
     def _get_feature_importance(self, model_type: str) -> List[Dict[str, Any]]:
         """Get global feature importance"""
