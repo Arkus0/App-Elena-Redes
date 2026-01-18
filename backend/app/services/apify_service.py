@@ -63,8 +63,8 @@ class ApifyService:
         """Initialize Apify client if API key is available"""
         if self.api_key:
             try:
-                from apify_client import ApifyClient
-                self.client = ApifyClient(self.api_key)
+                from apify_client import ApifyClientAsync
+                self.client = ApifyClientAsync(self.api_key)
                 logger.info("Apify client initialized successfully")
             except ImportError:
                 logger.warning("apify-client not installed, using mock data")
@@ -102,10 +102,12 @@ class ApifyService:
             }
 
             # Run actor and wait for completion
-            run = self.client.actor(settings.APIFY_INSTAGRAM_ACTOR).call(run_input=run_input)
+            run = await self.client.actor(settings.APIFY_INSTAGRAM_ACTOR).call(run_input=run_input)
 
             # Get results
-            items = list(self.client.dataset(run["defaultDatasetId"]).iterate_items())
+            items = []
+            async for item in self.client.dataset(run["defaultDatasetId"]).iterate_items():
+                items.append(item)
 
             if not items:
                 logger.warning(f"No data returned for Instagram user {username}")
@@ -139,8 +141,10 @@ class ApifyService:
                 "shouldDownloadCovers": False,
             }
 
-            run = self.client.actor(settings.APIFY_TIKTOK_ACTOR).call(run_input=run_input)
-            items = list(self.client.dataset(run["defaultDatasetId"]).iterate_items())
+            run = await self.client.actor(settings.APIFY_TIKTOK_ACTOR).call(run_input=run_input)
+            items = []
+            async for item in self.client.dataset(run["defaultDatasetId"]).iterate_items():
+                items.append(item)
 
             if not items:
                 logger.warning(f"No data returned for TikTok user {username}")
@@ -170,8 +174,10 @@ class ApifyService:
                 "maxPosts": max_posts,
             }
 
-            run = self.client.actor(settings.APIFY_LINKEDIN_ACTOR).call(run_input=run_input)
-            items = list(self.client.dataset(run["defaultDatasetId"]).iterate_items())
+            run = await self.client.actor(settings.APIFY_LINKEDIN_ACTOR).call(run_input=run_input)
+            items = []
+            async for item in self.client.dataset(run["defaultDatasetId"]).iterate_items():
+                items.append(item)
 
             if not items:
                 return self._get_mock_linkedin_data(username)
@@ -210,8 +216,10 @@ class ApifyService:
                 }
                 actor = settings.APIFY_TIKTOK_ACTOR
 
-            run = self.client.actor(actor).call(run_input=run_input)
-            items = list(self.client.dataset(run["defaultDatasetId"]).iterate_items())
+            run = await self.client.actor(actor).call(run_input=run_input)
+            items = []
+            async for item in self.client.dataset(run["defaultDatasetId"]).iterate_items():
+                items.append(item)
 
             return self._process_trending_data(items, platform)
 
