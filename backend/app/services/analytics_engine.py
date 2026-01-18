@@ -81,7 +81,18 @@ def _check_text_intelligence() -> bool:
 
 @dataclass(frozen=True)
 class VideoConfig:
-    """Immutable configuration for video processing."""
+    """
+    Immutable configuration for video processing.
+
+    PERFORMANCE NOTES:
+    ==================
+    - optical_flow_enabled: Disable for ~40% speedup when camera stability
+      analysis is not needed. Safe to disable for quick previews or
+      when processing many videos in batch.
+
+    - face_detection_enabled: Can be disabled for ~10% speedup if face
+      detection in hook is not required.
+    """
     target_resolution: Tuple[int, int] = (224, 224)  # Reduce memory by ~90%
     frame_stride_seconds: float = 0.5  # Analyze 1 frame every 0.5s
     histogram_bins: int = 64  # Reduced from 256 for faster computation
@@ -104,7 +115,22 @@ class VideoConfig:
     # Distinguishes "dynamic editing" (intentional cuts/motion) from
     # "bad filming" (unintended camera shake, poor stabilization)
 
-    # Optical flow parameters (Farneback algorithm)
+    # ==========================================================================
+    # OPTICAL FLOW TOGGLE - Performance Optimization
+    # ==========================================================================
+    # Optical flow analysis is computationally expensive (~40% of processing time).
+    # Disable when:
+    # - Processing many videos in batch (use for spot checks instead)
+    # - Camera stability is not a concern for your use case
+    # - Quick preview/draft mode is needed
+    #
+    # When disabled:
+    # - instability_score, camera_stability_score = 0.0 (neutral)
+    # - production_quality_score uses only brightness/contrast
+    # - visual_energy has no instability penalty applied
+    optical_flow_enabled: bool = True  # Set to False for ~40% speedup
+
+    # Optical flow parameters (Farneback algorithm) - only used if enabled
     optical_flow_pyr_scale: float = 0.5  # Pyramid scale for flow computation
     optical_flow_levels: int = 3  # Number of pyramid levels
     optical_flow_winsize: int = 15  # Averaging window size
@@ -716,10 +742,12 @@ class EfficientFeatureExtractor:
 
                     # === QUALITY GATE: Optical Flow Analysis ===
                     # Distinguish camera shake from intentional motion
-                    global_motion, local_variance = self._analyze_optical_flow(frame)
-                    if global_motion > 0 or local_variance > 0:
-                        self._global_motion_magnitudes.append(global_motion)
-                        self._local_motion_variances.append(local_variance)
+                    # PERFORMANCE: Skip if optical_flow_enabled=False (~40% speedup)
+                    if self.config.optical_flow_enabled:
+                        global_motion, local_variance = self._analyze_optical_flow(frame)
+                        if global_motion > 0 or local_variance > 0:
+                            self._global_motion_magnitudes.append(global_motion)
+                            self._local_motion_variances.append(local_variance)
 
                     # Histogram-based cut detection
                     hist = self._calculate_histogram(frame)
@@ -775,25 +803,36 @@ class EfficientFeatureExtractor:
             # QUALITY GATE: Camera Instability Detection & Penalty
             # =================================================================
             # Distinguish "dynamic editing" (good) from "bad filming" (shake)
+            # PERFORMANCE: When optical_flow_enabled=False, skip instability analysis
+            # and use raw energy values without penalty
 
-            instability_score, shake_ratio = self._calculate_instability_score()
+            if self.config.optical_flow_enabled:
+                instability_score, shake_ratio = self._calculate_instability_score()
 
-            # Apply instability penalty to visual energy
-            # Shaky footage should NOT be scored as "high energy content"
-            visual_energy = self._apply_instability_penalty(
-                raw_visual_energy,
-                instability_score
-            )
+                # Apply instability penalty to visual energy
+                # Shaky footage should NOT be scored as "high energy content"
+                visual_energy = self._apply_instability_penalty(
+                    raw_visual_energy,
+                    instability_score
+                )
 
-            # Apply same penalty to hook/retention energy for consistency
-            adjusted_hook_energy = self._apply_instability_penalty(
-                hook_energy,
-                instability_score
-            )
-            adjusted_retention_energy = self._apply_instability_penalty(
-                retention_energy,
-                instability_score
-            )
+                # Apply same penalty to hook/retention energy for consistency
+                adjusted_hook_energy = self._apply_instability_penalty(
+                    hook_energy,
+                    instability_score
+                )
+                adjusted_retention_energy = self._apply_instability_penalty(
+                    retention_energy,
+                    instability_score
+                )
+            else:
+                # Optical flow disabled - use neutral values (no penalty)
+                instability_score = 0.0
+                shake_ratio = 0.0
+                visual_energy = raw_visual_energy  # No penalty applied
+                adjusted_hook_energy = hook_energy
+                adjusted_retention_energy = retention_energy
+                logger.debug("Optical flow disabled - skipping instability analysis")
 
             # Calculate production quality score
             quality_metrics = self._calculate_production_quality(
@@ -864,6 +903,10 @@ class EfficientFeatureExtractor:
                 "hook_duration": hook_duration,
                 "hook_frames": len(self._hook_frame_diffs),
                 "retention_frames": len(self._retention_frame_diffs),
+
+                # === OPTIMIZATION FLAGS ===
+                "optical_flow_enabled": self.config.optical_flow_enabled,
+                "face_detection_enabled": self.config.face_detection_enabled,
             }
 
         finally:

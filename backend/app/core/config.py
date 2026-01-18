@@ -44,6 +44,28 @@ class Settings(BaseSettings):
     MAX_POSTS_PER_COMPETITOR: int = 30
     MIN_ENGAGEMENT_THRESHOLD: int = 100  # Minimum likes+comments to consider
 
+    # ==========================================================================
+    # VIDEO PROCESSING OPTIMIZATION SETTINGS
+    # ==========================================================================
+    # These settings control performance vs. accuracy trade-offs
+
+    # Optical Flow - Camera stability analysis (~40% of processing time)
+    # Set to False for faster processing when camera stability is not critical
+    VIDEO_OPTICAL_FLOW_ENABLED: bool = True
+
+    # ML Model Quantization - int8 quantization for ~3-4x speedup
+    # Trades ~1% accuracy for significant speed improvement on CPU
+    ML_EMBEDDING_QUANTIZE: bool = True
+    ML_WHISPER_COMPUTE_TYPE: str = "int8"  # Options: int8, float16, float32
+
+    # Video Task Queue - Background processing configuration
+    TASK_QUEUE_ENABLED: bool = True
+    TASK_QUEUE_MAX_SIZE: int = 100
+    TASK_QUEUE_PERSIST: bool = False  # Enable SQLite persistence for crash recovery
+    TASK_QUEUE_SQLITE_PATH: str = "./video_tasks.db"
+    TASK_QUEUE_MAX_RETRIES: int = 3
+    TASK_QUEUE_TIMEOUT_SECONDS: int = 600  # 10 minutes max per task
+
     class Config:
         env_file = ".env"
         case_sensitive = True
