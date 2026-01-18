@@ -37,9 +37,10 @@ joblib==1.3.2
 # Analytics Engine (Video/Audio Processing)
 opencv-python-headless==4.9.0.80  # Headless for server/edge (no GUI)
 librosa==0.10.1  # Audio analysis (optional - gracefully degrades if unavailable)
+av>=12.0.0 --only-binary=:all:
 
 # Text Intelligence (NLP Pipeline)
-faster-whisper==1.0.1  # Speech-to-text with CTranslate2 backend (efficient CPU inference)
+faster-whisper  # Speech-to-text with CTranslate2 backend (efficient CPU inference)
 easyocr==1.7.1  # Optical Character Recognition for frame text detection
 sentence-transformers==2.3.1  # Semantic embeddings (all-MiniLM-L6-v2)
 
@@ -47,3 +48,5 @@ sentence-transformers==2.3.1  # Semantic embeddings (all-MiniLM-L6-v2)
 pytest==7.4.4
 pytest-asyncio==0.23.3
 httpx==0.26.0
+
+email-validator>=2.1.0
