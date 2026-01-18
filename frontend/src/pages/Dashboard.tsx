@@ -18,7 +18,8 @@ import {
   Shield,
 } from 'lucide-react'
 import { useBusinessStore } from '../stores/businessStore'
-import { businessApi, competitorsApi, contentApi, mlApi, type ModelHealthSummary } from '../services/api'
+import { businessApi, competitorsApi, contentApi, mlApi, lightModeApi, type ModelHealthSummary, type LightModeConfig } from '../services/api'
+import { LightModeConfiguration } from '../components/LightModeConfiguration'
 import clsx from 'clsx'
 
 export default function Dashboard() {
@@ -37,6 +38,7 @@ export default function Dashboard() {
     feature_count: number
   } | null>(null)
   const [modelHealth, setModelHealth] = useState<ModelHealthSummary | null>(null)
+  const [lightModeConfig, setLightModeConfig] = useState<LightModeConfig | null>(null)
 
   useEffect(() => {
     if (!currentBusiness) {
@@ -47,18 +49,20 @@ export default function Dashboard() {
     const loadData = async () => {
       setIsLoading(true)
       try {
-        const [statusData, competitorsData, calendarsData, mlStatusData, healthData] = await Promise.all([
+        const [statusData, competitorsData, calendarsData, mlStatusData, healthData, lightModeData] = await Promise.all([
           businessApi.getStatus(currentBusiness.id),
           competitorsApi.getCompetitors(currentBusiness.id),
           contentApi.getCalendars(currentBusiness.id),
           mlApi.getModelStatus().catch(() => null),
           mlApi.getModelHealthSummary().catch(() => null),
+          lightModeApi.getConfig(currentBusiness.id).catch(() => null),
         ])
         setStatus(statusData)
         setCompetitors(competitorsData)
         setCalendars(calendarsData)
         setMlStatus(mlStatusData)
         setModelHealth(healthData)
+        setLightModeConfig(lightModeData)
       } catch (error) {
         console.error('Error loading dashboard data:', error)
       } finally {
@@ -303,6 +307,16 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* Light Mode Toggle - Multimodal Processing */}
+      <LightModeConfiguration
+        businessId={currentBusiness.id}
+        compact={true}
+        onConfigChange={(enabled) => {
+          setLightModeConfig(prev => prev ? { ...prev, light_mode_enabled: enabled } : null)
+        }}
+        className="card bg-gradient-to-r from-yellow-600/10 to-orange-600/10 border-yellow-500/20"
+      />
 
       {/* Quick Actions */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

@@ -66,6 +66,33 @@ class Settings(BaseSettings):
     TASK_QUEUE_MAX_RETRIES: int = 3
     TASK_QUEUE_TIMEOUT_SECONDS: int = 600  # 10 minutes max per task
 
+    # ==========================================================================
+    # LIGHT MODE MULTIMODAL PROCESSING
+    # ==========================================================================
+    # Optimizes Whisper/EasyOCR processing for cost efficiency
+    # Light mode: ~5s processing vs ~20s full (75% faster, minimal quality loss)
+
+    # Master toggle - True for light mode (recommended for sobremesa)
+    LIGHT_MODE_ENABLED: bool = True
+
+    # Whisper light settings
+    LIGHT_WHISPER_MODEL: str = "tiny"  # 'tiny' (~75MB) or 'base' (~150MB)
+    LIGHT_WHISPER_MAX_DURATION: float = 3.0  # Only first 3 seconds (hook analysis)
+
+    # OCR light settings
+    LIGHT_OCR_MAX_FRAMES: int = 5  # Only first 5 frames
+    LIGHT_OCR_USE_THUMBNAIL: bool = True  # Prefer thumbnail over frame extraction
+
+    # Hook analysis
+    LIGHT_HOOK_DURATION: float = 3.0  # Analyze first 3 seconds only
+
+    # Cache settings (skip already processed media)
+    LIGHT_CACHE_ENABLED: bool = True
+    LIGHT_CACHE_TTL_HOURS: int = 168  # 7 days
+
+    # Skip multimodal for non-video content
+    LIGHT_SKIP_NON_VIDEO: bool = True
+
     class Config:
         env_file = ".env"
         case_sensitive = True

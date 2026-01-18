@@ -6,6 +6,13 @@ Supports both individual content (posts, reels, videos) and full profile analysi
 Human-in-the-Loop Integration:
 When isOwnProfile=True, the backend registers real performance metrics for ML feedback loop.
 This closes the loop between predictions and actual performance, enabling continuous learning.
+
+Light Mode Multimodal Processing:
+When light_mode=True (default), uses optimized Whisper/EasyOCR processing:
+- Whisper: 'tiny' model, first 3 seconds only (hook analysis)
+- EasyOCR: First 5 frames or thumbnail only
+- Cache: Hash-based deduplication to skip already processed media
+- Skip: Non-video content skips multimodal processing entirely
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
 from pydantic import BaseModel, Field
@@ -15,9 +22,11 @@ import logging
 import uuid
 import hashlib
 import math
+import time
 
 # Import ML service for feedback loop
 from app.services.ml_service import get_ml_predictor, FeatureExtractor
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +177,10 @@ class RawIngestPayload(BaseModel):
     # When True, backend registers real metrics for ML feedback loop
     isOwnProfile: bool = Field(default=False, description="True if content is from own profile for feedback loop")
 
+    # Light Mode: enables optimized multimodal processing (default: True)
+    # Light mode: ~5s vs ~20s full processing, 75% time saved
+    lightMode: bool = Field(default=True, description="Use light multimodal processing (recommended)")
+
     class Config:
         extra = "allow"
 
@@ -180,6 +193,117 @@ class IngestResponse(BaseModel):
     data_type: Optional[str] = None
     identifier: Optional[str] = None  # content_id or username
     items_count: int = 0
+
+
+# ============================================================================
+# Light Mode Multimodal Processing Helper
+# ============================================================================
+
+def _process_multimodal_light(
+    content: ContentData,
+    light_mode: bool = True
+) -> Dict[str, Any]:
+    """
+    Process multimodal content with light optimizations.
+
+    Args:
+        content: ContentData with media URLs
+        light_mode: Enable light processing (default: True)
+
+    Returns:
+        Dict with multimodal features (transcription, OCR, hook_score)
+    """
+    settings = get_settings()
+    start_time = time.time()
+
+    # Default result
+    result = {
+        "transcription": "",
+        "ocr_text": "",
+        "hook_score": 0.0,
+        "light_mode": light_mode,
+        "processing_time_seconds": 0.0,
+        "time_saved_seconds": 0.0,
+        "cached": False,
+        "skipped": False,
+    }
+
+    # Check if light mode is enabled globally
+    if not settings.LIGHT_MODE_ENABLED:
+        light_mode = False
+
+    # Get media URL/thumbnail
+    media_url = None
+    thumbnail_url = None
+
+    for media in content.media:
+        if media.type == "video" and media.url:
+            media_url = media.url
+        if media.thumbnailUrl:
+            thumbnail_url = media.thumbnailUrl
+
+    # Skip if no media
+    if not media_url and not thumbnail_url:
+        result["skipped"] = True
+        result["skip_reason"] = "No media URL available"
+        return result
+
+    try:
+        from ml.light_processors import get_light_processor, LightProcessingConfig
+
+        # Create config from settings
+        config = LightProcessingConfig(
+            whisper_model=settings.LIGHT_WHISPER_MODEL,
+            whisper_max_duration=settings.LIGHT_WHISPER_MAX_DURATION,
+            ocr_max_frames=settings.LIGHT_OCR_MAX_FRAMES,
+            ocr_use_thumbnail=settings.LIGHT_OCR_USE_THUMBNAIL,
+            hook_duration_seconds=settings.LIGHT_HOOK_DURATION,
+            cache_enabled=settings.LIGHT_CACHE_ENABLED,
+            cache_ttl_hours=settings.LIGHT_CACHE_TTL_HOURS,
+            skip_non_video=settings.LIGHT_SKIP_NON_VIDEO,
+        )
+
+        processor = get_light_processor(light_mode=light_mode, config=config)
+
+        # Process with light mode
+        light_result = processor.process(
+            media_url=media_url,
+            thumbnail_url=thumbnail_url,
+            content_type=content.contentType,
+            caption=content.caption or "",
+        )
+
+        result.update({
+            "transcription": light_result.transcription,
+            "ocr_text": light_result.ocr_text,
+            "hook_score": light_result.hook_score,
+            "text_density": light_result.text_density,
+            "processing_time_seconds": light_result.processing_time_seconds,
+            "time_saved_seconds": light_result.time_saved_seconds,
+            "time_saved_percent": light_result.time_saved_percent,
+            "cached": light_result.cached,
+            "skipped": light_result.skipped,
+            "skip_reason": light_result.skip_reason,
+        })
+
+        # Log time savings
+        if light_result.time_saved_seconds > 0:
+            logger.info(
+                f"Multimodal light: {light_result.processing_time_seconds:.2f}s "
+                f"vs ~{light_result.estimated_full_time_seconds:.1f}s full "
+                f"({light_result.time_saved_percent:.0f}% saved)"
+            )
+
+    except ImportError:
+        logger.warning("light_processors not available, skipping multimodal")
+        result["skipped"] = True
+        result["skip_reason"] = "light_processors module not available"
+    except Exception as e:
+        logger.error(f"Light multimodal processing failed: {e}")
+        result["error"] = str(e)
+
+    result["processing_time_seconds"] = time.time() - start_time
+    return result
 
 
 # ============================================================================
@@ -293,15 +417,29 @@ def _content_to_features_dict(content: ContentData) -> Dict[str, Any]:
     }
 
 
-async def process_content_data(task_id: str, content: ContentData, is_own_profile: bool = False):
+async def process_content_data(
+    task_id: str,
+    content: ContentData,
+    is_own_profile: bool = False,
+    light_mode: bool = True
+):
     """
     Background task to process individual content (post, reel, video).
 
     Human-in-the-Loop:
     When is_own_profile=True, registers real performance metrics for ML feedback loop.
     This enables the model to learn from actual post performance.
+
+    Light Mode:
+    When light_mode=True (default), uses optimized multimodal processing:
+    - Whisper: tiny model, first 3s only
+    - EasyOCR: 5 frames max or thumbnail
+    - Cache: Skip already processed media
     """
-    logger.info(f"[Task {task_id}] Processing {content.contentType} from {content.platform}")
+    logger.info(
+        f"[Task {task_id}] Processing {content.contentType} from {content.platform} "
+        f"(light_mode={light_mode})"
+    )
 
     try:
         # Log content details
@@ -333,6 +471,48 @@ async def process_content_data(task_id: str, content: ContentData, is_own_profil
             logger.info(
                 f"[Task {task_id}] Audio: '{content.audio.title}' by {content.audio.artist or 'Unknown'}"
             )
+
+        # =====================================================================
+        # LIGHT MODE MULTIMODAL PROCESSING
+        # =====================================================================
+        multimodal_result = {}
+        if content.contentType in ("reel", "video") or any(m.type == "video" for m in content.media):
+            logger.info(
+                f"[Task {task_id}] Processing multimodal content "
+                f"({'light' if light_mode else 'full'} mode)"
+            )
+            multimodal_result = _process_multimodal_light(content, light_mode=light_mode)
+
+            if multimodal_result.get("cached"):
+                logger.info(
+                    f"[Task {task_id}] Multimodal CACHED - instant retrieval"
+                )
+            elif multimodal_result.get("skipped"):
+                logger.info(
+                    f"[Task {task_id}] Multimodal SKIPPED: {multimodal_result.get('skip_reason')}"
+                )
+            else:
+                logger.info(
+                    f"[Task {task_id}] Multimodal processed in "
+                    f"{multimodal_result.get('processing_time_seconds', 0):.2f}s "
+                    f"(saved {multimodal_result.get('time_saved_percent', 0):.0f}%)"
+                )
+
+            # Log extracted content
+            if multimodal_result.get("transcription"):
+                word_count = len(multimodal_result["transcription"].split())
+                logger.info(f"[Task {task_id}] Transcription: {word_count} words (hook)")
+
+            if multimodal_result.get("ocr_text"):
+                logger.info(
+                    f"[Task {task_id}] OCR text: {len(multimodal_result['ocr_text'])} chars, "
+                    f"density: {multimodal_result.get('text_density', 0):.2f}%"
+                )
+
+            if multimodal_result.get("hook_score", 0) > 0:
+                logger.info(
+                    f"[Task {task_id}] Hook score: {multimodal_result['hook_score']:.2f}"
+                )
 
         # =====================================================================
         # HUMAN-IN-THE-LOOP: Register ML Feedback for Own Profile Content
@@ -571,19 +751,22 @@ async def ingest_raw_data(
         content = payload.content
         is_own = payload.isOwnProfile
 
+        light_mode = payload.lightMode
         logger.info(
             f"[{task_id}] Ingesting {content.contentType} from @{content.author.username} "
             f"({content.platform}, method: {content.extractionMethod})"
             f"{' [PERFIL PROPIO - Feedback Loop]' if is_own else ''}"
+            f" [{'LIGHT' if light_mode else 'FULL'} mode]"
         )
 
-        # Queue background processing with own profile flag
-        background_tasks.add_task(process_content_data, task_id, content, is_own)
+        # Queue background processing with own profile flag and light mode
+        background_tasks.add_task(process_content_data, task_id, content, is_own, light_mode)
 
         return IngestResponse(
             success=True,
             message=f"{content.contentType.capitalize()} from @{content.author.username} queued for processing"
-                    + (" (feedback loop activado)" if is_own else ""),
+                    + (" (feedback loop activado)" if is_own else "")
+                    + (f" [modo {'ligero' if light_mode else 'completo'}]"),
             task_id=task_id,
             data_type=content.contentType,
             identifier=content.contentId,
