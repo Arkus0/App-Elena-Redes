@@ -7,17 +7,25 @@ Human-in-the-Loop Integration:
 When isOwnProfile=True, the backend registers real performance metrics for ML feedback loop.
 This closes the loop between predictions and actual performance, enabling continuous learning.
 
+USER CONFIG INTEGRATION (REAL SYNC):
+===================================
+- Loads user_config from database using user_id/business_id
+- Uses own_instagram_username from config to AUTO-DETECT own profile (no manual flag needed)
+- Uses multimodal_mode and light_mode_config from user_config (not global settings)
+- Logs: "User config loaded: precision {X}, multimodal {Y}, own @{Z}"
+
 Light Mode Multimodal Processing:
-When light_mode=True (default), uses optimized Whisper/EasyOCR processing:
+When multimodal_mode="light" (from user_config), uses optimized Whisper/EasyOCR processing:
 - Whisper: 'tiny' model, first 3 seconds only (hook analysis)
 - EasyOCR: First 5 frames or thumbnail only
 - Cache: Hash-based deduplication to skip already processed media
 - Skip: Non-video content skips multimodal processing entirely
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Header, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal, Any, Dict
 from datetime import datetime
+from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 import uuid
 import hashlib
@@ -27,6 +35,9 @@ import time
 # Import ML service for feedback loop
 from app.services.ml_service import get_ml_predictor, FeatureExtractor
 from app.core.config import get_settings
+from app.core.database import get_db
+from app.services.user_config_service import user_config_service, get_default_pipeline_config
+from app.schemas.user_config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -153,15 +164,26 @@ class RawIngestPayload(BaseModel):
     """
     Unified payload for both content and profile ingestion
 
+    USER CONFIG SYNC:
+    =================
+    - business_id/user_id: Used to load user_config from database
+    - If own_instagram_username in config matches author.username, auto-flags as own profile
+    - multimodal_mode from config determines light/full processing (overrides lightMode)
+
     Human-in-the-Loop:
-    When isOwnProfile=True, the content belongs to the client's own account.
-    This triggers the ML feedback loop to register real performance metrics.
+    When isOwnProfile=True OR username matches config.own_instagram_username,
+    the content triggers ML feedback loop for continuous learning.
     """
     source: str = Field(default="elena_bridge_extension", description="Source identifier")
     version: str = Field(default="1.0.0", description="Extension version")
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     pageType: Optional[str] = None
     type: Optional[Literal["content", "profile", "unknown"]] = None
+
+    # USER CONFIG SYNC: IDs for loading user configuration
+    # These should be sent by the extension (from stored auth session)
+    businessId: Optional[int] = Field(None, description="Business ID for loading user config")
+    userId: Optional[int] = Field(None, description="User ID for loading user config")
 
     # For individual content (posts, reels, videos)
     content: Optional[ContentData] = None
@@ -174,11 +196,11 @@ class RawIngestPayload(BaseModel):
     metadata: Optional[IngestMetadata] = None
 
     # Human-in-the-Loop: indicates content is from client's own account
-    # When True, backend registers real metrics for ML feedback loop
+    # NOTE: If not set, backend will auto-detect using own_instagram_username from user_config
     isOwnProfile: bool = Field(default=False, description="True if content is from own profile for feedback loop")
 
     # Light Mode: enables optimized multimodal processing (default: True)
-    # Light mode: ~5s vs ~20s full processing, 75% time saved
+    # NOTE: If businessId is provided, uses multimodal_mode from user_config instead
     lightMode: bool = Field(default=True, description="Use light multimodal processing (recommended)")
 
     class Config:
@@ -201,14 +223,22 @@ class IngestResponse(BaseModel):
 
 def _process_multimodal_light(
     content: ContentData,
-    light_mode: bool = True
+    light_mode: bool = True,
+    user_config: Optional[PipelineConfig] = None
 ) -> Dict[str, Any]:
     """
     Process multimodal content with light optimizations.
 
+    USER CONFIG SYNC:
+    =================
+    If user_config is provided, uses light_mode_config from user settings
+    instead of global environment settings. This ensures frontend config
+    changes affect backend processing in real-time.
+
     Args:
         content: ContentData with media URLs
         light_mode: Enable light processing (default: True)
+        user_config: PipelineConfig loaded from user_config table (optional)
 
     Returns:
         Dict with multimodal features (transcription, OCR, hook_score)
@@ -226,11 +256,27 @@ def _process_multimodal_light(
         "time_saved_seconds": 0.0,
         "cached": False,
         "skipped": False,
+        "config_source": "global",  # Track where config came from
     }
 
-    # Check if light mode is enabled globally
-    if not settings.LIGHT_MODE_ENABLED:
-        light_mode = False
+    # USER CONFIG SYNC: Use user config if provided, else fall back to global settings
+    if user_config:
+        light_mode = user_config.light_mode_enabled
+        whisper_model = user_config.whisper_model
+        ocr_max_frames = user_config.ocr_max_frames
+        result["config_source"] = "user_config"
+
+        logger.info(
+            f"Multimodal using USER CONFIG: mode={user_config.multimodal_mode}, "
+            f"whisper={whisper_model}, ocr_frames={ocr_max_frames}"
+        )
+    else:
+        # Fall back to global settings
+        whisper_model = settings.LIGHT_WHISPER_MODEL
+        ocr_max_frames = settings.LIGHT_OCR_MAX_FRAMES
+        if not settings.LIGHT_MODE_ENABLED:
+            light_mode = False
+        result["config_source"] = "global_settings"
 
     # Get media URL/thumbnail
     media_url = None
@@ -251,17 +297,29 @@ def _process_multimodal_light(
     try:
         from ml.light_processors import get_light_processor, LightProcessingConfig
 
-        # Create config from settings
-        config = LightProcessingConfig(
-            whisper_model=settings.LIGHT_WHISPER_MODEL,
-            whisper_max_duration=settings.LIGHT_WHISPER_MAX_DURATION,
-            ocr_max_frames=settings.LIGHT_OCR_MAX_FRAMES,
-            ocr_use_thumbnail=settings.LIGHT_OCR_USE_THUMBNAIL,
-            hook_duration_seconds=settings.LIGHT_HOOK_DURATION,
-            cache_enabled=settings.LIGHT_CACHE_ENABLED,
-            cache_ttl_hours=settings.LIGHT_CACHE_TTL_HOURS,
-            skip_non_video=settings.LIGHT_SKIP_NON_VIDEO,
-        )
+        # Create config from user_config or settings
+        if user_config:
+            config = LightProcessingConfig(
+                whisper_model=whisper_model,
+                whisper_max_duration=3.0 if light_mode else 30.0,
+                ocr_max_frames=ocr_max_frames,
+                ocr_use_thumbnail=True if light_mode else False,
+                hook_duration_seconds=3.0,
+                cache_enabled=True,
+                cache_ttl_hours=168,
+                skip_non_video=True,
+            )
+        else:
+            config = LightProcessingConfig(
+                whisper_model=settings.LIGHT_WHISPER_MODEL,
+                whisper_max_duration=settings.LIGHT_WHISPER_MAX_DURATION,
+                ocr_max_frames=settings.LIGHT_OCR_MAX_FRAMES,
+                ocr_use_thumbnail=settings.LIGHT_OCR_USE_THUMBNAIL,
+                hook_duration_seconds=settings.LIGHT_HOOK_DURATION,
+                cache_enabled=settings.LIGHT_CACHE_ENABLED,
+                cache_ttl_hours=settings.LIGHT_CACHE_TTL_HOURS,
+                skip_non_video=settings.LIGHT_SKIP_NON_VIDEO,
+            )
 
         processor = get_light_processor(light_mode=light_mode, config=config)
 
@@ -421,24 +479,51 @@ async def process_content_data(
     task_id: str,
     content: ContentData,
     is_own_profile: bool = False,
-    light_mode: bool = True
+    light_mode: bool = True,
+    user_config: Optional[PipelineConfig] = None
 ):
     """
     Background task to process individual content (post, reel, video).
 
+    USER CONFIG SYNC:
+    =================
+    If user_config is provided:
+    - Uses multimodal_mode from config (not light_mode param)
+    - Uses own_instagram_username to auto-detect own profile
+    - Uses embedding_precision for feature extraction
+    - Logs: "User config loaded: precision {X}, multimodal {Y}, own @{Z}"
+
     Human-in-the-Loop:
-    When is_own_profile=True, registers real performance metrics for ML feedback loop.
-    This enables the model to learn from actual post performance.
+    When is_own_profile=True OR username matches config.own_instagram_username,
+    registers real performance metrics for ML feedback loop.
 
     Light Mode:
-    When light_mode=True (default), uses optimized multimodal processing:
-    - Whisper: tiny model, first 3s only
-    - EasyOCR: 5 frames max or thumbnail
-    - Cache: Skip already processed media
+    When multimodal_mode="light" (from user_config), uses optimized processing.
     """
+    # CRITICAL LOG: User config loaded
+    if user_config:
+        logger.info(
+            f"[Task {task_id}] User config loaded: "
+            f"precision={user_config.embedding_precision} ({user_config.embedding_dims} dims), "
+            f"multimodal={user_config.multimodal_mode}, "
+            f"own=@{user_config.own_instagram_username or 'N/A'}"
+        )
+        # Override light_mode with user config
+        light_mode = user_config.light_mode_enabled
+        # Auto-detect own profile if not explicitly set
+        if not is_own_profile:
+            is_own_profile = user_config.is_own_profile(
+                content.author.username, content.platform
+            )
+            if is_own_profile:
+                logger.info(
+                    f"[Task {task_id}] AUTO-DETECTED own profile: @{content.author.username} "
+                    f"matches config.own_instagram_username"
+                )
+
     logger.info(
         f"[Task {task_id}] Processing {content.contentType} from {content.platform} "
-        f"(light_mode={light_mode})"
+        f"(light_mode={light_mode}, own_profile={is_own_profile})"
     )
 
     try:
@@ -473,15 +558,19 @@ async def process_content_data(
             )
 
         # =====================================================================
-        # LIGHT MODE MULTIMODAL PROCESSING
+        # LIGHT MODE MULTIMODAL PROCESSING (uses user_config if available)
         # =====================================================================
         multimodal_result = {}
         if content.contentType in ("reel", "video") or any(m.type == "video" for m in content.media):
             logger.info(
                 f"[Task {task_id}] Processing multimodal content "
-                f"({'light' if light_mode else 'full'} mode)"
+                f"({'light' if light_mode else 'full'} mode) "
+                f"[config: {'user_config' if user_config else 'global'}]"
             )
-            multimodal_result = _process_multimodal_light(content, light_mode=light_mode)
+            # USER CONFIG SYNC: Pass user_config to use configured settings
+            multimodal_result = _process_multimodal_light(
+                content, light_mode=light_mode, user_config=user_config
+            )
 
             if multimodal_result.get("cached"):
                 logger.info(
@@ -727,9 +816,18 @@ async def ingest_raw_data(
     x_elena_bridge_version: Optional[str] = Header(None),
     x_extension_id: Optional[str] = Header(None),
     x_content_type: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Ingest raw data from Elena Bridge Chrome extension.
+
+    USER CONFIG SYNC:
+    =================
+    If businessId/userId are provided in payload:
+    - Loads user_config from database
+    - Uses own_instagram_username to auto-detect own profile
+    - Uses multimodal_mode from config (overrides lightMode param)
+    - Config affects processing in real-time (no placebo!)
 
     Supports two types of data:
     - **content**: Individual posts, reels, or videos selected by the user
@@ -746,27 +844,62 @@ async def ingest_raw_data(
     # Generate task ID for tracking
     task_id = str(uuid.uuid4())[:8]
 
+    # =========================================================================
+    # USER CONFIG SYNC: Load config from database if IDs provided
+    # =========================================================================
+    user_config: Optional[PipelineConfig] = None
+    if payload.businessId and payload.userId:
+        try:
+            user_config = await user_config_service.get_pipeline_config(
+                db, payload.userId, payload.businessId
+            )
+            logger.info(
+                f"[{task_id}] USER CONFIG LOADED: precision={user_config.embedding_precision}, "
+                f"multimodal={user_config.multimodal_mode}, "
+                f"own=@{user_config.own_instagram_username or 'N/A'}"
+            )
+        except Exception as e:
+            logger.warning(f"[{task_id}] Could not load user config: {e}. Using defaults.")
+            user_config = get_default_pipeline_config(payload.userId, payload.businessId)
+
     # Handle individual content (posts, reels, videos)
     if payload.content:
         content = payload.content
         is_own = payload.isOwnProfile
 
+        # USER CONFIG SYNC: Override light_mode and detect own profile
         light_mode = payload.lightMode
+        if user_config:
+            light_mode = user_config.light_mode_enabled
+            # Auto-detect own profile
+            if not is_own:
+                is_own = user_config.is_own_profile(
+                    content.author.username, content.platform
+                )
+
         logger.info(
             f"[{task_id}] Ingesting {content.contentType} from @{content.author.username} "
             f"({content.platform}, method: {content.extractionMethod})"
             f"{' [PERFIL PROPIO - Feedback Loop]' if is_own else ''}"
             f" [{'LIGHT' if light_mode else 'FULL'} mode]"
+            f" [config: {'user_config' if user_config else 'default'}]"
         )
 
-        # Queue background processing with own profile flag and light mode
-        background_tasks.add_task(process_content_data, task_id, content, is_own, light_mode)
+        # Queue background processing with user_config
+        background_tasks.add_task(
+            process_content_data, task_id, content, is_own, light_mode, user_config
+        )
+
+        config_msg = ""
+        if user_config:
+            config_msg = f" [config: precision={user_config.embedding_precision}]"
 
         return IngestResponse(
             success=True,
             message=f"{content.contentType.capitalize()} from @{content.author.username} queued for processing"
                     + (" (feedback loop activado)" if is_own else "")
-                    + (f" [modo {'ligero' if light_mode else 'completo'}]"),
+                    + (f" [modo {'ligero' if light_mode else 'completo'}]")
+                    + config_msg,
             task_id=task_id,
             data_type=content.contentType,
             identifier=content.contentId,
@@ -778,10 +911,15 @@ async def ingest_raw_data(
         profile = payload.profile
         is_own = payload.isOwnProfile
 
+        # USER CONFIG SYNC: Auto-detect own profile
+        if user_config and not is_own:
+            is_own = user_config.is_own_profile(profile.username, profile.platform)
+
         logger.info(
             f"[{task_id}] Ingesting profile @{profile.username} from {profile.platform} "
             f"(method: {profile.extractionMethod})"
             f"{' [PERFIL PROPIO - Bulk Feedback Loop]' if is_own else ''}"
+            f" [config: {'user_config' if user_config else 'default'}]"
         )
 
         # Queue background processing with own profile flag

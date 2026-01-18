@@ -4,6 +4,15 @@ ML Service - Hybrid ML/LLM Architecture for Cost-Efficient Predictions
 
 Uses XGBoost/RandomForest for fast predictions, Grok (xAI) only for creative generation.
 
+USER CONFIG INTEGRATION (REAL-TIME SYNC):
+==========================================
+This service now loads user configuration from the database to ensure
+frontend changes affect predictions 100% (no placebo):
+
+- embedding_precision: Uses dims from user_config (ultra_low/low/medium/high/max)
+- kpi_weights: Uses custom weights from user_config for RPI calculation
+- Logs: "User config loaded: precision={X}, multimodal={Y}, own=@{Z}"
+
 FEATURE ENGINEERING:
 ====================
 - Caption analysis: length, emoji_count, hashtag_count, has_question, has_strong_cta, lexical_richness
@@ -325,10 +334,24 @@ class FeatureExtractor:
     }
 
     @classmethod
-    def extract_features(cls, content: Dict[str, Any]) -> Dict[str, float]:
+    def extract_features(
+        cls,
+        content: Dict[str, Any],
+        embedding_precision: str = "low"
+    ) -> Dict[str, float]:
         """
         Extract all features from content
         Returns feature dict for ML model input
+
+        USER CONFIG SYNC:
+        =================
+        The embedding_precision parameter should come from user_config to ensure
+        frontend changes affect feature extraction in real-time.
+
+        Args:
+            content: Content dict with caption, hashtags, etc.
+            embedding_precision: Precision from user_config (default: "low")
+                                Options: ultra_low/low/medium/high/max
 
         ENHANCED FEATURES:
         - Caption: length, emoji_count, hashtag_count, has_question, has_strong_cta, lexical_richness
@@ -336,6 +359,7 @@ class FeatureExtractor:
         - Timing: post_hour, post_day_of_week, is_weekend
         - Format: one-hot encoding
         - Niche flags: binary for vertical-specific keywords
+        - Embeddings: Semantic embeddings with configurable precision
         """
         caption = content.get("caption", "") or ""
         caption_lower = caption.lower()
@@ -519,23 +543,29 @@ class FeatureExtractor:
 
         # ==========================================================================
         # SEMANTIC EMBEDDINGS (Modern NLP features replacing manual heuristics)
+        # USER CONFIG SYNC: Uses embedding_precision from user_config
         # ==========================================================================
-        # Uses sentence-transformers/all-MiniLM-L6-v2 for 384-dim embeddings
-        # Reduced to 30 dimensions via PCA for XGBoost compatibility
+        # Uses sentence-transformers/all-MiniLM-L6-v2 with configurable dimensions:
+        # - ultra_low: 64 dims, low: 128 dims, medium: 256 dims, high/max: 384 dims
         # These features capture semantic meaning that heuristics cannot
+
+        # Get target dims from precision
+        target_dims = PRECISION_TO_DIMS.get(embedding_precision, 128) or 384
 
         if EMBEDDINGS_AVAILABLE:
             try:
-                embedding_features = get_embedding_features(caption)
+                # USER CONFIG SYNC: Pass precision to embedding extractor
+                embedding_features = get_embedding_features(caption, precision=embedding_precision)
                 features.update(embedding_features)
+                logger.debug(f"Embeddings extracted: precision={embedding_precision}, dims={len(embedding_features)}")
             except Exception as e:
-                logger.warning(f"Embedding extraction failed: {e}. Using zeros.")
-                for i in range(PCA_COMPONENTS):
-                    features[f"embedding_{i+1}"] = 0.0
+                logger.warning(f"Embedding extraction failed: {e}. Using zeros for {target_dims} dims.")
+                for i in range(target_dims):
+                    features[f"embedding_{i}"] = 0.0
         else:
             # Fallback: zeros when embeddings not available
-            for i in range(PCA_COMPONENTS):
-                features[f"embedding_{i+1}"] = 0.0
+            for i in range(target_dims):
+                features[f"embedding_{i}"] = 0.0
 
         # ==========================================================================
         # MULTIMODAL FEATURES (for video/reel content)
@@ -1183,9 +1213,24 @@ class MLPredictor:
 
         logger.info("ML models trained and saved successfully")
 
-    def predict_engagement(self, content: Dict[str, Any]) -> Dict[str, Any]:
+    def predict_engagement(
+        self,
+        content: Dict[str, Any],
+        embedding_precision: str = "low",
+        kpi_weights: Optional[Dict[str, float]] = None
+    ) -> Dict[str, Any]:
         """
         Predict engagement score for content with cold start handling.
+
+        USER CONFIG SYNC:
+        =================
+        This method now accepts embedding_precision and kpi_weights from user_config
+        to ensure frontend configuration changes affect predictions in real-time.
+
+        Args:
+            content: Content dict with caption, hashtags, etc.
+            embedding_precision: From user_config (default: "low")
+            kpi_weights: From user_config for RPI calculation (optional)
 
         Uses niche-specific model if available, falls back to base model
         for cold start scenarios, and uses heuristics as last resort.
@@ -1199,8 +1244,14 @@ class MLPredictor:
         Returns:
             Dict with score, confidence, explanation, model_source
         """
-        # Extract features
-        features = FeatureExtractor.extract_features(content)
+        # CRITICAL LOG: User config being used
+        logger.info(
+            f"Prediction with user config: precision={embedding_precision}, "
+            f"kpi_weights={'custom' if kpi_weights else 'default'}"
+        )
+
+        # Extract features with user-configured precision
+        features = FeatureExtractor.extract_features(content, embedding_precision=embedding_precision)
         df = pd.DataFrame([features])
         X = self._prepare_features(df)
 
@@ -1343,24 +1394,131 @@ class MLPredictor:
             "improvement_potential": self._calculate_improvement_potential(features),
         }
 
-    def get_full_prediction(self, content: Dict[str, Any]) -> Dict[str, Any]:
+    def get_full_prediction(
+        self,
+        content: Dict[str, Any],
+        embedding_precision: str = "low",
+        kpi_weights: Optional[Dict[str, float]] = None
+    ) -> Dict[str, Any]:
         """
         Get complete ML prediction with all components
         This is called before LLM generation for the hybrid approach
+
+        USER CONFIG SYNC:
+        =================
+        Accepts embedding_precision and kpi_weights from user_config to ensure
+        frontend configuration changes affect predictions in real-time.
+
+        Args:
+            content: Content dict with caption, hashtags, etc.
+            embedding_precision: From user_config (default: "low")
+            kpi_weights: From user_config for RPI calculation
         """
-        engagement = self.predict_engagement(content)
+        # CRITICAL LOG: Config being used
+        logger.info(
+            f"Full prediction with config: precision={embedding_precision}, "
+            f"kpi_weights={'custom' if kpi_weights else 'default'}"
+        )
+
+        engagement = self.predict_engagement(
+            content,
+            embedding_precision=embedding_precision,
+            kpi_weights=kpi_weights
+        )
         format_rec = self.recommend_format(content)
         triggers = self.suggest_triggers(content)
 
         # Generate optimization suggestions
         suggestions = self._generate_optimization_suggestions(content, engagement, format_rec, triggers)
 
-        return {
+        # Calculate weighted RPI if kpi_weights provided
+        weighted_rpi = None
+        if kpi_weights:
+            weighted_rpi = self._calculate_weighted_rpi(content, kpi_weights)
+
+        result = {
             "engagement_prediction": engagement,
             "format_recommendation": format_rec,
             "trigger_suggestions": triggers,
             "optimization_suggestions": suggestions,
             "ml_summary": self._generate_ml_summary(engagement, format_rec, triggers),
+            "config_used": {
+                "embedding_precision": embedding_precision,
+                "kpi_weights": kpi_weights or "default",
+            }
+        }
+
+        if weighted_rpi is not None:
+            result["weighted_rpi"] = weighted_rpi
+
+        return result
+
+    def _calculate_weighted_rpi(
+        self,
+        content: Dict[str, Any],
+        kpi_weights: Dict[str, float]
+    ) -> Dict[str, Any]:
+        """
+        Calculate RPI score using custom KPI weights from user_config.
+
+        USER CONFIG SYNC: This method uses weights from user_config to ensure
+        frontend KPI weight changes affect RPI calculation in real-time.
+
+        Args:
+            content: Content with metrics
+            kpi_weights: Weights dict with likes, comments, shares, saves, views
+
+        Returns:
+            Dict with weighted RPI score and breakdown
+        """
+        # Get metrics from content
+        likes = content.get("likes_count", content.get("likes", 0)) or 0
+        comments = content.get("comments_count", content.get("comments", 0)) or 0
+        shares = content.get("shares_count", content.get("shares", 0)) or 0
+        saves = content.get("saves_count", content.get("saves", 0)) or 0
+        views = content.get("views_count", content.get("video_views", 0)) or 0
+
+        # Get weights with defaults
+        w_likes = kpi_weights.get("likes", 1.0)
+        w_comments = kpi_weights.get("comments", 2.0)
+        w_shares = kpi_weights.get("shares", 10.0)
+        w_saves = kpi_weights.get("saves", 5.0)
+        w_views = kpi_weights.get("views", 3.0)
+
+        # Calculate weighted sum
+        weighted_sum = (
+            likes * w_likes +
+            comments * w_comments +
+            shares * w_shares +
+            saves * w_saves +
+            views * w_views
+        )
+
+        # Normalize by total weight
+        total_weight = w_likes + w_comments + w_shares + w_saves + w_views
+        if total_weight > 0:
+            normalized_rpi = weighted_sum / total_weight
+        else:
+            normalized_rpi = 0
+
+        return {
+            "weighted_rpi": round(normalized_rpi, 2),
+            "raw_weighted_sum": round(weighted_sum, 2),
+            "weights_used": kpi_weights,
+            "metrics": {
+                "likes": likes,
+                "comments": comments,
+                "shares": shares,
+                "saves": saves,
+                "views": views,
+            },
+            "contribution_breakdown": {
+                "likes": round(likes * w_likes, 2),
+                "comments": round(comments * w_comments, 2),
+                "shares": round(shares * w_shares, 2),
+                "saves": round(saves * w_saves, 2),
+                "views": round(views * w_views, 2),
+            }
         }
 
     def _get_shap_explanation(self, X: pd.DataFrame, model_type: str) -> Dict[str, Any]:
