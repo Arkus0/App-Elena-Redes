@@ -14,11 +14,22 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - **Explicabilidad SHAP**: Entiende *por qué* un contenido funcionará con Top 5 factores (ej: "RPI alto por: pregunta en caption (+22%), hora 20:00 (+18%), formato Reel (+15%)").
 
 ### 📊 Feature Engineering Avanzado
+
+#### 🧬 Semantic Embeddings (Nuevo - Priorizado)
+- **Modelo**: `sentence-transformers/all-MiniLM-L6-v2` (~80MB, multilingual)
+- **Output**: 384-dim embeddings → PCA reducido a 30-dim (`embedding_1` a `embedding_30`)
+- **Ventajas**: Captura significado semántico que las heurísticas no pueden detectar
+- **Soporte**: Español + Inglés nativamente
+- **Descarga**: Automática en primera ejecución desde HuggingFace
+
+#### 📝 Features Manuales (Backup)
 - **Análisis de Caption**: longitud, emoji_count, hashtag_count, has_question (regex), has_strong_cta (Comenta, Guarda, DM, Visita, Taggea), lexical_richness.
 - **Análisis de Sentimiento**: VADER (nltk) para score emocional (-1 a +1). Contenido emocional/positivo impulsa engagement.
 - **Features Temporales**: post_hour, post_day_of_week, is_weekend, is_prime_time.
 - **Formato**: One-hot encoding (Reel, Carousel, Static, TikTok).
 - **Niche Flags**: Detección de keywords por vertical (inmobiliaria: "casa", "tour", "Triana"; floristería: "flores", "arreglo", "ramo").
+
+> **Arquitectura de Features**: El sistema prioriza embeddings semánticos (30 features) y mantiene heurísticas manuales (43 features) como backup, resultando en **73 features totales** para XGBoost.
 
 ### 👁️ Video & Audio Analytics (Edge Optimized)
 - **Hook Theory Analysis**: Análisis crítico de los primeros 3 segundos (energía visual, cortes, presencia de caras).
@@ -258,9 +269,10 @@ La extensión envía datos a `POST /api/ingest/raw`:
 - **XGBoost** - Modelo de predicción
 - **SHAP** - Explicabilidad de predicciones
 - **Grok (xAI)** - Motor LLM principal para análisis creativo y generación de contenido
+- **sentence-transformers** - Embeddings semánticos (all-MiniLM-L6-v2)
 - **NLTK VADER** - Análisis de sentimiento
 - **Apify Client** - Scraping de redes sociales
-- **NumPy/Pandas** - Procesamiento de datos
+- **NumPy/Pandas/Scikit-learn** - Procesamiento de datos y PCA
 
 ### Frontend
 - **React 18** con TypeScript
@@ -450,6 +462,54 @@ El sistema implementa una estrategia robusta para nichos nuevos con pocos datos:
 
 ### Scripts ML (/ml)
 
+#### 0. Módulo de Embeddings Semánticos (Nuevo)
+
+El archivo `ml/features_embeddings.py` proporciona embeddings modernos basados en NLP:
+
+```python
+from ml.features_embeddings import (
+    get_caption_embedding,      # 384-dim raw embedding
+    get_embedding_features,     # 30-dim dict para ML
+    EmbeddingExtractor          # Clase completa
+)
+
+# Uso simple
+embedding_384 = get_caption_embedding("Nuevo apartamento en Triana!")
+# numpy array (384,)
+
+features_30 = get_embedding_features("Nuevo apartamento en Triana!")
+# {"embedding_1": 0.123, "embedding_2": -0.456, ..., "embedding_30": 0.789}
+```
+
+**Configuración del modelo:**
+| Parámetro | Valor | Descripción |
+|-----------|-------|-------------|
+| Modelo | `all-MiniLM-L6-v2` | Lightweight, ~80MB |
+| Dimensión raw | 384 | Output del transformer |
+| Dimensión PCA | 30 | Reducido para XGBoost |
+| Max tokens | 256 | Truncamiento automático |
+
+**Ajuste de PCA en corpus de training:**
+```python
+from ml.features_embeddings import EmbeddingExtractor
+
+extractor = EmbeddingExtractor()
+
+# Opción 1: Desde textos
+extractor.fit_pca_from_texts(["caption1", "caption2", ...], save=True)
+
+# Opción 2: Desde embeddings raw
+embeddings = extractor.get_caption_embeddings_batch(texts)
+extractor.fit_pca(embeddings, save=True)
+
+# El modelo PCA se guarda en: models/embedding_pca_30.pkl
+```
+
+**Integración automática:**
+- `FeatureExtractor.extract_features()` añade automáticamente `embedding_1` a `embedding_30`
+- `train.py` genera embeddings para datos de entrenamiento
+- `pretrain_base_model.py` genera embeddings sintéticos para pretraining
+
 #### 1. Preentrenar Modelo Base
 
 ```bash
@@ -462,12 +522,20 @@ python ml/pretrain_base_model.py --samples 20000
 # Output: models/base_xgboost.pkl
 ```
 
-**Features del dataset sintético:**
-- `caption_length`, `emoji_count`, `hashtag_count`, `cta_count`
-- `hook_question`, `hook_pov`, `hook_number` (tipos de gancho)
-- `trigger_urgency`, `trigger_curiosity`, `trigger_action`
-- `is_reel`, `is_carousel`, `is_static` (formato)
-- `hour_of_day`, `is_prime_time`, `is_weekend` (timing)
+**Features del dataset sintético (73 total):**
+
+| Categoría | Features | Count |
+|-----------|----------|-------|
+| **Embeddings** | `embedding_1` a `embedding_30` (PCA sintético) | 30 |
+| **Caption** | `caption_length`, `caption_words`, `emoji_count`, `hashtag_count`, `lexical_richness` | 10 |
+| **Hooks** | `hook_question`, `hook_pov`, `hook_number`, `hook_bold_claim`, `hook_story` | 7 |
+| **Triggers** | `trigger_urgency`, `trigger_curiosity`, `trigger_action`, `trigger_emotion` | 8 |
+| **CTAs** | `cta_comment`, `cta_save`, `cta_share`, `cta_follow`, `cta_dm`, `cta_link` | 7 |
+| **Formato** | `is_reel`, `is_carousel`, `is_static`, `video_duration`, `has_audio` | 6 |
+| **Timing** | `hour_of_day`, `day_of_week`, `is_prime_time`, `is_weekend` | 4 |
+| **Nicho** | `niche_inmobiliaria`, `niche_cafeteria`, `niche_restaurante`, etc. | 8 |
+| **Sentiment** | `sentiment_compound`, `sentiment_positive`, `sentiment_negative` | 4 |
+
 - `engagement_rate` (target): distribución log-normal realista
 
 #### 2. Entrenar Modelo por Nicho
