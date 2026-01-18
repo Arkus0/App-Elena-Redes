@@ -17,7 +17,7 @@ from app.models.pattern import ExtractedPattern, PatternType
 from app.models.content import GeneratedContent, ContentCalendar, ContentGoal, ContentStatus
 from app.services.ai_service import AIService
 from app.services.apify_service import ApifyService
-from app.services.ml_service import get_ml_predictor, train_initial_model
+from app.services.ml_service import get_ml_predictor
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +32,6 @@ class ContentGenerator:
         self.ai_service = AIService()
         self.apify_service = ApifyService()
         self.ml_predictor = get_ml_predictor()
-
-        # Ensure ML model is trained
-        if not self.ml_predictor.is_trained:
-            logger.info("ML model not trained, initializing with synthetic data...")
-            train_initial_model()
 
     async def generate_calendar(
         self,
