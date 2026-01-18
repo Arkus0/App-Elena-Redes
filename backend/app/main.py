@@ -10,6 +10,7 @@ import logging
 from app.core.config import settings
 from app.core.database import init_db
 from app.api import api_router
+from app.api import ingest
 
 # Configure logging
 logging.basicConfig(
@@ -69,17 +70,38 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# CORS middleware - Extended for Chrome extension support
+# Note: Chrome extensions use chrome-extension:// protocol
+# We allow all origins in dev mode, but in production you should restrict to specific extension IDs
+cors_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",  # Extension dev server
+    "http://127.0.0.1:5174",
+]
+
+# In development, allow all origins including chrome-extension://
+# For production, replace "*" with specific extension ID: "chrome-extension://YOUR_EXTENSION_ID"
+if settings.DEBUG:
+    cors_origins.append("*")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=cors_origins,
+    allow_origin_regex=r"^chrome-extension://.*$",  # Allow all Chrome extensions
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Task-ID"],  # Expose custom headers for extension
 )
 
 # Include API routes
 app.include_router(api_router, prefix="/api/v1")
+
+# Include ingest router (for Elena Bridge extension)
+# Mounted at /api/ingest without version prefix for extension compatibility
+app.include_router(ingest.router, prefix="/api/ingest", tags=["Ingest"])
 
 
 @app.get("/")

@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "Elena Bridge",
+  "version": "1.0.0",
+  "description": "Analiza perfiles de Instagram y TikTok con Elena AI",
+  "icons": {
+    "16": "public/icons/icon16.png",
+    "48": "public/icons/icon48.png",
+    "128": "public/icons/icon128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://instagram.com/*",
+    "https://www.tiktok.com/*",
+    "https://tiktok.com/*",
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.instagram.com/*",
+        "https://instagram.com/*",
+        "https://www.tiktok.com/*",
+        "https://tiktok.com/*"
+      ],
+      "js": ["src/content/injector.ts"],
+      "css": ["src/content/styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_icon": {
+      "16": "public/icons/icon16.png",
+      "48": "public/icons/icon48.png",
+      "128": "public/icons/icon128.png"
+    },
+    "default_title": "Elena Bridge"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["public/icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
