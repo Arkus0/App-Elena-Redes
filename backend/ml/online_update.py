@@ -86,7 +86,7 @@ TARGET_NAMES = ["log_likes", "log_comments", "log_shares", "log_saves", "log_vie
 
 # River availability flag
 try:
-    from river import ensemble, tree, metrics, preprocessing, compose
+    from river import ensemble, tree, metrics, preprocessing, compose, forest
     RIVER_AVAILABLE = True
     logger.info("River online learning library loaded successfully")
 except ImportError:
@@ -228,12 +228,12 @@ class OnlineEngagementPredictor:
         # This is a lightweight tree-based model suitable for online learning
         model = compose.Pipeline(
             ("scale", preprocessing.StandardScaler()),
-            ("model", ensemble.AdaptiveRandomForestRegressor(
+            ("model", forest.ARFRegressor(
                 n_models=10,  # Ensemble of 10 trees
                 max_depth=6,  # Similar to XGBoost depth
                 lambda_value=6,  # Poisson lambda for bootstrap
                 grace_period=50,  # Samples before first split
-                split_confidence=0.01,
+                delta=0.01,  # Renamed from split_confidence
                 seed=42
             ))
         )
@@ -767,9 +767,10 @@ def online_update(
     )
 
     # Log result
+    mae_str = f"{current['mae']:.4f}" if current['mae'] is not None else "N/A"
     logger.info(
         f"Online update complete: niche={niche}, samples={samples_processed}, "
-        f"total={predictor._metrics.samples_seen}, MAE={current['mae']:.4f if current['mae'] else 'N/A'}, "
+        f"total={predictor._metrics.samples_seen}, MAE={mae_str}, "
         f"time={update_time_ms:.1f}ms"
     )
 
