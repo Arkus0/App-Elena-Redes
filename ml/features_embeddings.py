@@ -121,17 +121,28 @@ DEFAULT_PRECISION = EmbeddingPrecision.MAX
 # Embedding Feature Names
 # =============================================================================
 
-def get_embedding_feature_names(dims: int = EMBEDDING_DIM) -> List[str]:
+def get_embedding_feature_names(dims: int = EMBEDDING_DIM, zero_based: bool = True) -> List[str]:
     """
     Get list of embedding feature column names.
 
     Args:
         dims: Number of dimensions
+        zero_based: If True (default), returns embedding_0 to embedding_N-1
+                   If False (legacy), returns embedding_1 to embedding_N
 
     Returns:
-        List of feature names: ["embedding_1", ..., "embedding_N"]
+        List of feature names: ["embedding_0", ..., "embedding_N-1"] (0-based)
+        or ["embedding_1", ..., "embedding_N"] (1-based legacy)
+
+    Note:
+        0-based indexing is now the default for consistency with XGBoost
+        and the refactored GrowthPredictionEngine.
     """
-    return [f"embedding_{i+1}" for i in range(dims)]
+    if zero_based:
+        return [f"embedding_{i}" for i in range(dims)]
+    else:
+        # Legacy 1-based indexing (deprecated)
+        return [f"embedding_{i+1}" for i in range(dims)]
 
 
 # Default feature columns (full 384 dims)
@@ -719,13 +730,17 @@ class EmbeddingExtractor:
         """
         Get embedding features as a dictionary for ML pipeline.
 
-        Returns features named embedding_1 to embedding_N where N = target_dims.
+        Returns features named embedding_0 to embedding_N-1 (0-based indexing).
 
         Args:
             text: Input caption/text
 
         Returns:
-            Dict with keys "embedding_1" through "embedding_N"
+            Dict with keys "embedding_0" through "embedding_N-1"
+
+        Note:
+            Uses 0-based indexing for consistency with XGBoost and
+            GrowthPredictionEngine's dynamic embedding detection.
         """
         # Get raw embedding
         raw_embedding = self.get_raw_embedding(text)
@@ -736,10 +751,13 @@ class EmbeddingExtractor:
         else:
             final_embedding = raw_embedding
 
-        # Convert to dict
+        # Convert to dict (0-based indexing)
         features = {}
         for i in range(len(final_embedding)):
-            features[f"embedding_{i+1}"] = round(float(final_embedding[i]), 6)
+            features[f"embedding_{i}"] = round(float(final_embedding[i]), 6)
+
+        # Log active dimensions
+        logger.info(f"Embeddings activos: {len(final_embedding)} dims")
 
         return features
 
@@ -754,7 +772,11 @@ class EmbeddingExtractor:
             texts: List of text strings
 
         Returns:
-            List of feature dictionaries
+            List of feature dictionaries with 0-based embedding keys
+
+        Note:
+            Uses 0-based indexing (embedding_0 to embedding_N-1) for consistency
+            with GrowthPredictionEngine's dynamic embedding detection.
         """
         # Get batch raw embeddings
         raw_embeddings = self.get_raw_embeddings_batch(texts)
@@ -765,7 +787,7 @@ class EmbeddingExtractor:
         else:
             final_embeddings = raw_embeddings
 
-        # Convert to list of dicts
+        # Convert to list of dicts (0-based indexing)
         features_list = []
         n_dims = final_embeddings.shape[1] if final_embeddings.ndim > 1 else len(final_embeddings)
 
@@ -773,8 +795,12 @@ class EmbeddingExtractor:
             features = {}
             for j in range(n_dims):
                 val = final_embeddings[i, j] if final_embeddings.ndim > 1 else final_embeddings[j]
-                features[f"embedding_{j+1}"] = round(float(val), 6)
+                features[f"embedding_{j}"] = round(float(val), 6)  # 0-based
             features_list.append(features)
+
+        # Log active dimensions (only once for batch)
+        if len(texts) > 0:
+            logger.info(f"Embeddings activos: {n_dims} dims (batch de {len(texts)} textos)")
 
         return features_list
 
@@ -783,9 +809,9 @@ class EmbeddingExtractor:
         Get zero-valued embedding features (for fallback/error cases).
 
         Returns:
-            Dict with all embedding features set to 0.0
+            Dict with all embedding features set to 0.0 (0-based indexing)
         """
-        return {f"embedding_{i+1}": 0.0 for i in range(self._target_dims)}
+        return {f"embedding_{i}": 0.0 for i in range(self._target_dims)}
 
     # =========================================================================
     # Backward Compatibility (PCA methods now use TruncatedSVD internally)
@@ -1010,12 +1036,12 @@ if __name__ == "__main__":
         print(f"\n[4] Memory estimate for {len(test_texts)} samples:")
         print(f"    {mem['human_readable']} (lightweight: {mem['is_lightweight']})")
 
-        # Sample features
-        print(f"\n[5] Sample features for first text:")
+        # Sample features (0-based indexing)
+        print(f"\n[5] Sample features for first text (0-based indexing):")
         first_features = features_list[0]
+        print(f"    embedding_0 = {first_features.get('embedding_0', 0):.6f}")
         print(f"    embedding_1 = {first_features.get('embedding_1', 0):.6f}")
-        print(f"    embedding_2 = {first_features.get('embedding_2', 0):.6f}")
-        last_key = f"embedding_{extractor.target_dims}"
+        last_key = f"embedding_{extractor.target_dims - 1}"  # 0-based: last is N-1
         print(f"    {last_key} = {first_features.get(last_key, 0):.6f}")
 
     print("\n" + "=" * 70)

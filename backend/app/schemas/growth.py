@@ -78,17 +78,44 @@ class GrowthPredictionRequest(BaseModel):
         description="Variación de brillo en el video (0-1)"
     )
 
-    # Semantic features (del TextIntelligence - PCA components)
-    sem_pca_1: float = Field(0.0, description="Componente semántico PCA 1")
-    sem_pca_2: float = Field(0.0, description="Componente semántico PCA 2")
-    sem_pca_3: float = Field(0.0, description="Componente semántico PCA 3")
-    sem_pca_4: float = Field(0.0, description="Componente semántico PCA 4")
-    sem_pca_5: float = Field(0.0, description="Componente semántico PCA 5")
-    sem_pca_6: float = Field(0.0, description="Componente semántico PCA 6")
-    sem_pca_7: float = Field(0.0, description="Componente semántico PCA 7")
-    sem_pca_8: float = Field(0.0, description="Componente semántico PCA 8")
-    sem_pca_9: float = Field(0.0, description="Componente semántico PCA 9")
-    sem_pca_10: float = Field(0.0, description="Componente semántico PCA 10")
+    # =========================================================================
+    # SEMANTIC FEATURES (Configurable Precision Embeddings)
+    # =========================================================================
+    # NEW (2024): Use 'embeddings' dict for dynamic embedding dimensions
+    # Supports 128/256/384 dims based on precision config in features_embeddings.py
+    # Format: {"embedding_0": 0.1, "embedding_1": -0.2, ..., "embedding_N": 0.3}
+    embeddings: Optional[Dict[str, float]] = Field(
+        None,
+        description="Semantic embeddings (embedding_0 to embedding_N, configurable dims)"
+    )
+
+    # LEGACY (deprecated): Fixed 10-dim PCA - kept for backward compatibility
+    sem_pca_1: float = Field(0.0, description="[Deprecated] Componente semántico PCA 1")
+    sem_pca_2: float = Field(0.0, description="[Deprecated] Componente semántico PCA 2")
+    sem_pca_3: float = Field(0.0, description="[Deprecated] Componente semántico PCA 3")
+    sem_pca_4: float = Field(0.0, description="[Deprecated] Componente semántico PCA 4")
+    sem_pca_5: float = Field(0.0, description="[Deprecated] Componente semántico PCA 5")
+    sem_pca_6: float = Field(0.0, description="[Deprecated] Componente semántico PCA 6")
+    sem_pca_7: float = Field(0.0, description="[Deprecated] Componente semántico PCA 7")
+    sem_pca_8: float = Field(0.0, description="[Deprecated] Componente semántico PCA 8")
+    sem_pca_9: float = Field(0.0, description="[Deprecated] Componente semántico PCA 9")
+    sem_pca_10: float = Field(0.0, description="[Deprecated] Componente semántico PCA 10")
+
+    def get_semantic_features(self) -> Dict[str, float]:
+        """
+        Get semantic features in unified format.
+
+        Returns embeddings dict if provided (new format),
+        otherwise constructs from legacy sem_pca_* fields.
+        """
+        if self.embeddings:
+            return self.embeddings
+
+        # Fallback to legacy format
+        return {
+            f"sem_pca_{i}": getattr(self, f"sem_pca_{i}", 0.0)
+            for i in range(1, 11)
+        }
 
     model_config = {
         "json_schema_extra": {
@@ -103,8 +130,11 @@ class GrowthPredictionRequest(BaseModel):
                     "face_in_hook": 1,
                     "tempo": 128.0,
                     "brightness_variance": 0.45,
-                    "sem_pca_1": 0.23,
-                    "sem_pca_2": -0.15
+                    "embeddings": {
+                        "embedding_0": 0.23,
+                        "embedding_1": -0.15,
+                        "embedding_2": 0.42
+                    }
                 }
             ]
         }
@@ -208,7 +238,20 @@ class TrainingDataItem(BaseModel):
     brightness_variance: float = 0.0
     cut_density: float = 0.0
 
-    # Semantic PCA features
+    # Hook Theory features (2024)
+    hook_energy: float = 0.0
+    retention_energy: float = 0.0
+    hook_cut_rate: float = 0.0
+    retention_cut_rate: float = 0.0
+    face_in_hook: int = 0
+
+    # NEW (2024): Semantic embeddings (configurable dims)
+    embeddings: Optional[Dict[str, float]] = Field(
+        None,
+        description="Semantic embeddings dict: {embedding_0: 0.1, ...}"
+    )
+
+    # LEGACY (deprecated): Semantic PCA features - kept for backward compatibility
     sem_pca_1: float = 0.0
     sem_pca_2: float = 0.0
     sem_pca_3: float = 0.0
@@ -222,6 +265,26 @@ class TrainingDataItem(BaseModel):
 
     # Target variable
     rpi_score: float = Field(..., description="RPI score (log-transformed) - variable objetivo")
+
+    def to_feature_dict(self) -> Dict[str, Any]:
+        """
+        Convert to flat feature dictionary for training.
+
+        Merges embeddings into top-level keys if provided.
+        """
+        result = self.model_dump(exclude={'embeddings', 'rpi_score'})
+
+        # Add embeddings as top-level keys
+        if self.embeddings:
+            result.update(self.embeddings)
+        else:
+            # Use legacy sem_pca fields
+            for i in range(1, 11):
+                key = f"sem_pca_{i}"
+                result[key] = getattr(self, key, 0.0)
+
+        result['rpi_score'] = self.rpi_score
+        return result
 
 
 class GrowthTrainingRequest(BaseModel):

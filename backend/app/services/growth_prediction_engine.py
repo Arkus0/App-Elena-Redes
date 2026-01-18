@@ -409,7 +409,25 @@ class GrowthPredictionEngine:
         "brightness_variance", # Variación de brillo global
     ]
 
-    SEMANTIC_FEATURES = [f"sem_pca_{i}" for i in range(1, 11)]  # sem_pca_1 to sem_pca_10
+    # ==========================================================================
+    # SEMANTIC FEATURES - Dynamic Detection (Refactored 2024)
+    # ==========================================================================
+    # DEPRECATED: Old fixed PCA columns (sem_pca_1 to sem_pca_10)
+    # NEW: Dynamic detection of embedding_* columns from features_embeddings.py
+    #
+    # The engine now:
+    # 1. Detects embedding_* columns dynamically at runtime
+    # 2. Supports any dimension (128/256/384 based on precision config)
+    # 3. Falls back to zeros with warning if no embeddings found
+    # 4. Adds optional semantic_score (mean of all embedding dims)
+    # ==========================================================================
+    LEGACY_SEMANTIC_FEATURES = [f"sem_pca_{i}" for i in range(1, 11)]  # Kept for backward compat
+
+    # Dynamic semantic features - detected at runtime from DataFrame columns
+    # Format: embedding_0, embedding_1, ..., embedding_N (0-based)
+    # Set dynamically by _detect_semantic_columns()
+    _detected_semantic_cols: List[str] = []
+    _semantic_dims: int = 0
 
     # Nombres legibles para explicaciones SHAP
     FEATURE_DISPLAY_NAMES = {
@@ -429,21 +447,84 @@ class GrowthPredictionEngine:
         "tempo": "BPM (ritmo)",
         "brightness_variance": "Variación de brillo",
 
-        # Semantic PCA
-        "sem_pca_1": "Semántica PC1",
-        "sem_pca_2": "Semántica PC2",
-        "sem_pca_3": "Semántica PC3",
-        "sem_pca_4": "Semántica PC4",
-        "sem_pca_5": "Semántica PC5",
-        "sem_pca_6": "Semántica PC6",
-        "sem_pca_7": "Semántica PC7",
-        "sem_pca_8": "Semántica PC8",
-        "sem_pca_9": "Semántica PC9",
-        "sem_pca_10": "Semántica PC10"
+        # Aggregated semantic score (mean of all embedding dims)
+        "semantic_score": "Score Semántico Global",
+
+        # Legacy Semantic PCA (deprecated - kept for old models)
+        "sem_pca_1": "[Legacy] Semántica PC1",
+        "sem_pca_2": "[Legacy] Semántica PC2",
+        "sem_pca_3": "[Legacy] Semántica PC3",
+        "sem_pca_4": "[Legacy] Semántica PC4",
+        "sem_pca_5": "[Legacy] Semántica PC5",
+        "sem_pca_6": "[Legacy] Semántica PC6",
+        "sem_pca_7": "[Legacy] Semántica PC7",
+        "sem_pca_8": "[Legacy] Semántica PC8",
+        "sem_pca_9": "[Legacy] Semántica PC9",
+        "sem_pca_10": "[Legacy] Semántica PC10",
     }
 
     # Mapeo de tipos de post
     POST_TYPES = ["reel", "carousel", "static", "story", "video", "unknown"]
+
+    @classmethod
+    def get_feature_display_name(cls, feature_name: str) -> str:
+        """
+        Get human-readable display name for a feature.
+
+        Handles dynamic embedding column names (embedding_0 to embedding_N).
+        """
+        # Check static mapping first
+        if feature_name in cls.FEATURE_DISPLAY_NAMES:
+            return cls.FEATURE_DISPLAY_NAMES[feature_name]
+
+        # Handle dynamic embedding columns
+        if feature_name.startswith('embedding_'):
+            idx = feature_name.split('_')[1]
+            return f"Semántica Emb[{idx}]"
+
+        # Default: return original name
+        return feature_name
+
+    @staticmethod
+    def aggregate_shap_embeddings(
+        shap_values: np.ndarray,
+        feature_names: List[str],
+        top_k: int = 3
+    ) -> Tuple[float, List[Tuple[str, float]]]:
+        """
+        Aggregate SHAP values for embedding dimensions into a single contribution.
+
+        Instead of showing 384 individual SHAP values, this aggregates all
+        embedding_* columns into a single "Semantic Embeddings" contribution.
+
+        Args:
+            shap_values: Array of SHAP values for all features
+            feature_names: List of feature names
+            top_k: Number of top contributing individual embeddings to track
+
+        Returns:
+            Tuple of (total_embedding_contribution, top_contributors)
+        """
+        embedding_indices = [
+            i for i, name in enumerate(feature_names)
+            if name.startswith('embedding_') or name.startswith('sem_pca_')
+        ]
+
+        if not embedding_indices:
+            return 0.0, []
+
+        # Sum all embedding SHAP values
+        embedding_shap = shap_values[embedding_indices]
+        total_contribution = float(np.sum(embedding_shap))
+
+        # Find top contributors (by absolute value)
+        sorted_indices = np.argsort(np.abs(embedding_shap))[::-1][:top_k]
+        top_contributors = [
+            (feature_names[embedding_indices[i]], float(embedding_shap[i]))
+            for i in sorted_indices
+        ]
+
+        return total_contribution, top_contributors
 
     MODEL_VERSION = "1.0.0"
     MODEL_FILENAME = "growth_prediction_model.joblib"
@@ -477,14 +558,90 @@ class GrowthPredictionEngine:
 
     @property
     def feature_columns(self) -> List[str]:
-        """Retorna las columnas de features en el orden esperado."""
+        """
+        Retorna las columnas de features en el orden esperado.
+
+        Dynamic: Uses detected embedding_* columns if available,
+        otherwise falls back to legacy sem_pca_* columns.
+        """
         if not self._feature_columns:
+            semantic_cols = self._detected_semantic_cols if self._detected_semantic_cols else self.LEGACY_SEMANTIC_FEATURES
             self._feature_columns = (
                 self.METADATA_FEATURES +
                 self.SENSORY_FEATURES +
-                self.SEMANTIC_FEATURES
+                semantic_cols
             )
         return self._feature_columns
+
+    def _detect_semantic_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Dynamically detect semantic embedding columns from DataFrame.
+
+        Looks for columns matching pattern 'embedding_*' (new format, 0-based).
+        Falls back to 'sem_pca_*' (legacy format) if no new columns found.
+
+        Args:
+            df: DataFrame to inspect for embedding columns
+
+        Returns:
+            List of semantic column names found in the DataFrame
+
+        Side Effects:
+            Updates self._detected_semantic_cols and self._semantic_dims
+            Logs the number of dimensions detected
+        """
+        # Try new format first: embedding_0, embedding_1, ..., embedding_N
+        new_cols = sorted(
+            [col for col in df.columns if col.startswith('embedding_')],
+            key=lambda x: int(x.split('_')[1]) if x.split('_')[1].isdigit() else 0
+        )
+
+        if new_cols:
+            self._detected_semantic_cols = new_cols
+            self._semantic_dims = len(new_cols)
+            logger.info(f"Usando {self._semantic_dims} embedding dims semánticos en predicción (embedding_0 a embedding_{self._semantic_dims - 1})")
+            return new_cols
+
+        # Fallback to legacy format: sem_pca_1, ..., sem_pca_10
+        legacy_cols = [col for col in df.columns if col.startswith('sem_pca_')]
+        legacy_cols = sorted(legacy_cols, key=lambda x: int(x.split('_')[-1]) if x.split('_')[-1].isdigit() else 0)
+
+        if legacy_cols:
+            self._detected_semantic_cols = legacy_cols
+            self._semantic_dims = len(legacy_cols)
+            logger.warning(f"Usando formato legacy: {self._semantic_dims} sem_pca dims (deprecated - migrar a embedding_*)")
+            return legacy_cols
+
+        # No semantic columns found
+        logger.warning("Sin embeddings semánticos detectados – usa config precisión para generar embeddings")
+        self._detected_semantic_cols = []
+        self._semantic_dims = 0
+        return []
+
+    def _add_semantic_score(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Add aggregated semantic_score column (mean of all embedding dims).
+
+        This provides a single interpretable SHAP feature for semantics
+        instead of N individual embedding dimensions.
+
+        Args:
+            df: DataFrame with embedding columns
+
+        Returns:
+            DataFrame with semantic_score column added
+        """
+        semantic_cols = self._detect_semantic_columns(df)
+
+        if semantic_cols:
+            df = df.copy()
+            df['semantic_score'] = df[semantic_cols].mean(axis=1)
+            logger.debug(f"semantic_score added (mean of {len(semantic_cols)} dims)")
+        else:
+            df = df.copy()
+            df['semantic_score'] = 0.0
+
+        return df
 
     def _get_model_path(self, filename: str) -> Path:
         """Obtiene la ruta completa para un archivo del modelo."""
@@ -604,6 +761,10 @@ class GrowthPredictionEngine:
         """
         Prepara las features para el modelo.
 
+        Supports dynamic embedding detection:
+        - New format: embedding_0 to embedding_N (any dimension)
+        - Legacy format: sem_pca_1 to sem_pca_10 (deprecated)
+
         Args:
             data: Diccionario de features o DataFrame
             fit_scaler: Si True, ajusta el scaler (solo durante entrenamiento)
@@ -617,13 +778,35 @@ class GrowthPredictionEngine:
         else:
             df = data.copy()
 
+        # Detect semantic columns dynamically from the data
+        semantic_cols = self._detect_semantic_columns(df)
+
+        # Build feature columns list dynamically based on what's in the data
+        base_features = self.METADATA_FEATURES + self.SENSORY_FEATURES
+
+        # Add semantic columns (new embedding_* or legacy sem_pca_*)
+        if semantic_cols:
+            feature_cols = base_features + semantic_cols
+        else:
+            # Fallback: try legacy sem_pca columns or use zeros
+            feature_cols = base_features + self.LEGACY_SEMANTIC_FEATURES
+            logger.warning("No embedding columns found, using legacy sem_pca fallback")
+
+        # Update instance feature columns for this prediction
+        self._feature_columns = feature_cols
+
         # Asegurar que todas las columnas existan
-        for col in self.feature_columns:
+        for col in feature_cols:
             if col not in df.columns:
                 if col == "post_type_encoded" and "post_type" in df.columns:
                     df["post_type_encoded"] = df["post_type"].apply(self._encode_post_type)
+                elif col.startswith("embedding_"):
+                    # New format: embedding columns get zeros if missing
+                    df[col] = 0.0
+                    logger.debug(f"Embedding column {col} not found, using 0.0")
                 elif col.startswith("sem_pca_"):
-                    df[col] = 0.0  # Default para PCA faltantes
+                    # Legacy format: PCA columns get zeros if missing (deprecated)
+                    df[col] = 0.0
                 else:
                     df[col] = 0.0
 
@@ -632,7 +815,11 @@ class GrowthPredictionEngine:
             df["post_type_encoded"] = df["post_type"].apply(self._encode_post_type)
 
         # Seleccionar solo las columnas necesarias en el orden correcto
-        X = df[self.feature_columns].values.astype(np.float32)
+        X = df[feature_cols].values.astype(np.float32)
+
+        # Log feature summary
+        n_embedding_cols = len([c for c in feature_cols if c.startswith('embedding_') or c.startswith('sem_pca_')])
+        logger.debug(f"Feature vector: {len(feature_cols)} total ({n_embedding_cols} semantic dims)")
 
         # Escalar features
         if self._scaler is None:
@@ -714,10 +901,18 @@ class GrowthPredictionEngine:
                 "rpi_score": record.get("rpi_score", 0.0)
             }
 
-            # Semantic PCA features
-            for i in range(1, 11):
-                pca_key = f"sem_pca_{i}"
-                processed[pca_key] = record.get(pca_key, 0.0)
+            # === SEMANTIC FEATURES (Dynamic) ===
+            # Check for new embedding format first
+            embedding_keys = [k for k in record.keys() if k.startswith('embedding_')]
+            if embedding_keys:
+                # New format: embedding_0 to embedding_N
+                for key in embedding_keys:
+                    processed[key] = record.get(key, 0.0)
+            else:
+                # Legacy format: sem_pca_1 to sem_pca_10
+                for i in range(1, 11):
+                    pca_key = f"sem_pca_{i}"
+                    processed[pca_key] = record.get(pca_key, 0.0)
 
             processed_records.append(processed)
 
@@ -1167,10 +1362,24 @@ class GrowthPredictionEngine:
             "brightness_variance": features.get("brightness_variance", 0.0),
         }
 
-        # Agregar PCA features
-        for i in range(1, 11):
-            pca_key = f"sem_pca_{i}"
-            processed_features[pca_key] = features.get(pca_key, 0.0)
+        # === SEMANTIC FEATURES (Dynamic Detection) ===
+        # First try new format: embedding_0, embedding_1, ..., embedding_N
+        embedding_keys = sorted(
+            [k for k in features.keys() if k.startswith('embedding_')],
+            key=lambda x: int(x.split('_')[1]) if x.split('_')[1].isdigit() else 0
+        )
+
+        if embedding_keys:
+            # New format detected - use embedding_* columns
+            for key in embedding_keys:
+                processed_features[key] = features.get(key, 0.0)
+            logger.info(f"Usando {len(embedding_keys)} embedding dims semánticos en predicción")
+        else:
+            # Fallback to legacy format: sem_pca_1 to sem_pca_10
+            for i in range(1, 11):
+                pca_key = f"sem_pca_{i}"
+                processed_features[pca_key] = features.get(pca_key, 0.0)
+            logger.debug("Usando formato legacy sem_pca (deprecated)")
 
         X = self._prepare_features(processed_features, fit_scaler=False)
 

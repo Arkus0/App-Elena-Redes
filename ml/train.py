@@ -48,7 +48,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import xgboost as xgb
 
-# Import embedding feature extractor (now with configurable precision)
+# Import embedding feature extractor (now with configurable precision, 0-based indexing)
 try:
     from ml.features_embeddings import (
         EmbeddingExtractor,
@@ -61,15 +61,17 @@ try:
     )
     EMBEDDINGS_AVAILABLE = True
     # Default: full 384 dims (safe for SMB volumes 100-2000 posts)
-    EMBEDDING_FEATURE_COLUMNS = get_embedding_feature_names(EMBEDDING_DIM)
+    # Uses 0-based indexing: embedding_0 to embedding_383
+    EMBEDDING_FEATURE_COLUMNS = get_embedding_feature_names(EMBEDDING_DIM, zero_based=True)
 except ImportError:
     EMBEDDINGS_AVAILABLE = False
     EMBEDDING_DIM = 384  # Full dims by default
-    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(EMBEDDING_DIM)]
+    # 0-based indexing: embedding_0 to embedding_383
+    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i}" for i in range(EMBEDDING_DIM)]
     PRECISION_TO_DIMS = {"low": 128, "medium": 256, "high": 384, "max": 384}
     DEFAULT_PRECISION = "max"
 
-# Import multimodal fusion module (now with configurable precision)
+# Import multimodal fusion module (now with configurable precision, 0-based indexing)
 try:
     from backend.ml.multimodal_fusion import (
         fuse_multimodal_features,
@@ -91,8 +93,9 @@ except ImportError:
     MULTIMODAL_AVAILABLE = False
     TRANSCRIPT_DEFAULT_DIM = 384  # Full dims by default
     OCR_DEFAULT_DIM = 384
-    TRANSCRIPT_FEATURE_COLUMNS = [f"transcript_emb_{i+1}" for i in range(384)]
-    OCR_FEATURE_COLUMNS = [f"ocr_emb_{i+1}" for i in range(384)]
+    # 0-based indexing: transcript_emb_0 to transcript_emb_383
+    TRANSCRIPT_FEATURE_COLUMNS = [f"transcript_emb_{i}" for i in range(384)]
+    OCR_FEATURE_COLUMNS = [f"ocr_emb_{i}" for i in range(384)]
     INTERACTION_FEATURE_COLUMNS = [
         "interaction_hook_x_sentiment",
         "interaction_hook_x_is_reel",
@@ -262,6 +265,9 @@ def add_embedding_features(
 
     Default is "max" (full 384 dims) - safe for SMB volumes (100-2000 posts).
 
+    NOTE: Uses 0-based column naming (embedding_0 to embedding_N-1) for
+    compatibility with GrowthPredictionEngine's dynamic detection.
+
     Args:
         df: DataFrame with caption column
         caption_column: Name of column containing text
@@ -269,7 +275,7 @@ def add_embedding_features(
                   Default: CURRENT_PRECISION (typically "max")
 
     Returns:
-        DataFrame with embedding features added
+        DataFrame with embedding features added (embedding_0 to embedding_N-1)
     """
     global CURRENT_PRECISION
 
@@ -281,7 +287,8 @@ def add_embedding_features(
 
     # Get dimensions for this precision
     dims = PRECISION_TO_DIMS.get(precision.lower(), EMBEDDING_DIM)
-    feature_cols = [f"embedding_{i+1}" for i in range(dims)]
+    # 0-based indexing: embedding_0 to embedding_{dims-1}
+    feature_cols = [f"embedding_{i}" for i in range(dims)]
 
     if not EMBEDDINGS_AVAILABLE:
         logger.warning("Embeddings not available. Adding zero columns.")
@@ -291,6 +298,7 @@ def add_embedding_features(
 
     logger.info("=" * 60)
     logger.info(f"EMBEDDING FEATURES (precision={precision}, dims={dims})")
+    logger.info(f"Column format: embedding_0 to embedding_{dims-1} (0-based)")
     logger.info("=" * 60)
     logger.info(f"Generating semantic embeddings for {len(df)} samples...")
 
@@ -306,14 +314,14 @@ def add_embedding_features(
             logger.info(f"Fitting TruncatedSVD reducer on training corpus ({dims} dims)...")
             extractor.fit_reducer_from_texts(captions, save=True)
 
-        # Generate embedding features for all texts
+        # Generate embedding features for all texts (0-based indexing)
         features_list = extractor.get_embedding_features_batch(captions)
 
-        # Add to DataFrame
+        # Add to DataFrame (features already use 0-based keys)
         for col in feature_cols:
             df[col] = [f.get(col, 0.0) for f in features_list]
 
-        logger.info(f"Added {len(feature_cols)} embedding features (precision={precision})")
+        logger.info(f"Embeddings activos: {len(feature_cols)} dims")
         logger.info("=" * 60)
 
     except Exception as e:
@@ -440,6 +448,9 @@ def add_multimodal_features(df: pd.DataFrame, precision: str = None) -> pd.DataF
 
     Default is "max" (full dims) - safe for SMB volumes.
 
+    NOTE: Uses 0-based column naming (transcript_emb_0, ocr_emb_0, etc.)
+    for consistency with the unified embedding pipeline.
+
     Args:
         df: DataFrame with optional columns:
             - whisper_transcript: Audio transcription text
@@ -454,10 +465,10 @@ def add_multimodal_features(df: pd.DataFrame, precision: str = None) -> pd.DataF
     if precision is None:
         precision = CURRENT_PRECISION
 
-    # Get dimensions for this precision
+    # Get dimensions for this precision (0-based indexing)
     dims = PRECISION_TO_DIMS.get(precision.lower(), 384)
-    transcript_cols = [f"transcript_emb_{i+1}" for i in range(dims)]
-    ocr_cols = [f"ocr_emb_{i+1}" for i in range(dims)]
+    transcript_cols = [f"transcript_emb_{i}" for i in range(dims)]
+    ocr_cols = [f"ocr_emb_{i}" for i in range(dims)]
     interaction_cols = INTERACTION_FEATURE_COLUMNS
     all_multimodal_cols = transcript_cols + ocr_cols + interaction_cols
 
@@ -482,6 +493,7 @@ def add_multimodal_features(df: pd.DataFrame, precision: str = None) -> pd.DataF
         logger.info(f"Applying multimodal late fusion (precision={precision}, dims={dims})...")
         logger.info(f"  - Transcript column: {has_transcript}")
         logger.info(f"  - OCR column: {has_ocr}")
+        logger.info(f"  - Column format: 0-based (transcript_emb_0, ocr_emb_0, ...)")
 
         try:
             df = fuse_multimodal_features(
@@ -556,13 +568,13 @@ def prepare_features(df: pd.DataFrame, precision: str = None) -> Tuple[pd.DataFr
             caption_col = col
             break
 
-    # Generate dynamic feature columns for this precision
-    emb_cols = [f"embedding_{i+1}" for i in range(dims)]
-    transcript_cols = [f"transcript_emb_{i+1}" for i in range(dims)]
-    ocr_cols = [f"ocr_emb_{i+1}" for i in range(dims)]
+    # Generate dynamic feature columns for this precision (0-based indexing)
+    emb_cols = [f"embedding_{i}" for i in range(dims)]
+    transcript_cols = [f"transcript_emb_{i}" for i in range(dims)]
+    ocr_cols = [f"ocr_emb_{i}" for i in range(dims)]
     all_embedding_cols = emb_cols + transcript_cols + ocr_cols
 
-    # Add embedding features if not present
+    # Add embedding features if not present (0-based: embedding_0 to embedding_N-1)
     if not any(col in df.columns for col in emb_cols):
         if caption_col:
             df = add_embedding_features(df, caption_column=caption_col, precision=precision)
@@ -589,7 +601,7 @@ def prepare_features(df: pd.DataFrame, precision: str = None) -> Tuple[pd.DataFr
     if not any(col in df.columns for col in transcript_cols + ocr_cols):
         df = add_multimodal_features(df, precision=precision)
 
-    # Build dynamic feature columns for this precision level
+    # Build dynamic feature columns for this precision level (0-based indexing)
     dynamic_feature_cols = emb_cols + transcript_cols + ocr_cols + INTERACTION_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
 
     # Select feature columns that exist
@@ -597,7 +609,12 @@ def prepare_features(df: pd.DataFrame, precision: str = None) -> Tuple[pd.DataFr
     X = df[feature_cols].fillna(0)
     y = df["engagement_rate"]
 
+    # Log feature summary
+    n_emb = len([c for c in feature_cols if c.startswith('embedding_')])
+    n_transcript = len([c for c in feature_cols if c.startswith('transcript_emb_')])
+    n_ocr = len([c for c in feature_cols if c.startswith('ocr_emb_')])
     logger.info(f"Prepared features: {X.shape[1]} columns, {X.shape[0]} samples (precision={precision})")
+    logger.info(f"  Semantic dims: {n_emb} caption + {n_transcript} transcript + {n_ocr} OCR")
 
     return X, y
 
