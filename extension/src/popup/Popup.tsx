@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import type { Platform, PageType, AnalysisStatus } from '../types';
+import type { Platform, PageType, AnalysisStatus, UserConfig } from '../types';
 
 interface TabStatus {
   isContentPage: boolean;
@@ -13,10 +13,22 @@ interface ServerStatus {
   apiUrl: string;
 }
 
+// API config for syncing
+const API_BASE_URL = 'http://localhost:8000/api/v1';
+
 export default function Popup() {
   const [tabStatus, setTabStatus] = useState<TabStatus | null>(null);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Human-in-the-Loop config state
+  const [showConfig, setShowConfig] = useState(false);
+  const [userConfig, setUserConfig] = useState<UserConfig>({});
+  const [instagramUsername, setInstagramUsername] = useState('');
+  const [tiktokUsername, setTiktokUsername] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [configStatus, setConfigStatus] = useState<'idle' | 'saving' | 'syncing' | 'success' | 'error'>('idle');
+  const [configMessage, setConfigMessage] = useState('');
 
   useEffect(() => {
     // Obtener estado de la tab actual
@@ -45,7 +57,104 @@ export default function Popup() {
       setServerStatus(response);
       setLoading(false);
     });
+
+    // Cargar configuración guardada
+    chrome.runtime.sendMessage({ action: 'GET_USER_CONFIG' }, (response) => {
+      if (response?.config) {
+        setUserConfig(response.config);
+        setInstagramUsername(response.config.ownInstagramUsername || '');
+        setTiktokUsername(response.config.ownTiktokUsername || '');
+      }
+    });
+
+    // Cargar API key si existe
+    chrome.storage.sync.get(['extensionApiKey'], (result) => {
+      if (result.extensionApiKey) {
+        setApiKey(result.extensionApiKey);
+      }
+    });
   }, []);
+
+  // Guardar configuración manualmente
+  const handleSaveConfig = () => {
+    setConfigStatus('saving');
+    const newConfig: UserConfig = {
+      ownInstagramUsername: instagramUsername.replace('@', '').toLowerCase() || undefined,
+      ownTiktokUsername: tiktokUsername.replace('@', '').toLowerCase() || undefined,
+      lastSyncAt: new Date().toISOString()
+    };
+
+    chrome.runtime.sendMessage(
+      { action: 'SAVE_USER_CONFIG', config: newConfig },
+      (response) => {
+        if (response?.success) {
+          setUserConfig(newConfig);
+          setConfigStatus('success');
+          setConfigMessage('Configuración guardada');
+          setTimeout(() => setConfigStatus('idle'), 2000);
+        } else {
+          setConfigStatus('error');
+          setConfigMessage('Error al guardar');
+        }
+      }
+    );
+  };
+
+  // Sincronizar con API usando API key
+  const handleSyncWithApi = async () => {
+    if (!apiKey) {
+      setConfigStatus('error');
+      setConfigMessage('Introduce tu API key primero');
+      return;
+    }
+
+    setConfigStatus('syncing');
+    setConfigMessage('Sincronizando...');
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/extension/config`, {
+        method: 'GET',
+        headers: {
+          'X-Extension-API-Key': apiKey,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error('API key inválida');
+      }
+
+      const data = await response.json();
+
+      // Guardar config localmente
+      const newConfig: UserConfig = {
+        ownInstagramUsername: data.own_instagram_username || undefined,
+        ownTiktokUsername: data.own_tiktok_username || undefined,
+        lastSyncAt: new Date().toISOString()
+      };
+
+      chrome.runtime.sendMessage(
+        { action: 'SAVE_USER_CONFIG', config: newConfig },
+        (res) => {
+          if (res?.success) {
+            setUserConfig(newConfig);
+            setInstagramUsername(data.own_instagram_username || '');
+            setTiktokUsername(data.own_tiktok_username || '');
+            setConfigStatus('success');
+            setConfigMessage(`Sincronizado: ${data.business_name}`);
+
+            // Guardar API key para futuras sincronizaciones
+            chrome.storage.sync.set({ extensionApiKey: apiKey });
+          }
+        }
+      );
+    } catch (error) {
+      setConfigStatus('error');
+      setConfigMessage(error instanceof Error ? error.message : 'Error de sincronización');
+    }
+
+    setTimeout(() => setConfigStatus('idle'), 3000);
+  };
 
   const getPlatformIcon = (platform: Platform): string => {
     switch (platform) {
@@ -161,10 +270,126 @@ export default function Popup() {
         </div>
       </section>
 
+      {/* Human-in-the-Loop: Config Section */}
+      <section className="config-section">
+        <button
+          className="config-toggle"
+          onClick={() => setShowConfig(!showConfig)}
+        >
+          {'\u{2699}'} Mi Perfil IG/TikTok
+          <span className={`toggle-arrow ${showConfig ? 'open' : ''}`}>
+            {showConfig ? '\u{25B2}' : '\u{25BC}'}
+          </span>
+        </button>
+
+        {showConfig && (
+          <div className="config-panel">
+            {/* Feedback Loop Status */}
+            <div className={`feedback-status ${userConfig.ownInstagramUsername || userConfig.ownTiktokUsername ? 'active' : 'inactive'}`}>
+              {userConfig.ownInstagramUsername || userConfig.ownTiktokUsername ? (
+                <>
+                  <span className="status-icon">{'\u{2705}'}</span>
+                  <span>Feedback Loop Activo</span>
+                </>
+              ) : (
+                <>
+                  <span className="status-icon">{'\u{26A0}'}</span>
+                  <span>Configura tu username</span>
+                </>
+              )}
+            </div>
+
+            {/* Current Config */}
+            {(userConfig.ownInstagramUsername || userConfig.ownTiktokUsername) && (
+              <div className="current-config">
+                {userConfig.ownInstagramUsername && (
+                  <div className="config-item">
+                    <span>{'\u{1F4F7}'}</span>
+                    <span>@{userConfig.ownInstagramUsername}</span>
+                  </div>
+                )}
+                {userConfig.ownTiktokUsername && (
+                  <div className="config-item">
+                    <span>{'\u{1F3B5}'}</span>
+                    <span>@{userConfig.ownTiktokUsername}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Manual Config */}
+            <div className="config-inputs">
+              <div className="input-group">
+                <label>Instagram Username</label>
+                <input
+                  type="text"
+                  placeholder="@miusuario"
+                  value={instagramUsername}
+                  onChange={(e) => setInstagramUsername(e.target.value)}
+                />
+              </div>
+              <div className="input-group">
+                <label>TikTok Username</label>
+                <input
+                  type="text"
+                  placeholder="@miusuario"
+                  value={tiktokUsername}
+                  onChange={(e) => setTiktokUsername(e.target.value)}
+                />
+              </div>
+              <button
+                className="save-btn"
+                onClick={handleSaveConfig}
+                disabled={configStatus === 'saving'}
+              >
+                {configStatus === 'saving' ? 'Guardando...' : 'Guardar Manual'}
+              </button>
+            </div>
+
+            {/* API Sync */}
+            <div className="api-sync">
+              <div className="divider">
+                <span>o sincronizar con dashboard</span>
+              </div>
+              <div className="input-group">
+                <label>API Key (del dashboard)</label>
+                <input
+                  type="password"
+                  placeholder="elena_ext_xxxx..."
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+              </div>
+              <button
+                className="sync-btn"
+                onClick={handleSyncWithApi}
+                disabled={configStatus === 'syncing' || !apiKey}
+              >
+                {configStatus === 'syncing' ? 'Sincronizando...' : '\u{1F504} Sincronizar'}
+              </button>
+            </div>
+
+            {/* Status Message */}
+            {configStatus !== 'idle' && configMessage && (
+              <div className={`config-message ${configStatus}`}>
+                {configMessage}
+              </div>
+            )}
+
+            <p className="config-hint">
+              Cuando guardes tu propio contenido, las metricas reales se enviaran al modelo ML para mejorar las predicciones.
+            </p>
+          </div>
+        )}
+      </section>
+
       {/* Footer */}
       <footer className="popup-footer">
         <a href="http://localhost:8000/docs" target="_blank" rel="noopener noreferrer">
           Ver API Docs
+        </a>
+        <a href="http://localhost:5173/my-profile" target="_blank" rel="noopener noreferrer">
+          Dashboard Config
         </a>
       </footer>
     </div>

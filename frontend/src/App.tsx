@@ -11,6 +11,7 @@ import ContentCalendar from './pages/ContentCalendar'
 import ContentGenerator from './pages/ContentGenerator'
 import ViralScanner from './pages/ViralScanner'
 import ContentDetail from './pages/ContentDetail'
+import MyProfileSettings from './pages/MyProfileSettings'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
@@ -41,6 +42,7 @@ function App() {
         <Route path="calendar/new" element={<ContentGenerator />} />
         <Route path="content/:contentId" element={<ContentDetail />} />
         <Route path="viral" element={<ViralScanner />} />
+        <Route path="my-profile" element={<MyProfileSettings />} />
       </Route>
 
       {/* Catch all */}

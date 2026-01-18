@@ -2,6 +2,10 @@
 Elena Bridge - Raw Data Ingestion API
 Receives content and profile data extracted from Instagram/TikTok by the Chrome extension
 Supports both individual content (posts, reels, videos) and full profile analysis
+
+Human-in-the-Loop Integration:
+When isOwnProfile=True, the backend registers real performance metrics for ML feedback loop.
+This closes the loop between predictions and actual performance, enabling continuous learning.
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
 from pydantic import BaseModel, Field
@@ -9,6 +13,11 @@ from typing import Optional, List, Literal, Any, Dict
 from datetime import datetime
 import logging
 import uuid
+import hashlib
+import math
+
+# Import ML service for feedback loop
+from app.services.ml_service import get_ml_predictor, FeatureExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +143,10 @@ class IngestMetadata(BaseModel):
 class RawIngestPayload(BaseModel):
     """
     Unified payload for both content and profile ingestion
+
+    Human-in-the-Loop:
+    When isOwnProfile=True, the content belongs to the client's own account.
+    This triggers the ML feedback loop to register real performance metrics.
     """
     source: str = Field(default="elena_bridge_extension", description="Source identifier")
     version: str = Field(default="1.0.0", description="Extension version")
@@ -150,6 +163,10 @@ class RawIngestPayload(BaseModel):
 
     # Shared
     metadata: Optional[IngestMetadata] = None
+
+    # Human-in-the-Loop: indicates content is from client's own account
+    # When True, backend registers real metrics for ML feedback loop
+    isOwnProfile: bool = Field(default=False, description="True if content is from own profile for feedback loop")
 
     class Config:
         extra = "allow"
@@ -169,9 +186,120 @@ class IngestResponse(BaseModel):
 # Background Tasks for Processing
 # ============================================================================
 
-async def process_content_data(task_id: str, content: ContentData):
+def _generate_content_hash(content: ContentData) -> str:
+    """
+    Generate a unique hash for content identification.
+    Uses platform + contentId + author for uniqueness.
+    """
+    unique_str = f"{content.platform}:{content.contentId}:{content.author.username}"
+    return hashlib.sha256(unique_str.encode()).hexdigest()[:16]
+
+
+def _calculate_real_targets(content: ContentData) -> Dict[str, float]:
+    """
+    Calculate real target metrics from extracted content for ML feedback.
+
+    Multi-objetivo targets:
+    - engagement_rate: (likes + comments*2 + saves*3 + shares*4) / views (if available)
+    - log_likes, log_comments, log_shares, log_saves, log_views: log1p transforms
+
+    Returns dict compatible with ml_service.register_performance_feedback
+    """
+    metrics = content.metrics
+
+    likes = metrics.likes or 0
+    comments = metrics.comments or 0
+    shares = metrics.shares or 0
+    saves = metrics.saves or 0
+    views = metrics.views or metrics.plays or 0
+
+    # Log transforms (log1p to handle zeros)
+    targets = {
+        "likes": likes,
+        "comments": comments,
+        "shares": shares,
+        "saves": saves,
+        "views": views,
+        "log_likes": math.log1p(likes),
+        "log_comments": math.log1p(comments),
+        "log_shares": math.log1p(shares),
+        "log_saves": math.log1p(saves),
+        "log_views": math.log1p(views),
+    }
+
+    # Calculate engagement rate
+    if views > 0:
+        # Weighted engagement rate
+        weighted_engagement = likes + (comments * 2) + (saves * 3) + (shares * 4)
+        targets["engagement_rate"] = (weighted_engagement / views) * 100
+    else:
+        # Fallback: use total interactions as proxy
+        targets["engagement_rate"] = min(100, (likes + comments * 2 + saves * 3 + shares * 4) / 10)
+
+    return targets
+
+
+def _content_to_features_dict(content: ContentData) -> Dict[str, Any]:
+    """
+    Convert ContentData to a dict suitable for FeatureExtractor.
+
+    Maps extension payload fields to ML feature extraction format.
+    """
+    # Determine content format
+    content_format = "static"
+    if content.contentType == "reel":
+        content_format = "reel"
+    elif content.contentType == "video":
+        content_format = "tiktok_video"
+    elif content.contentType == "carousel":
+        content_format = "carousel"
+
+    # Get video duration if available
+    video_duration = 0
+    for media in content.media:
+        if media.type == "video" and media.duration:
+            video_duration = media.duration
+            break
+
+    # Audio info
+    audio_name = None
+    if content.audio:
+        audio_name = content.audio.title or content.audio.artist
+
+    return {
+        "caption": content.caption or "",
+        "hashtags": content.hashtags,
+        "mentions": content.mentions,
+        "content_format": content_format,
+        "type": content_format,
+        "video_duration_seconds": video_duration,
+        "video_duration": video_duration,
+        "audio_name": audio_name,
+        "recommended_audio": audio_name,
+        "posted_at": content.postedAt,
+        # Metrics for training (will be used as actual values)
+        "likes_count": content.metrics.likes or 0,
+        "likes": content.metrics.likes or 0,
+        "comments_count": content.metrics.comments or 0,
+        "comments": content.metrics.comments or 0,
+        "shares_count": content.metrics.shares or 0,
+        "shares": content.metrics.shares or 0,
+        "saves_count": content.metrics.saves or 0,
+        "saves": content.metrics.saves or 0,
+        "views_count": content.metrics.views or content.metrics.plays or 0,
+        "video_views": content.metrics.views or content.metrics.plays or 0,
+        # Business type will be set by caller if known
+        "business_type": "otros",
+    }
+
+
+async def process_content_data(task_id: str, content: ContentData, is_own_profile: bool = False):
     """
     Background task to process individual content (post, reel, video).
+
+    Human-in-the-Loop:
+    When is_own_profile=True, registers real performance metrics for ML feedback loop.
+    This enables the model to learn from actual post performance.
     """
     logger.info(f"[Task {task_id}] Processing {content.contentType} from {content.platform}")
 
@@ -187,7 +315,7 @@ async def process_content_data(task_id: str, content: ContentData):
         logger.info(
             f"[Task {task_id}] Metrics - Likes: {metrics.likes}, "
             f"Comments: {metrics.comments}, Views: {metrics.views}, "
-            f"Shares: {metrics.shares}"
+            f"Shares: {metrics.shares}, Saves: {metrics.saves}"
         )
 
         # Log hashtags
@@ -206,12 +334,66 @@ async def process_content_data(task_id: str, content: ContentData):
                 f"[Task {task_id}] Audio: '{content.audio.title}' by {content.audio.artist or 'Unknown'}"
             )
 
-        # TODO: Integrate with AnalyticsEngine for deeper analysis
-        # Ideas:
-        # - Analyze caption sentiment
-        # - Detect content patterns (hooks, CTAs)
-        # - Compare metrics to account averages
-        # - Store for trend analysis
+        # =====================================================================
+        # HUMAN-IN-THE-LOOP: Register ML Feedback for Own Profile Content
+        # =====================================================================
+        if is_own_profile:
+            logger.info(
+                f"[Task {task_id}] 🎯 PERFIL PROPIO detectado - Registrando feedback ML"
+            )
+
+            try:
+                # Generate unique content hash
+                content_hash = _generate_content_hash(content)
+
+                # Calculate real targets from metrics
+                real_targets = _calculate_real_targets(content)
+
+                # Convert content to features dict for ML
+                content_dict = _content_to_features_dict(content)
+
+                # Get ML predictor instance
+                ml_predictor = get_ml_predictor()
+
+                # Register feedback with ML service
+                # Note: We use content_hash as ID since this is external content
+                feedback = ml_predictor.register_performance_feedback(
+                    content_id=int(content_hash, 16) % (10**9),  # Convert hash to numeric ID
+                    metrics=real_targets,
+                    original_content=content_dict,
+                    predicted_score=None  # Will use default; actual vs predicted tracked over time
+                )
+
+                logger.info(
+                    f"[Task {task_id}] ✅ Feedback real registrado de post propio – modelo aprenderá. "
+                    f"Hash: {content_hash}, Engagement Rate: {real_targets['engagement_rate']:.2f}%, "
+                    f"Delta: {feedback.delta_percent:.1f}%, High Priority: {feedback.is_high_priority}"
+                )
+
+                # Log training queue status
+                stats = ml_predictor.get_feedback_statistics()
+                logger.info(
+                    f"[Task {task_id}] 📊 Queue ML: {stats['queue_size']} samples, "
+                    f"{stats['high_priority_count']} high priority, "
+                    f"Model bias: {stats['model_bias']}"
+                )
+
+                # Check if we should trigger online update (threshold > 10)
+                if stats['queue_size'] >= 10:
+                    logger.info(
+                        f"[Task {task_id}] 🔄 Threshold alcanzado ({stats['queue_size']} >= 10) - "
+                        f"Considerar retrain o online update en próximo ciclo"
+                    )
+
+            except Exception as e:
+                logger.error(f"[Task {task_id}] Error registering ML feedback: {e}")
+                # Don't fail the whole task, just log the error
+
+        else:
+            # Competitor content - ingest for baseline training
+            logger.info(
+                f"[Task {task_id}] Contenido de competidor - almacenado para baseline training"
+            )
 
         logger.info(f"[Task {task_id}] Content processing completed successfully")
 
@@ -219,9 +401,18 @@ async def process_content_data(task_id: str, content: ContentData):
         logger.error(f"[Task {task_id}] Error processing content: {e}")
 
 
-async def process_profile_data(task_id: str, profile: ProfileData, posts: List[ExtractedPost]):
+async def process_profile_data(
+    task_id: str,
+    profile: ProfileData,
+    posts: List[ExtractedPost],
+    is_own_profile: bool = False
+):
     """
     Background task to process profile data.
+
+    Human-in-the-Loop:
+    When is_own_profile=True, registers all recent posts for ML feedback loop.
+    This is useful for bulk sync of the client's own content metrics.
     """
     logger.info(f"[Task {task_id}] Processing {profile.platform} profile: @{profile.username}")
 
@@ -248,12 +439,96 @@ async def process_profile_data(task_id: str, profile: ProfileData, posts: List[E
                     f"Comments: {avg_comments:.0f}"
                 )
 
-        # TODO: Integrate with AnalyticsEngine
-        # Ideas:
-        # - Calculate engagement rate
-        # - Analyze bio for keywords
-        # - Detect growth patterns
-        # - Store competitor data
+        # =====================================================================
+        # HUMAN-IN-THE-LOOP: Register ML Feedback for Own Profile Posts
+        # =====================================================================
+        if is_own_profile and posts_count > 0:
+            logger.info(
+                f"[Task {task_id}] 🎯 PERFIL PROPIO - Registrando {posts_count} posts para feedback ML"
+            )
+
+            try:
+                ml_predictor = get_ml_predictor()
+                feedback_count = 0
+                high_priority_count = 0
+
+                for post in posts:
+                    # Generate unique hash for this post
+                    unique_str = f"{profile.platform}:{post.id}:{profile.username}"
+                    post_hash = hashlib.sha256(unique_str.encode()).hexdigest()[:16]
+
+                    # Calculate real targets
+                    likes = post.likes or 0
+                    comments = post.comments or 0
+                    shares = post.shares or 0
+                    views = post.views or 0
+
+                    real_targets = {
+                        "likes": likes,
+                        "comments": comments,
+                        "shares": shares,
+                        "saves": 0,  # Not available in grid view
+                        "views": views,
+                        "log_likes": math.log1p(likes),
+                        "log_comments": math.log1p(comments),
+                        "log_shares": math.log1p(shares),
+                        "log_saves": 0,
+                        "log_views": math.log1p(views),
+                    }
+
+                    # Calculate engagement rate
+                    if views > 0:
+                        weighted_engagement = likes + (comments * 2) + (shares * 4)
+                        real_targets["engagement_rate"] = (weighted_engagement / views) * 100
+                    else:
+                        real_targets["engagement_rate"] = min(100, (likes + comments * 2 + shares * 4) / 10)
+
+                    # Create minimal content dict
+                    content_dict = {
+                        "caption": post.caption or "",
+                        "content_format": post.type if post.type in ["reel", "carousel"] else "static",
+                        "type": post.type,
+                        "posted_at": post.timestamp,
+                        "likes": likes,
+                        "comments": comments,
+                        "shares": shares,
+                        "views": views,
+                        "business_type": "otros",
+                    }
+
+                    # Register feedback
+                    try:
+                        feedback = ml_predictor.register_performance_feedback(
+                            content_id=int(post_hash, 16) % (10**9),
+                            metrics=real_targets,
+                            original_content=content_dict,
+                            predicted_score=None
+                        )
+                        feedback_count += 1
+                        if feedback.is_high_priority:
+                            high_priority_count += 1
+                    except Exception as e:
+                        logger.warning(f"[Task {task_id}] Error registering feedback for post {post.id}: {e}")
+
+                logger.info(
+                    f"[Task {task_id}] ✅ Feedback registrado para {feedback_count}/{posts_count} posts, "
+                    f"{high_priority_count} high priority"
+                )
+
+                # Log training queue status
+                stats = ml_predictor.get_feedback_statistics()
+                logger.info(
+                    f"[Task {task_id}] 📊 Queue ML total: {stats['queue_size']} samples"
+                )
+
+            except Exception as e:
+                logger.error(f"[Task {task_id}] Error en bulk feedback registration: {e}")
+
+        elif not is_own_profile:
+            # Competitor profile - store for baseline analysis
+            logger.info(
+                f"[Task {task_id}] Perfil de competidor - almacenado para análisis baseline"
+            )
 
         logger.info(f"[Task {task_id}] Profile processing completed successfully")
 
@@ -294,17 +569,21 @@ async def ingest_raw_data(
     # Handle individual content (posts, reels, videos)
     if payload.content:
         content = payload.content
+        is_own = payload.isOwnProfile
+
         logger.info(
             f"[{task_id}] Ingesting {content.contentType} from @{content.author.username} "
             f"({content.platform}, method: {content.extractionMethod})"
+            f"{' [PERFIL PROPIO - Feedback Loop]' if is_own else ''}"
         )
 
-        # Queue background processing
-        background_tasks.add_task(process_content_data, task_id, content)
+        # Queue background processing with own profile flag
+        background_tasks.add_task(process_content_data, task_id, content, is_own)
 
         return IngestResponse(
             success=True,
-            message=f"{content.contentType.capitalize()} from @{content.author.username} queued for processing",
+            message=f"{content.contentType.capitalize()} from @{content.author.username} queued for processing"
+                    + (" (feedback loop activado)" if is_own else ""),
             task_id=task_id,
             data_type=content.contentType,
             identifier=content.contentId,
@@ -314,19 +593,23 @@ async def ingest_raw_data(
     # Handle profile data
     if payload.profile:
         profile = payload.profile
+        is_own = payload.isOwnProfile
+
         logger.info(
             f"[{task_id}] Ingesting profile @{profile.username} from {profile.platform} "
             f"(method: {profile.extractionMethod})"
+            f"{' [PERFIL PROPIO - Bulk Feedback Loop]' if is_own else ''}"
         )
 
-        # Queue background processing
+        # Queue background processing with own profile flag
         background_tasks.add_task(
-            process_profile_data, task_id, profile, payload.recentPosts
+            process_profile_data, task_id, profile, payload.recentPosts, is_own
         )
 
         return IngestResponse(
             success=True,
-            message=f"Profile @{profile.username} queued for processing",
+            message=f"Profile @{profile.username} queued for processing"
+                    + (f" ({len(payload.recentPosts)} posts para feedback)" if is_own else ""),
             task_id=task_id,
             data_type="profile",
             identifier=profile.username,

@@ -112,6 +112,33 @@ export const businessApi = {
     const { data } = await api.get<BusinessStatus>(`/business/${businessId}/status`)
     return data
   },
+
+  // Human-in-the-Loop: Own Profile Configuration
+  getOwnProfileConfig: async (businessId: number) => {
+    const { data } = await api.get<{
+      own_instagram_username: string | null
+      own_tiktok_username: string | null
+      feedback_loop_enabled: boolean
+      message: string
+    }>(`/business/${businessId}/own-profile-config`)
+    return data
+  },
+
+  updateOwnProfileConfig: async (
+    businessId: number,
+    config: {
+      own_instagram_username?: string | null
+      own_tiktok_username?: string | null
+    }
+  ) => {
+    const { data } = await api.put<{
+      own_instagram_username: string | null
+      own_tiktok_username: string | null
+      feedback_loop_enabled: boolean
+      message: string
+    }>(`/business/${businessId}/own-profile-config`, config)
+    return data
+  },
 }
 
 // ============ COMPETITORS ============
@@ -610,6 +637,36 @@ export const multiOutputApi = {
       ...request,
       weights_configs: weightsConfigs,
     })
+    return data
+  },
+}
+
+// ============ EXTENSION API (API Keys for sync) ============
+
+export const extensionApi = {
+  // Generate new API key for extension sync
+  generateApiKey: async (businessId: number) => {
+    const { data } = await api.post<{
+      api_key: string
+      key_suffix: string
+      message: string
+    }>(`/extension/api-key/${businessId}`)
+    return data
+  },
+
+  // Get API key status (has key, last used)
+  getApiKeyStatus: async (businessId: number) => {
+    const { data } = await api.get<{
+      has_key: boolean
+      key_suffix: string | null
+      last_used_at: string | null
+    }>(`/extension/api-key/${businessId}/status`)
+    return data
+  },
+
+  // Revoke API key
+  revokeApiKey: async (businessId: number) => {
+    const { data } = await api.delete(`/extension/api-key/${businessId}`)
     return data
   },
 }

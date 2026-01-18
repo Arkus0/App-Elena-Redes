@@ -38,6 +38,17 @@ class BusinessUpdate(BaseModel):
     brand_voice: Optional[str] = None
     embedding_precision: Optional[EmbeddingPrecision] = None
 
+    # Human-in-the-Loop: Own username for feedback loop
+    # When extension detects content from these usernames, it triggers ML feedback
+    own_instagram_username: Optional[str] = Field(
+        None,
+        description="Tu username de Instagram (sin @) para feedback loop ML"
+    )
+    own_tiktok_username: Optional[str] = Field(
+        None,
+        description="Tu username de TikTok (sin @) para feedback loop ML"
+    )
+
 
 class BusinessResponse(BaseModel):
     id: int
@@ -56,6 +67,10 @@ class BusinessResponse(BaseModel):
     onboarding_completed: Optional[datetime]
     last_analysis_at: Optional[datetime]
     created_at: datetime
+
+    # Human-in-the-Loop configuration
+    own_instagram_username: Optional[str] = None
+    own_tiktok_username: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -78,6 +78,13 @@ class Business(Base):
         nullable=False
     )
 
+    # Human-in-the-Loop Configuration
+    # Own username for each platform - used to identify posts from the client's own account
+    # When extension detects content from these usernames, it triggers feedback loop
+    # Example: "inmoalmeria" (without @)
+    own_instagram_username = Column(String(100), nullable=True)
+    own_tiktok_username = Column(String(100), nullable=True)
+
     # Onboarding status
     onboarding_completed = Column(DateTime, nullable=True)
     last_analysis_at = Column(DateTime, nullable=True)

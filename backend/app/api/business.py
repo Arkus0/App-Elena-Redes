@@ -275,6 +275,116 @@ async def update_business(
     return business
 
 
+# ============================================================================
+# Human-in-the-Loop: Own Profile Configuration
+# ============================================================================
+
+from pydantic import BaseModel as PydanticBaseModel
+
+
+class OwnProfileConfigRequest(PydanticBaseModel):
+    """Request schema for updating own profile configuration"""
+    own_instagram_username: str | None = None
+    own_tiktok_username: str | None = None
+
+
+class OwnProfileConfigResponse(PydanticBaseModel):
+    """Response schema with current own profile configuration"""
+    own_instagram_username: str | None = None
+    own_tiktok_username: str | None = None
+    feedback_loop_enabled: bool = False
+    message: str = ""
+
+
+@router.get("/{business_id}/own-profile-config", response_model=OwnProfileConfigResponse)
+async def get_own_profile_config(
+    business_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get current own profile configuration for Human-in-the-Loop feedback.
+
+    The extension uses this to detect when content belongs to the client's own account.
+    """
+    result = await db.execute(
+        select(Business)
+        .where(Business.id == business_id)
+        .where(Business.user_id == current_user.id)
+    )
+    business = result.scalar_one_or_none()
+
+    if not business:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Business not found"
+        )
+
+    has_config = bool(business.own_instagram_username or business.own_tiktok_username)
+
+    return OwnProfileConfigResponse(
+        own_instagram_username=business.own_instagram_username,
+        own_tiktok_username=business.own_tiktok_username,
+        feedback_loop_enabled=has_config,
+        message="Feedback loop activo" if has_config else "Configura tu username para activar feedback loop"
+    )
+
+
+@router.put("/{business_id}/own-profile-config", response_model=OwnProfileConfigResponse)
+async def update_own_profile_config(
+    business_id: int,
+    config: OwnProfileConfigRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update own profile configuration for Human-in-the-Loop feedback.
+
+    When the extension detects content from these usernames, it will flag
+    the payload with isOwnProfile=True, triggering the ML feedback loop.
+
+    Example:
+    - own_instagram_username: "inmoalmeria" (without @)
+    - own_tiktok_username: "inmoalmeria"
+    """
+    result = await db.execute(
+        select(Business)
+        .where(Business.id == business_id)
+        .where(Business.user_id == current_user.id)
+    )
+    business = result.scalar_one_or_none()
+
+    if not business:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Business not found"
+        )
+
+    # Clean usernames (remove @ if present)
+    if config.own_instagram_username:
+        business.own_instagram_username = config.own_instagram_username.lstrip("@").lower()
+    else:
+        business.own_instagram_username = None
+
+    if config.own_tiktok_username:
+        business.own_tiktok_username = config.own_tiktok_username.lstrip("@").lower()
+    else:
+        business.own_tiktok_username = None
+
+    await db.commit()
+    await db.refresh(business)
+
+    has_config = bool(business.own_instagram_username or business.own_tiktok_username)
+
+    return OwnProfileConfigResponse(
+        own_instagram_username=business.own_instagram_username,
+        own_tiktok_username=business.own_tiktok_username,
+        feedback_loop_enabled=has_config,
+        message="Configuración guardada. El modelo aprenderá de tus posts reales."
+                if has_config else "Feedback loop desactivado"
+    )
+
+
 @router.get("/{business_id}/status")
 async def get_business_status(
     business_id: int,
