@@ -58,8 +58,25 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(exist_ok=True)
 
+# Import evaluation module for periodic evaluation
+try:
+    from backend.ml.evaluate_model import (
+        should_evaluate_online,
+        get_baseline_mae,
+        compute_drift_score,
+        save_evaluation_results,
+        EvaluationResult,
+        evaluate_global_metrics,
+        generate_insights,
+        ONLINE_EVAL_INTERVAL,
+    )
+    EVALUATION_MODULE_AVAILABLE = True
+except ImportError:
+    EVALUATION_MODULE_AVAILABLE = False
+    ONLINE_EVAL_INTERVAL = 50
+
 # Online model settings
-EVALUATION_INTERVAL = 15  # Evaluate every N samples
+EVALUATION_INTERVAL = 15  # Evaluate every N samples (internal River metrics)
 IMPROVEMENT_THRESHOLD = 0.05  # 5% improvement triggers full retrain signal
 MAX_SAMPLES_HISTORY = 1000  # Rolling window for metrics tracking
 MIN_SAMPLES_FOR_EVALUATION = 10  # Minimum samples before evaluation
@@ -663,6 +680,76 @@ def online_update(
 
     # Get current metrics
     current = predictor.get_current_metrics()
+
+    # Granular evaluation every ONLINE_EVAL_INTERVAL (50) samples
+    granular_eval = None
+    if EVALUATION_MODULE_AVAILABLE and should_evaluate_online(niche, samples_processed):
+        try:
+            logger.info(f"Running granular evaluation for niche={niche} (every {ONLINE_EVAL_INTERVAL} samples)")
+
+            # Get baseline MAE for drift comparison
+            baseline_mae = get_baseline_mae(niche, lookback=10)
+
+            # Compute predictions for evaluation
+            predictions_df = predictor.predict_batch(new_features)
+
+            # Compute drift score
+            drift_result = compute_drift_score(
+                y_true=targets_df.values,
+                y_pred=predictions_df.values,
+                baseline_mae=baseline_mae
+            )
+
+            # Compute global metrics
+            global_metrics = evaluate_global_metrics(
+                targets_df.values,
+                predictions_df.values,
+                TARGET_NAMES[:min(targets_df.shape[1], predictions_df.shape[1])]
+            )
+
+            # Generate insights
+            insights = generate_insights(
+                global_metrics=global_metrics,
+                format_metrics={},
+                time_metrics={},
+                drift=drift_result,
+                calibration=None
+            )
+
+            # Build evaluation result
+            granular_eval = EvaluationResult(
+                niche=niche,
+                timestamp=datetime.utcnow().isoformat(),
+                global_metrics=global_metrics,
+                format_metrics={},
+                time_metrics={},
+                rpi_metrics={},
+                drift=drift_result,
+                insights=insights,
+                n_samples=samples_processed,
+                evaluation_type="online"
+            )
+
+            # Save evaluation results
+            save_evaluation_results(granular_eval)
+
+            # Log insights
+            for insight in insights:
+                if insight.startswith("ALERTA"):
+                    logger.warning(f"[ONLINE EVAL] {insight}")
+                else:
+                    logger.info(f"[ONLINE EVAL] {insight}")
+
+            # Update trigger_retrain if drift detected
+            if drift_result.drift_detected:
+                trigger_retrain = True
+                logger.warning(
+                    f"DRIFT DETECTED in online evaluation for niche={niche}: "
+                    f"score={drift_result.drift_score:.3f}"
+                )
+
+        except Exception as e:
+            logger.warning(f"Granular online evaluation failed: {e}")
 
     # Build result
     result = OnlineUpdateResult(

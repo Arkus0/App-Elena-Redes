@@ -13,9 +13,12 @@ import {
   AlertCircle,
   Cpu,
   Zap,
+  Activity,
+  AlertTriangle,
+  Shield,
 } from 'lucide-react'
 import { useBusinessStore } from '../stores/businessStore'
-import { businessApi, competitorsApi, contentApi, mlApi } from '../services/api'
+import { businessApi, competitorsApi, contentApi, mlApi, type ModelHealthSummary } from '../services/api'
 import clsx from 'clsx'
 
 export default function Dashboard() {
@@ -33,6 +36,7 @@ export default function Dashboard() {
     model_version: string
     feature_count: number
   } | null>(null)
+  const [modelHealth, setModelHealth] = useState<ModelHealthSummary | null>(null)
 
   useEffect(() => {
     if (!currentBusiness) {
@@ -43,16 +47,18 @@ export default function Dashboard() {
     const loadData = async () => {
       setIsLoading(true)
       try {
-        const [statusData, competitorsData, calendarsData, mlStatusData] = await Promise.all([
+        const [statusData, competitorsData, calendarsData, mlStatusData, healthData] = await Promise.all([
           businessApi.getStatus(currentBusiness.id),
           competitorsApi.getCompetitors(currentBusiness.id),
           contentApi.getCalendars(currentBusiness.id),
           mlApi.getModelStatus().catch(() => null),
+          mlApi.getModelHealthSummary().catch(() => null),
         ])
         setStatus(statusData)
         setCompetitors(competitorsData)
         setCalendars(calendarsData)
         setMlStatus(mlStatusData)
+        setModelHealth(healthData)
       } catch (error) {
         console.error('Error loading dashboard data:', error)
       } finally {
@@ -172,6 +178,127 @@ export default function Dashboard() {
                   <span>SHAP explicaciones</span>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Model Health Section */}
+      {modelHealth && modelHealth.overall_status !== 'no_data' && (
+        <div className={clsx(
+          'card',
+          modelHealth.overall_status === 'healthy'
+            ? 'bg-gradient-to-r from-emerald-600/20 to-teal-600/20 border-emerald-500/30'
+            : 'bg-gradient-to-r from-amber-600/20 to-orange-600/20 border-amber-500/30'
+        )}>
+          <div className="flex items-start gap-4">
+            <div className={clsx(
+              'p-2 rounded-lg',
+              modelHealth.overall_status === 'healthy'
+                ? 'bg-emerald-500/20'
+                : 'bg-amber-500/20'
+            )}>
+              {modelHealth.overall_status === 'healthy' ? (
+                <Shield className="w-6 h-6 text-emerald-400" />
+              ) : (
+                <AlertTriangle className="w-6 h-6 text-amber-400" />
+              )}
+            </div>
+            <div className="flex-1">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-white flex items-center gap-2">
+                  Salud del Modelo
+                  <span className={clsx(
+                    'text-xs px-2 py-0.5 rounded-full',
+                    modelHealth.overall_status === 'healthy'
+                      ? 'bg-emerald-500/20 text-emerald-400'
+                      : 'bg-amber-500/20 text-amber-400'
+                  )}>
+                    {modelHealth.overall_status === 'healthy' ? 'Estable' : 'Drift Detectado'}
+                  </span>
+                </h3>
+                {modelHealth.last_updated && (
+                  <span className="text-xs text-gray-400">
+                    Actualizado: {new Date(modelHealth.last_updated).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
+
+              {/* Metrics Grid */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3">
+                <div className="bg-gray-800/50 rounded-lg p-2">
+                  <div className="flex items-center gap-1 text-xs text-gray-400">
+                    <Activity className="w-3 h-3" />
+                    <span>MAE Promedio</span>
+                  </div>
+                  <p className="text-lg font-semibold text-white mt-1">
+                    {modelHealth.avg_mae !== null ? modelHealth.avg_mae.toFixed(4) : '-'}
+                  </p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-2">
+                  <div className="flex items-center gap-1 text-xs text-gray-400">
+                    <TrendingUp className="w-3 h-3" />
+                    <span>Drift Score</span>
+                  </div>
+                  <p className={clsx(
+                    'text-lg font-semibold mt-1',
+                    modelHealth.avg_drift_score !== null && modelHealth.avg_drift_score > 0.3
+                      ? 'text-amber-400'
+                      : 'text-white'
+                  )}>
+                    {modelHealth.avg_drift_score !== null ? modelHealth.avg_drift_score.toFixed(3) : '-'}
+                  </p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-2">
+                  <div className="flex items-center gap-1 text-xs text-gray-400">
+                    <CheckCircle className="w-3 h-3 text-green-400" />
+                    <span>Nichos OK</span>
+                  </div>
+                  <p className="text-lg font-semibold text-green-400 mt-1">
+                    {modelHealth.healthy_count}
+                  </p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-2">
+                  <div className="flex items-center gap-1 text-xs text-gray-400">
+                    <AlertTriangle className="w-3 h-3 text-amber-400" />
+                    <span>Con Alertas</span>
+                  </div>
+                  <p className={clsx(
+                    'text-lg font-semibold mt-1',
+                    modelHealth.warning_count > 0 ? 'text-amber-400' : 'text-white'
+                  )}>
+                    {modelHealth.warning_count}
+                  </p>
+                </div>
+              </div>
+
+              {/* Alerts */}
+              {modelHealth.alerts && modelHealth.alerts.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {modelHealth.alerts.slice(0, 3).map((alert, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-2 text-sm bg-amber-500/10 text-amber-300 px-3 py-2 rounded-lg"
+                    >
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      <span>{alert.message}</span>
+                      {alert.score !== undefined && (
+                        <span className="ml-auto text-xs bg-amber-500/20 px-2 py-0.5 rounded">
+                          Score: {alert.score.toFixed(3)}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Healthy message */}
+              {modelHealth.overall_status === 'healthy' && (
+                <p className="text-sm text-emerald-300 mt-3 flex items-center gap-2">
+                  <CheckCircle className="w-4 h-4" />
+                  Modelo estable, sin drift significativo detectado.
+                </p>
+              )}
             </div>
           </div>
         </div>

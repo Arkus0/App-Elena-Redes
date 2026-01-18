@@ -121,6 +121,19 @@ try:
 except ImportError:
     SEMANTIC_HOOKS_AVAILABLE = False
 
+# Import evaluation module for post-train evaluation
+try:
+    from backend.ml.evaluate_model import (
+        evaluate,
+        get_baseline_mae,
+        print_calibration_plot,
+        EvaluationResult,
+    )
+    EVALUATION_AVAILABLE = True
+except ImportError:
+    EVALUATION_AVAILABLE = False
+    logger.warning("Evaluation module not available. Post-train evaluation disabled.")
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -887,6 +900,53 @@ def train_niche_model(
     metrics["embedding_precision"] = precision
     metrics["embedding_dims"] = dims
     metrics["trained_at"] = datetime.now().isoformat()
+
+    # Post-train evaluation with granular metrics and drift detection
+    if EVALUATION_AVAILABLE:
+        try:
+            # Get historical baseline MAE for drift detection
+            baseline_mae = get_baseline_mae(niche, lookback=10)
+
+            # Build metadata from features for granular evaluation
+            eval_metadata = X_test.copy() if isinstance(X_test, pd.DataFrame) else pd.DataFrame(X_test)
+
+            # Run comprehensive evaluation
+            eval_result = evaluate(
+                niche=niche,
+                model=model,
+                X_test=X_test,
+                y_test=y_test.values if isinstance(y_test, pd.Series) else y_test,
+                metadata=eval_metadata,
+                baseline_mae=baseline_mae,
+                target_columns=["engagement_rate"],  # Single output for this trainer
+                evaluation_type="retrain",
+                save_results=True
+            )
+
+            # Add evaluation summary to metrics
+            metrics["evaluation"] = {
+                "aggregate_mae": eval_result.global_metrics.get("_aggregate", {}).get("mae"),
+                "drift_score": eval_result.drift.drift_score,
+                "drift_detected": eval_result.drift.drift_detected,
+                "insights": eval_result.insights[:3],  # Top 3 insights
+            }
+
+            # Log calibration plot if available
+            if eval_result.calibration:
+                print_calibration_plot(eval_result.calibration, niche)
+
+            # Alert if drift detected
+            if eval_result.drift.drift_detected:
+                logger.warning(f"DRIFT DETECTED for {niche}: score={eval_result.drift.drift_score:.3f}")
+                for insight in eval_result.insights:
+                    if insight.startswith("ALERTA"):
+                        logger.warning(insight)
+
+            logger.info(f"Post-train evaluation complete: MAE={metrics['evaluation']['aggregate_mae']:.4f}")
+
+        except Exception as e:
+            logger.warning(f"Post-train evaluation failed: {e}")
+            metrics["evaluation"] = {"error": str(e)}
 
     return model, metrics
 
