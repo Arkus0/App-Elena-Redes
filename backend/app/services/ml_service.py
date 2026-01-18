@@ -124,6 +124,20 @@ except ImportError:
     MEDIUM_HOOK_THRESHOLD = 0.5
     logger.warning("Semantic hooks not available - falling back to RegEx-only detection")
 
+# Import online learning module for fallback inference
+try:
+    from backend.ml.online_update import (
+        get_online_predictor,
+        detect_drift,
+        RIVER_AVAILABLE as ONLINE_MODEL_AVAILABLE,
+    )
+    ONLINE_LEARNING_AVAILABLE = True
+    logger.info("Online learning module loaded for fallback inference")
+except ImportError:
+    ONLINE_LEARNING_AVAILABLE = False
+    ONLINE_MODEL_AVAILABLE = False
+    logger.info("Online learning not available - using batch models only")
+
 # VADER Sentiment Analysis
 try:
     from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -792,21 +806,216 @@ class MLPredictor:
         logger.warning(f"No model available for niche: {niche}. Using heuristics.")
         return None, "heuristic"
 
+    def _get_online_prediction(
+        self,
+        features: Dict[str, Any],
+        niche: str
+    ) -> Optional[Dict[str, float]]:
+        """
+        Get prediction from online River model.
+
+        Used as fallback when drift is detected or for cold start scenarios.
+
+        Args:
+            features: Feature dictionary
+            niche: Business niche
+
+        Returns:
+            Dict with predicted log values or None if unavailable
+        """
+        if not ONLINE_LEARNING_AVAILABLE or not ONLINE_MODEL_AVAILABLE:
+            return None
+
+        try:
+            predictor = get_online_predictor(niche)
+
+            # Check if model has enough samples
+            if predictor._metrics.samples_seen < 5:
+                logger.debug(f"Online model for {niche} has too few samples")
+                return None
+
+            # Get numeric features only
+            numeric_features = {
+                k: float(v) if isinstance(v, (int, float, np.number)) else 0.0
+                for k, v in features.items()
+                if k != "business_type" and isinstance(v, (int, float, np.number))
+            }
+
+            prediction = predictor.predict_one(numeric_features)
+
+            # Check if prediction is valid
+            if prediction and any(v != 0.0 for v in prediction.values()):
+                return prediction
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Online prediction failed: {e}")
+            return None
+
+    def _convert_online_to_score(self, online_pred: Dict[str, float]) -> float:
+        """
+        Convert online model multi-output prediction to single RPI score.
+
+        Args:
+            online_pred: Dict with log_likes, log_comments, etc.
+
+        Returns:
+            RPI score (0-100)
+        """
+        # Use similar weighting as multi-output predictor
+        weights = {
+            "log_likes": 1.0,
+            "log_comments": 2.0,
+            "log_shares": 10.0,
+            "log_saves": 5.0,
+            "log_views": 3.0,
+        }
+
+        weighted_sum = sum(
+            online_pred.get(k, 0.0) * w
+            for k, w in weights.items()
+        )
+        total_weight = sum(weights.values())
+
+        # Normalize to 0-100 scale (similar to multi-output predictor)
+        rpi = (weighted_sum / total_weight) * 15.0
+
+        return float(np.clip(rpi, 0, 100))
+
+    def predict_with_online_fallback(
+        self,
+        content: Dict[str, Any],
+        use_drift_detection: bool = True,
+        recent_predictions: Optional[List[float]] = None,
+        recent_actuals: Optional[List[float]] = None
+    ) -> Dict[str, Any]:
+        """
+        Predict engagement with automatic fallback to online model.
+
+        This method provides intelligent model selection:
+        1. First, tries batch XGBoost model
+        2. If drift is detected (using recent prediction errors), falls back to online
+        3. For cold start, uses online model if available
+
+        Args:
+            content: Content dictionary for prediction
+            use_drift_detection: Whether to check for drift
+            recent_predictions: Recent batch model predictions (for drift detection)
+            recent_actuals: Corresponding actual values (for drift detection)
+
+        Returns:
+            Prediction result with model_source indicating which model was used
+        """
+        features = FeatureExtractor.extract_features(content)
+        niche = content.get("business_type", "otros")
+
+        # Check for drift if recent data provided
+        drift_detected = False
+        if use_drift_detection and recent_predictions and recent_actuals:
+            if ONLINE_LEARNING_AVAILABLE:
+                drift_detected, drift_magnitude = detect_drift(
+                    niche, recent_predictions, recent_actuals
+                )
+                if drift_detected:
+                    logger.warning(
+                        f"Drift detected for niche={niche}: magnitude={drift_magnitude:.3f}. "
+                        f"Switching to online model."
+                    )
+
+        # Get batch model
+        batch_model, batch_source = self._get_model_for_niche(niche)
+
+        # Decide which model to use
+        use_online = False
+
+        # Case 1: Drift detected - prefer online
+        if drift_detected:
+            use_online = True
+            logger.info(f"Using online model due to drift for niche={niche}")
+
+        # Case 2: No batch model available - use online as fallback
+        elif batch_model is None:
+            use_online = True
+            logger.info(f"No batch model, using online fallback for niche={niche}")
+
+        # Try online prediction if needed
+        if use_online and ONLINE_LEARNING_AVAILABLE:
+            online_pred = self._get_online_prediction(features, niche)
+
+            if online_pred:
+                score = self._convert_online_to_score(online_pred)
+
+                # Get online model status
+                try:
+                    online_predictor = get_online_predictor(niche)
+                    online_status = online_predictor.get_status()
+                except:
+                    online_status = {}
+
+                return {
+                    "score": round(score, 1),
+                    "confidence": 65.0,  # Lower confidence for online model
+                    "explanation": {
+                        "explanation_text": f"Predicción con modelo online adaptativo (niche: {niche}). "
+                                          f"Samples aprendidos: {online_status.get('samples_seen', 0)}. "
+                                          f"Usando River AdaptiveRandomForest.",
+                        "top_positive_factors": [],
+                        "top_negative_factors": [],
+                    },
+                    "feature_importance": [],
+                    "model_source": "online_river",
+                    "niche": niche,
+                    "cold_start": False,
+                    "drift_detected": drift_detected,
+                    "online_samples": online_status.get("samples_seen", 0),
+                    "online_mae": online_status.get("current_mae"),
+                }
+
+        # Fall back to standard prediction (batch model or heuristics)
+        return self.predict_engagement(content)
+
     def get_model_status(self) -> Dict[str, Any]:
         """
-        Get status of all loaded models.
+        Get status of all loaded models including online models.
 
         Returns:
             Dictionary with model availability and sources
         """
-        return {
+        status = {
             "main_model_trained": self.is_trained,
             "base_model_loaded": self.base_model_loaded,
             "niche_models_loaded": list(self.niche_models.keys()),
             "total_niche_models": len(self.niche_models),
             "cold_start_threshold": COLD_START_THRESHOLD,
             "model_dir": str(MODEL_DIR),
+            "online_learning_available": ONLINE_LEARNING_AVAILABLE,
+            "river_installed": ONLINE_MODEL_AVAILABLE,
         }
+
+        # Add online model status if available
+        if ONLINE_LEARNING_AVAILABLE and ONLINE_MODEL_AVAILABLE:
+            try:
+                online_niches = {}
+                for niche in self.BUSINESS_NICHES:
+                    try:
+                        predictor = get_online_predictor(niche)
+                        if predictor._metrics.samples_seen > 0:
+                            online_niches[niche] = {
+                                "samples_seen": predictor._metrics.samples_seen,
+                                "current_mae": predictor._metrics.last_mae,
+                                "best_mae": predictor._metrics.best_mae,
+                            }
+                    except:
+                        pass
+
+                status["online_models"] = online_niches
+                status["online_models_count"] = len(online_niches)
+            except:
+                status["online_models"] = {}
+                status["online_models_count"] = 0
+
+        return status
 
     def _save_models(self):
         """Save trained models to disk"""

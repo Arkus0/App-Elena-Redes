@@ -9,12 +9,23 @@ Endpoints:
 - POST /api/v1/abtest/log-result - Log actual engagement for published content
 - GET /api/v1/abtest/stats - Get statistics on predictions vs actuals
 - GET /api/v1/abtest/high-priority - Get high-delta samples for retraining
+- POST /api/v1/abtest/feedback - Submit engagement feedback with online learning
+
+NEW: Online Learning Integration
+================================
+When actual engagement metrics are logged, the system automatically:
+1. Extracts features from the original content
+2. Performs incremental online learning update
+3. Tracks improvement and signals when full retrain is needed
 """
 
+import logging
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import numpy as np
+import pandas as pd
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +35,29 @@ from app.models.abtest import ABTestLog, PredictionLog
 from app.models.content import GeneratedContent
 from app.models.user import User
 from app.api.auth import get_current_user
+
+# Online learning integration
+try:
+    from backend.ml.online_update import (
+        online_update,
+        online_update_single,
+        get_online_predictor,
+        OnlineUpdateResult,
+        RIVER_AVAILABLE,
+    )
+    ONLINE_LEARNING_AVAILABLE = True
+except ImportError:
+    ONLINE_LEARNING_AVAILABLE = False
+    RIVER_AVAILABLE = False
+
+# Feature extraction for online learning
+try:
+    from app.services.ml_service import FeatureExtractor
+    FEATURE_EXTRACTOR_AVAILABLE = True
+except ImportError:
+    FEATURE_EXTRACTOR_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/abtest", tags=["A/B Testing"])
 
@@ -319,3 +353,267 @@ async def get_high_priority_samples(
         )
         for log in logs
     ]
+
+
+# =============================================================================
+# Online Learning Integration
+# =============================================================================
+
+class OnlineFeedbackRequest(BaseModel):
+    """Request schema for online learning feedback."""
+    post_id: int = Field(..., description="ID of the GeneratedContent record")
+    actual_likes: int = Field(0, ge=0)
+    actual_comments: int = Field(0, ge=0)
+    actual_saves: Optional[int] = Field(None, ge=0)
+    actual_shares: Optional[int] = Field(None, ge=0)
+    actual_views: Optional[int] = Field(None, ge=0)
+    niche: Optional[str] = Field(None, description="Business niche override")
+
+
+class OnlineFeedbackResponse(BaseModel):
+    """Response schema for online learning feedback."""
+    post_id: int
+    online_learning_enabled: bool
+    samples_processed: int
+    total_samples: int
+    current_mae: Optional[float]
+    improvement_detected: bool
+    trigger_full_retrain: bool
+    update_time_ms: float
+    message: str
+
+
+async def _perform_online_update(
+    content: GeneratedContent,
+    actual_metrics: dict,
+    niche: str
+) -> Optional[dict]:
+    """
+    Perform online learning update in background.
+
+    Extracts features from content and targets from actual metrics,
+    then calls the online_update function.
+
+    Args:
+        content: The original GeneratedContent record
+        actual_metrics: Dict with likes, comments, shares, saves, views
+        niche: Business niche for model selection
+
+    Returns:
+        OnlineUpdateResult dict or None if failed
+    """
+    if not ONLINE_LEARNING_AVAILABLE or not RIVER_AVAILABLE:
+        logger.debug("Online learning not available")
+        return None
+
+    if not FEATURE_EXTRACTOR_AVAILABLE:
+        logger.warning("FeatureExtractor not available for online learning")
+        return None
+
+    try:
+        # Build content dict for feature extraction
+        content_dict = {
+            "caption": content.caption or "",
+            "content_format": content.content_format or "reel",
+            "business_type": niche,
+            "hashtags": content.hashtags or [],
+            "posted_at": content.created_at.isoformat() if content.created_at else None,
+            # Add any additional fields from content
+            "whisper_transcript": getattr(content, "whisper_transcript", "") or "",
+            "easyocr_text": getattr(content, "easyocr_text", "") or "",
+        }
+
+        # Extract features
+        features = FeatureExtractor.extract_features(content_dict)
+
+        # Remove non-numeric features
+        numeric_features = {
+            k: float(v) if isinstance(v, (int, float, np.number)) else 0.0
+            for k, v in features.items()
+            if k != "business_type"
+        }
+
+        # Prepare targets (log-transformed)
+        targets = {
+            "log_likes": float(np.log1p(actual_metrics.get("likes", 0))),
+            "log_comments": float(np.log1p(actual_metrics.get("comments", 0))),
+            "log_shares": float(np.log1p(actual_metrics.get("shares", 0))),
+            "log_saves": float(np.log1p(actual_metrics.get("saves", 0))),
+            "log_views": float(np.log1p(actual_metrics.get("views", 0))),
+        }
+
+        # Perform online update
+        result = online_update_single(
+            niche=niche,
+            features=numeric_features,
+            targets=targets,
+            save_model=True  # Persist after each update
+        )
+
+        logger.info(
+            f"Online update completed: niche={niche}, "
+            f"total_samples={result.total_samples}, "
+            f"MAE={result.current_mae:.4f if result.current_mae else 'N/A'}"
+        )
+
+        return result.to_dict()
+
+    except Exception as e:
+        logger.error(f"Online learning update failed: {e}", exc_info=True)
+        return None
+
+
+@router.post("/feedback", response_model=OnlineFeedbackResponse)
+async def submit_online_feedback(
+    request: OnlineFeedbackRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Submit engagement feedback with online learning update.
+
+    This endpoint:
+    1. Logs the actual engagement metrics (like log-result)
+    2. Performs incremental online learning update
+    3. Returns update statistics and improvement signals
+
+    The online model learns from each feedback sample in real-time,
+    enabling the system to adapt to changing engagement patterns
+    without waiting for full batch retraining.
+
+    When improvement_detected is True, consider triggering a full
+    XGBoost retrain to capture the improved patterns.
+    """
+    # Get the content piece
+    result = await db.execute(
+        select(GeneratedContent).where(GeneratedContent.id == request.post_id)
+    )
+    content = result.scalar_one_or_none()
+
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Content with ID {request.post_id} not found"
+        )
+
+    # Determine niche
+    niche = request.niche or getattr(content, "business_type", "general") or "general"
+
+    # Calculate actual engagement score
+    actual_engagement = (
+        request.actual_likes +
+        request.actual_comments * 3 +
+        (request.actual_saves or 0) * 5 +
+        (request.actual_shares or 0) * 4
+    )
+
+    # Normalize
+    if request.actual_views and request.actual_views > 0:
+        engagement_rate = actual_engagement / request.actual_views
+        actual_engagement_normalized = min(100, engagement_rate * 1000)
+    else:
+        actual_engagement_normalized = min(100, (actual_engagement / 100) * 10)
+
+    # Prepare metrics dict
+    actual_metrics = {
+        "likes": request.actual_likes,
+        "comments": request.actual_comments,
+        "saves": request.actual_saves or 0,
+        "shares": request.actual_shares or 0,
+        "views": request.actual_views or 0,
+    }
+
+    # Perform online learning update
+    online_result = None
+    if ONLINE_LEARNING_AVAILABLE and RIVER_AVAILABLE:
+        online_result = await _perform_online_update(content, actual_metrics, niche)
+
+    # Also log to ABTestLog for consistency
+    predicted_rpi = content.engagement_score or 50.0
+    delta_percent = ((actual_engagement_normalized - predicted_rpi) / predicted_rpi) * 100 if predicted_rpi > 0 else 0.0
+    is_high_priority = abs(delta_percent) > 20.0
+
+    ab_log = ABTestLog(
+        post_id=request.post_id,
+        business_id=content.business_id,
+        predicted_rpi=predicted_rpi,
+        predicted_engagement_score=content.engagement_score,
+        actual_engagement=actual_engagement_normalized,
+        actual_likes=request.actual_likes,
+        actual_comments=request.actual_comments,
+        actual_saves=request.actual_saves,
+        actual_shares=request.actual_shares,
+        actual_views=request.actual_views,
+        delta_percent=delta_percent,
+        is_high_priority=is_high_priority,
+        content_format=content.content_format,
+        platform=content.platform,
+        published_date=datetime.utcnow(),
+        metrics_collected_at=datetime.utcnow(),
+        status="collected_with_online_learning" if online_result else "collected"
+    )
+
+    db.add(ab_log)
+    await db.commit()
+
+    # Build response
+    if online_result:
+        return OnlineFeedbackResponse(
+            post_id=request.post_id,
+            online_learning_enabled=True,
+            samples_processed=online_result.get("samples_processed", 1),
+            total_samples=online_result.get("total_samples", 1),
+            current_mae=online_result.get("current_mae"),
+            improvement_detected=online_result.get("improvement_detected", False),
+            trigger_full_retrain=online_result.get("trigger_full_retrain", False),
+            update_time_ms=online_result.get("update_time_ms", 0.0),
+            message=f"Online learning updated for niche '{niche}'. "
+                    f"Total samples: {online_result.get('total_samples', 1)}"
+        )
+    else:
+        return OnlineFeedbackResponse(
+            post_id=request.post_id,
+            online_learning_enabled=False,
+            samples_processed=0,
+            total_samples=0,
+            current_mae=None,
+            improvement_detected=False,
+            trigger_full_retrain=False,
+            update_time_ms=0.0,
+            message="Feedback logged. Online learning not available."
+        )
+
+
+@router.get("/online-status")
+async def get_online_model_status(
+    niche: str = "general",
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get status of online learning model for a niche.
+
+    Returns:
+    - samples_seen: Total training samples processed
+    - current_mae: Current Mean Absolute Error
+    - best_mae: Best MAE achieved
+    - is_initialized: Whether model has been initialized
+    """
+    if not ONLINE_LEARNING_AVAILABLE or not RIVER_AVAILABLE:
+        return {
+            "online_learning_available": False,
+            "river_installed": RIVER_AVAILABLE,
+            "message": "Online learning not available. Install river: pip install river"
+        }
+
+    try:
+        predictor = get_online_predictor(niche)
+        status = predictor.get_status()
+        status["online_learning_available"] = True
+        return status
+    except Exception as e:
+        return {
+            "online_learning_available": True,
+            "error": str(e),
+            "niche": niche
+        }
