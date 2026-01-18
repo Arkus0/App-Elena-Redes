@@ -5,7 +5,7 @@ Text Intelligence Engine - NLP Pipeline for Content Analysis
 Extracts semantic understanding from video content through:
 - Speech-to-Text transcription (faster-whisper)
 - OCR text detection on frames (EasyOCR)
-- Semantic embeddings with dimensionality reduction (sentence-transformers + PCA)
+- Semantic embeddings with dimensionality reduction (sentence-transformers + UMAP)
 
 Optimized for edge computing with memory-efficient processing.
 
@@ -75,9 +75,11 @@ class TextConfig:
     embedding_quantize: bool = True  # Enable int8 quantization for embeddings
     embedding_quantize_dtype: str = "int8"  # Quantization dtype (int8 recommended)
 
-    # PCA settings
-    pca_components: int = 10  # Reduce 384 -> 10 dimensions
-    pca_model_path: Optional[str] = None  # Path to pre-fitted PCA model
+    # UMAP settings (Replaces PCA)
+    umap_components: int = 10  # Reduce 384 -> 10 dimensions
+    umap_neighbors: int = 15
+    umap_min_dist: float = 0.1
+    umap_model_path: Optional[str] = None  # Path to pre-fitted UMAP model
 
 
 @dataclass(frozen=True)
@@ -392,17 +394,17 @@ class OCRExtractor:
 
 
 # =============================================================================
-# Semantic Embeddings with PCA Reduction
+# Semantic Embeddings with UMAP Reduction
 # =============================================================================
 
 class SemanticEncoder:
     """
-    Generate semantic embeddings and reduce dimensionality with PCA.
+    Generate semantic embeddings and reduce dimensionality with UMAP.
 
     Workflow:
     1. Concatenate: Caption + Transcription + OCR text
     2. Generate 384-dim embedding with sentence-transformers
-    3. Apply PCA to reduce to 10 components (sem_pca_1 to sem_pca_10)
+    3. Apply UMAP to reduce to 10 components (sem_umap_1 to sem_umap_10)
 
     XGBoost needs dense numerical features, not 384-dim sparse vectors.
 
@@ -422,8 +424,8 @@ class SemanticEncoder:
         self.config = config or TextConfig()
         self._model = None
         self._model_quantized = False
-        self._pca = None
-        self._pca_fitted = False
+        self._reducer = None
+        self._reducer_fitted = False
         self._available = self._check_availability()
 
     def _check_availability(self) -> bool:
@@ -516,21 +518,37 @@ class SemanticEncoder:
             else:
                 logger.info("Embedding model loaded (float32, no quantization)")
 
-    def _init_pca(self):
-        """Initialize PCA model (or load pre-fitted one)."""
-        if self._pca is None:
-            from sklearn.decomposition import PCA
+    def _init_reducer(self):
+        """Initialize UMAP reducer (or load pre-fitted one)."""
+        if self._reducer is None:
+            try:
+                import umap
+            except ImportError:
+                logger.warning(
+                    "umap-learn not installed. Semantic reduction unavailable. "
+                    "Install with: pip install umap-learn"
+                )
+                return
 
-            # Try to load pre-fitted PCA if path provided
-            if self.config.pca_model_path and Path(self.config.pca_model_path).exists():
-                with open(self.config.pca_model_path, 'rb') as f:
-                    self._pca = pickle.load(f)
-                self._pca_fitted = True
-                logger.info(f"Loaded pre-fitted PCA from {self.config.pca_model_path}")
-            else:
-                self._pca = PCA(n_components=self.config.pca_components)
-                self._pca_fitted = False
-                logger.info("Initialized new PCA model (will need fitting)")
+            # Try to load pre-fitted UMAP if path provided
+            if self.config.umap_model_path and Path(self.config.umap_model_path).exists():
+                try:
+                    with open(self.config.umap_model_path, 'rb') as f:
+                        self._reducer = pickle.load(f)
+                    self._reducer_fitted = True
+                    logger.info(f"Loaded pre-fitted UMAP from {self.config.umap_model_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to load UMAP model: {e}")
+                    self._reducer = None
+
+            if self._reducer is None:
+                self._reducer = umap.UMAP(
+                    n_components=self.config.umap_components,
+                    n_neighbors=self.config.umap_neighbors,
+                    min_dist=self.config.umap_min_dist
+                )
+                self._reducer_fitted = False
+                logger.info("Initialized new UMAP model (will need fitting)")
 
     def encode_text(self, text: str) -> np.ndarray:
         """
@@ -599,7 +617,8 @@ class SemanticEncoder:
 
     def fit_pca(self, embeddings: np.ndarray) -> "SemanticEncoder":
         """
-        Fit PCA on a corpus of embeddings.
+        Fit UMAP on a corpus of embeddings.
+        Maintained for API compatibility, but uses UMAP.
 
         Args:
             embeddings: Array of shape (n_samples, 384)
@@ -607,47 +626,42 @@ class SemanticEncoder:
         Returns:
             self for chaining
         """
-        self._init_pca()
+        self._init_reducer()
 
-        if embeddings.shape[0] < self.config.pca_components:
-            logger.warning(
-                f"Not enough samples ({embeddings.shape[0]}) for "
-                f"PCA with {self.config.pca_components} components. "
-                "Using min(samples, components)."
+        if self._reducer is None:
+            return self
+
+        # UMAP can fit with fewer samples than components, but warns
+        if embeddings.shape[0] < self.config.umap_neighbors:
+             logger.warning(
+                f"Low sample count ({embeddings.shape[0]}) for UMAP. "
+                f"n_neighbors={self.config.umap_neighbors} might be too high."
             )
-            from sklearn.decomposition import PCA
-            n_components = min(embeddings.shape[0], self.config.pca_components)
-            self._pca = PCA(n_components=n_components)
 
-        self._pca.fit(embeddings)
-        self._pca_fitted = True
-
-        explained_var = sum(self._pca.explained_variance_ratio_) * 100
-        logger.info(
-            f"PCA fitted: {embeddings.shape[0]} samples -> "
-            f"{self._pca.n_components_} components "
-            f"({explained_var:.1f}% variance explained)"
-        )
+        logger.info(f"Fitting UMAP on {embeddings.shape[0]} samples...")
+        self._reducer.fit(embeddings)
+        self._reducer_fitted = True
+        logger.info("UMAP fitting complete")
 
         return self
 
     def transform_to_pca(self, embedding: np.ndarray) -> Dict[str, float]:
         """
-        Transform 384-dim embedding to PCA components.
+        Transform 384-dim embedding to UMAP components.
 
         Args:
             embedding: Array of shape (384,) or (1, 384)
 
         Returns:
-            Dict with sem_pca_1 to sem_pca_10
+            Dict with sem_umap_1 to sem_umap_10
         """
-        self._init_pca()
+        self._init_reducer()
 
-        if not self._pca_fitted:
-            logger.warning("PCA not fitted. Returning zeros.")
+        if not self._reducer_fitted or self._reducer is None:
+            logger.warning("UMAP not fitted. Returning zeros.")
             return {
-                f"sem_pca_{i+1}": 0.0
-                for i in range(self.config.pca_components)
+                f"sem_umap_{i+1}": 0.0
+                for i in range(self.config.umap_components)
             }
 
         # Ensure 2D input
@@ -655,12 +669,12 @@ class SemanticEncoder:
             embedding = embedding.reshape(1, -1)
 
         # Transform
-        pca_components = self._pca.transform(embedding)[0]
+        umap_components = self._reducer.transform(embedding)[0]
 
         # Create named dictionary
         result = {
-            f"sem_pca_{i+1}": round(float(pca_components[i]), 6)
-            for i in range(len(pca_components))
+            f"sem_umap_{i+1}": round(float(umap_components[i]), 6)
+            for i in range(len(umap_components))
         }
 
         return result
@@ -672,7 +686,7 @@ class SemanticEncoder:
         ocr_text: str = ""
     ) -> Dict[str, Any]:
         """
-        Full pipeline: encode combined text and apply PCA.
+        Full pipeline: encode combined text and apply UMAP.
 
         Args:
             caption: User caption
@@ -680,7 +694,7 @@ class SemanticEncoder:
             ocr_text: OCR text
 
         Returns:
-            Dict with sem_pca_1 to sem_pca_10 and metadata
+            Dict with sem_umap_1 to sem_umap_10 and metadata
         """
         # Generate embedding
         embedding = self.encode_combined_text(caption, transcription, ocr_text)
@@ -688,25 +702,25 @@ class SemanticEncoder:
         # Check if any text was provided
         has_text = bool(caption or transcription or ocr_text)
 
-        # Get PCA components
-        pca_result = self.transform_to_pca(embedding)
+        # Get UMAP components
+        umap_result = self.transform_to_pca(embedding)
 
         # Add metadata
-        pca_result["semantic_status"] = "success" if has_text else "no_text"
-        pca_result["text_sources"] = sum([
+        umap_result["semantic_status"] = "success" if has_text else "no_text"
+        umap_result["text_sources"] = sum([
             1 if caption else 0,
             1 if transcription else 0,
             1 if ocr_text else 0
         ])
 
-        return pca_result
+        return umap_result
 
     def save_pca(self, path: str):
-        """Save fitted PCA model to disk."""
-        if self._pca is not None and self._pca_fitted:
+        """Save fitted UMAP model to disk."""
+        if self._reducer is not None and self._reducer_fitted:
             with open(path, 'wb') as f:
-                pickle.dump(self._pca, f)
-            logger.info(f"PCA model saved to {path}")
+                pickle.dump(self._reducer, f)
+            logger.info(f"UMAP model saved to {path}")
 
     def unload_model(self):
         """Explicitly unload model to free memory."""
@@ -800,7 +814,7 @@ class TextIntelligenceEngine:
     Combines:
     - Whisper transcription (spoken words)
     - EasyOCR (text overlays)
-    - Semantic embeddings + PCA (meaning compression)
+    - Semantic embeddings + UMAP (meaning compression)
 
     Example:
         engine = TextIntelligenceEngine()
@@ -808,7 +822,7 @@ class TextIntelligenceEngine:
             video_path="video.mp4",
             caption="Check out this amazing content!"
         )
-        print(features)  # Contains transcription, OCR, and sem_pca_1 to sem_pca_10
+        print(features)  # Contains transcription, OCR, and sem_umap_1 to sem_umap_10
     """
 
     def __init__(self, config: Optional[TextConfig] = None):
@@ -825,7 +839,7 @@ class TextIntelligenceEngine:
             f"Whisper: {self.config.whisper_model}, "
             f"OCR: {self.config.ocr_languages}, "
             f"Embeddings: {self.config.embedding_model}, "
-            f"PCA: {self.config.pca_components} components"
+            f"UMAP: {self.config.umap_components} components"
         )
 
     def extract_transcription(self, audio_path: str) -> Dict[str, Any]:
@@ -868,7 +882,7 @@ class TextIntelligenceEngine:
         transcription: str = "",
         ocr_text: str = ""
     ) -> Dict[str, Any]:
-        """Extract semantic PCA features from text sources."""
+        """Extract semantic UMAP features from text sources."""
         return self.semantic_encoder.encode_and_reduce(
             caption=caption,
             transcription=transcription,
@@ -891,7 +905,7 @@ class TextIntelligenceEngine:
             caption: User-provided caption for the content
             include_transcription: Whether to run Whisper
             include_ocr: Whether to run EasyOCR
-            include_semantics: Whether to generate PCA features
+            include_semantics: Whether to generate UMAP features
 
         Returns:
             Flat dict with all text intelligence features
@@ -933,7 +947,7 @@ class TextIntelligenceEngine:
                     "ocr_status": ocr_result.get("ocr_status", "unknown")
                 })
 
-            # Step 3: Semantic Embeddings + PCA
+            # Step 3: Semantic Embeddings + UMAP
             if include_semantics:
                 sem_result = self.semantic_encoder.encode_and_reduce(
                     caption=caption,
@@ -941,9 +955,9 @@ class TextIntelligenceEngine:
                     ocr_text=ocr_text
                 )
 
-                # Add PCA components (sem_pca_1 to sem_pca_10)
+                # Add UMAP components (sem_umap_1 to sem_umap_10)
                 for key, value in sem_result.items():
-                    if key.startswith("sem_pca_"):
+                    if key.startswith("sem_umap_"):
                         result[key] = value
 
                 result["semantic_text_sources"] = sem_result.get("text_sources", 0)
@@ -965,16 +979,16 @@ class TextIntelligenceEngine:
         save_path: Optional[str] = None
     ) -> "TextIntelligenceEngine":
         """
-        Fit PCA on a corpus of texts for dimensionality reduction.
+        Fit UMAP on a corpus of texts for dimensionality reduction.
 
         Args:
             texts: List of dicts with 'caption', 'transcription', 'ocr_text' keys
-            save_path: Optional path to save fitted PCA model
+            save_path: Optional path to save fitted UMAP model
 
         Returns:
             self for chaining
         """
-        logger.info(f"Fitting PCA on corpus of {len(texts)} samples")
+        logger.info(f"Fitting UMAP on corpus of {len(texts)} samples")
 
         embeddings = []
         for text_dict in texts:
@@ -1042,11 +1056,11 @@ if __name__ == "__main__":
     print("\n[3] Text Intelligence Features (JSON Output):")
     print(json.dumps(features, indent=2, ensure_ascii=False))
 
-    # Show PCA features summary
-    pca_features = {k: v for k, v in features.items() if k.startswith("sem_pca_")}
-    if pca_features:
-        print("\n[4] Semantic PCA Components:")
-        for name, value in pca_features.items():
+    # Show UMAP features summary
+    umap_features = {k: v for k, v in features.items() if k.startswith("sem_umap_")}
+    if umap_features:
+        print("\n[4] Semantic UMAP Components:")
+        for name, value in umap_features.items():
             bar = "=" * int(abs(value) * 50)
             sign = "+" if value >= 0 else "-"
             print(f"    {name}: {value:+.4f} [{sign}{bar}]")

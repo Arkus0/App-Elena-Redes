@@ -23,6 +23,7 @@ pydantic-settings==2.1.0
 python-dotenv==1.0.0
 httpx==0.26.0
 tenacity==8.2.3
+psutil==5.9.8
 
 # Data Processing
 pandas==2.1.4
@@ -33,10 +34,13 @@ scikit-learn==1.4.0
 xgboost==2.0.3
 shap==0.44.1
 joblib==1.3.2
+torch>=2.0.0
+umap-learn==0.5.5
 
 # Analytics Engine (Video/Audio Processing)
 opencv-python-headless==4.9.0.80  # Headless for server/edge (no GUI)
 librosa==0.10.1  # Audio analysis (optional - gracefully degrades if unavailable)
+mediapipe>=0.10.13
 
 # Text Intelligence (NLP Pipeline)
 faster-whisper==1.0.1  # Speech-to-text with CTranslate2 backend (efficient CPU inference)
@@ -46,4 +50,3 @@ sentence-transformers==2.3.1  # Semantic embeddings (all-MiniLM-L6-v2)
 # Testing
 pytest==7.4.4
 pytest-asyncio==0.23.3
-httpx==0.26.0
