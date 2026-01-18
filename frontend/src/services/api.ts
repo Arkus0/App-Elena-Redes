@@ -347,6 +347,58 @@ export interface MLFullPrediction {
   ml_summary: string
 }
 
+// Model Health Types
+export interface ModelHealthAlert {
+  niche: string
+  type?: string
+  message: string
+  severity?: string
+  score?: number
+}
+
+export interface ModelHealthSummary {
+  total_niches: number
+  healthy_count: number
+  warning_count: number
+  overall_status: 'healthy' | 'warning' | 'no_data' | 'error'
+  avg_mae: number | null
+  avg_drift_score: number | null
+  last_updated: string | null
+  alerts: ModelHealthAlert[]
+  error?: string
+}
+
+export interface NicheHealth {
+  niche: string
+  last_evaluated: string | null
+  evaluation_type: string
+  n_samples: number
+  metrics: {
+    aggregate_mae: number | null
+    aggregate_r2: number | null
+    aggregate_rmse: number | null
+  }
+  per_target: Record<string, { mae: number; r2: number; rmse: number }>
+  drift: {
+    detected: boolean
+    score: number
+    alert: string | null
+  }
+  format_metrics: Record<string, { mae: number; n_samples: number }>
+  time_metrics: Record<string, { mae: number; n_samples: number }>
+  rpi_metrics: { rpi_mae?: number; rpi_correlation?: number }
+  calibration: { error: number; well_calibrated: boolean } | null
+  insights: string[]
+  history?: Array<{ timestamp: string; mae: number; drift_score: number }>
+}
+
+export interface ModelHealthFull {
+  status: string
+  niches: Record<string, NicheHealth>
+  alerts: ModelHealthAlert[]
+  last_updated: string | null
+}
+
 export const mlApi = {
   getModelStatus: async () => {
     const { data } = await api.get<{
@@ -354,6 +406,19 @@ export const mlApi = {
       model_version: string
       feature_count: number
     }>('/ml/status')
+    return data
+  },
+
+  // Model Health endpoints
+  getModelHealthSummary: async () => {
+    const { data } = await api.get<ModelHealthSummary>('/ml/health/summary')
+    return data
+  },
+
+  getModelHealth: async (niche?: string) => {
+    const { data } = await api.get<ModelHealthFull>('/ml/health', {
+      params: niche ? { niche } : undefined,
+    })
     return data
   },
 

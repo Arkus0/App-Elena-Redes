@@ -1004,6 +1004,11 @@ Detecta tendencias emergentes y genera scripts adaptados a tu negocio usando la 
 - `POST /api/v1/multi-output/train` - Entrenar modelo multi-output
 - `POST /api/v1/multi-output/compare-weights` - Comparar diferentes configuraciones de pesos
 
+### Model Health (Nuevo)
+- `GET /api/v1/ml/health/summary` - Resumen de salud del modelo (para dashboard)
+- `GET /api/v1/ml/health` - Métricas detalladas por niche
+- `GET /api/v1/ml/health?niche=X` - Métricas específicas de un niche con historial
+
 ### Autenticación & Negocio
 - `POST /api/v1/auth/login`
 - `POST /api/v1/business/onboard`
@@ -1445,6 +1450,336 @@ Timeline:
   [Predicción]      [Feedback Real]      [Modelo Mejorado]
   XGBoost batch  →  Online update  →    XGBoost retrained
                                     o   Online fallback si drift
+```
+
+### 🔬 Evaluación Granular con Drift Detection (Nuevo)
+
+Sistema de evaluación de modelos ML que proporciona métricas granulares por segmento y detección automática de drift para mantener la salud del modelo.
+
+#### Arquitectura de Evaluación
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ML EVALUATION PIPELINE                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐                                                           │
+│  │ Post-Train   │──► evaluate() ──────────────────────────────────────┐     │
+│  │ Hook         │                                                      │     │
+│  └──────────────┘                                                      │     │
+│                                                                        ▼     │
+│  ┌──────────────┐     ┌─────────────────────────────────────────────────┐   │
+│  │ Online Update│──►  │            GRANULAR EVALUATION                   │   │
+│  │ (cada 50     │     │                                                  │   │
+│  │  samples)    │     │  1. Global Metrics (MAE, R2, RMSE por target)   │   │
+│  └──────────────┘     │  2. Format Metrics (Reel/Carousel/Image)        │   │
+│                       │  3. Time Metrics (hora, día, prime time)         │   │
+│                       │  4. RPI Metrics (weighted engagement)            │   │
+│                       │  5. Drift Detection (KS test + MAE baseline)     │   │
+│                       │  6. Calibration Analysis                         │   │
+│                       │  7. Insight Generation                           │   │
+│                       └──────────────────────────────────────────────────┘   │
+│                                        │                                     │
+│                                        ▼                                     │
+│                       ┌─────────────────────────────────────────────────┐   │
+│                       │  /logs/eval_{niche}.json                         │   │
+│                       │  - Historial de evaluaciones                     │   │
+│                       │  - Tendencias de MAE/drift                       │   │
+│                       │  - Alertas automáticas                           │   │
+│                       └─────────────────────────────────────────────────┘   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Métricas Disponibles
+
+| Categoría | Métricas | Descripción |
+|-----------|----------|-------------|
+| **Global** | MAE, RMSE, R², MAPE | Por cada target (likes, comments, shares, saves, views) |
+| **Formato** | MAE por formato | Reel, Carousel, Static Image, Story |
+| **Tiempo** | MAE por segmento | Morning, Afternoon, Evening, Night, Weekday, Weekend, Prime Time |
+| **RPI** | RPI MAE, Correlation | Métricas del índice de rendimiento ponderado |
+| **Drift** | Score (0-1), KS stat | Detección de cambio en distribución de predicciones |
+| **Calibration** | Error (%), Well-calibrated | Comparación expected vs observed percentiles |
+
+#### Drift Detection
+
+El sistema combina dos métodos para detectar drift:
+
+1. **KS Test (Kolmogorov-Smirnov)**: Detecta cambios en la distribución de predicciones vs histórico
+2. **MAE vs Baseline**: Compara el error actual con el promedio histórico
+
+```python
+# Score combinado (0-1)
+drift_score = 0.4 * ks_score + 0.6 * mae_score
+
+# Alerta si drift_score > 0.3
+if drift_score > DRIFT_ALERT_THRESHOLD:
+    # Trigger reentrenamiento
+    # Log alert en dashboard
+```
+
+#### Componente Principal
+
+**Ubicación:** `backend/ml/evaluate_model.py`
+
+```python
+from backend.ml.evaluate_model import (
+    # Función principal
+    evaluate,
+
+    # Métricas individuales
+    evaluate_global_metrics,
+    evaluate_by_format,
+    evaluate_by_time,
+    evaluate_rpi,
+
+    # Drift detection
+    compute_drift_score,
+    detect_drift_ks_test,
+    detect_drift_mae,
+
+    # Calibration
+    analyze_calibration,
+
+    # Insights
+    generate_insights,
+
+    # Storage
+    save_evaluation_results,
+    load_evaluation_history,
+    get_baseline_mae,
+
+    # Online trigger
+    should_evaluate_online,
+    reset_online_counter,
+)
+```
+
+#### Uso Básico
+
+```python
+from backend.ml.evaluate_model import evaluate, get_baseline_mae
+
+# Después de entrenar
+result = evaluate(
+    niche="restaurante",
+    model=trained_model,
+    X_test=X_test,
+    y_test=y_test,
+    metadata=metadata_df,  # con content_format, hour_of_day, day_of_week
+    baseline_mae=get_baseline_mae("restaurante"),
+    evaluation_type="retrain"
+)
+
+# Acceder a resultados
+print(f"MAE Agregado: {result.global_metrics['_aggregate']['mae']}")
+print(f"Drift Score: {result.drift.drift_score}")
+print(f"Drift Detectado: {result.drift.drift_detected}")
+
+# Ver insights
+for insight in result.insights:
+    print(f"  - {insight}")
+
+# Métricas por formato
+for fmt, metrics in result.format_metrics.items():
+    print(f"{fmt}: MAE={metrics['mae']:.4f}, n={metrics['n_samples']}")
+```
+
+#### Integración Automática
+
+**Post-Train (ml/train.py):**
+```python
+# Evaluación automática después de entrenar
+model, metrics = train_niche_model(niche, df)
+
+# metrics ahora incluye:
+# {
+#   "evaluation": {
+#     "aggregate_mae": 0.2345,
+#     "drift_score": 0.12,
+#     "drift_detected": False,
+#     "insights": ["Modelo estable, sin drift significativo."]
+#   }
+# }
+```
+
+**Online Update (cada 50 samples):**
+```python
+# Evaluación periódica durante online learning
+from backend.ml.online_update import online_update
+
+result = online_update(niche, features, targets)
+
+# Si drift detectado, trigger_full_retrain = True
+if result.trigger_full_retrain:
+    retrain_xgboost(niche)
+```
+
+#### API Endpoints
+
+```bash
+# Obtener health summary (optimizado para dashboard)
+GET /api/v1/ml/health/summary
+
+# Respuesta:
+{
+  "total_niches": 5,
+  "healthy_count": 4,
+  "warning_count": 1,
+  "overall_status": "warning",
+  "avg_mae": 0.2456,
+  "avg_drift_score": 0.15,
+  "last_updated": "2025-01-18T10:30:00Z",
+  "alerts": [
+    {
+      "niche": "inmobiliaria",
+      "message": "Drift en inmobiliaria",
+      "score": 0.42
+    }
+  ]
+}
+
+# Obtener métricas detalladas por niche
+GET /api/v1/ml/health?niche=restaurante
+
+# Respuesta:
+{
+  "status": "healthy",
+  "niches": {
+    "restaurante": {
+      "niche": "restaurante",
+      "last_evaluated": "2025-01-18T10:30:00Z",
+      "evaluation_type": "retrain",
+      "n_samples": 200,
+      "metrics": {
+        "aggregate_mae": 0.2134,
+        "aggregate_r2": 0.8521,
+        "aggregate_rmse": 0.2567
+      },
+      "per_target": {
+        "log_likes": {"mae": 0.18, "r2": 0.89, "rmse": 0.22},
+        "log_comments": {"mae": 0.25, "r2": 0.78, "rmse": 0.31}
+      },
+      "drift": {
+        "detected": false,
+        "score": 0.12,
+        "alert": null
+      },
+      "format_metrics": {
+        "reel": {"mae": 0.21, "n_samples": 80},
+        "carousel": {"mae": 0.23, "n_samples": 50},
+        "static_image": {"mae": 0.19, "n_samples": 70}
+      },
+      "time_metrics": {
+        "hour_evening": {"mae": 0.25, "n_samples": 45},
+        "prime_time": {"mae": 0.22, "n_samples": 30}
+      },
+      "insights": [
+        "Modelo estable, sin drift significativo detectado."
+      ],
+      "history": [
+        {"timestamp": "2025-01-17T10:00:00Z", "mae": 0.22, "drift_score": 0.10},
+        {"timestamp": "2025-01-18T10:30:00Z", "mae": 0.21, "drift_score": 0.12}
+      ]
+    }
+  }
+}
+```
+
+#### Dashboard - Sección "Salud del Modelo"
+
+El dashboard muestra automáticamente una sección de salud con:
+
+- **Estado general**: Estable (verde) o Drift Detectado (amber)
+- **Métricas clave**: MAE promedio, Drift Score, Nichos OK/Con Alertas
+- **Alertas activas**: Lista de nichos con drift detectado y su score
+- **Última actualización**: Timestamp de la última evaluación
+
+```tsx
+// Frontend: Se carga automáticamente en Dashboard.tsx
+const [modelHealth] = await mlApi.getModelHealthSummary()
+
+// Componente muestra:
+// - Shield verde si overall_status === 'healthy'
+// - AlertTriangle amber si overall_status === 'warning'
+// - Grid con MAE, Drift Score, Nichos OK, Con Alertas
+// - Lista de alertas si las hay
+```
+
+#### Calibration Plot (Text-Based)
+
+El sistema genera un plot de calibración en logs:
+
+```
+==================================================
+CALIBRATION PLOT - RESTAURANTE
+==================================================
+Expected %     Observed %     Delta      Visual
+--------------------------------------------------
+5.0            7.2            +2.2       [++        ]
+15.0           13.8           -1.2       [-         ]
+25.0           26.5           +1.5       [+         ]
+35.0           33.1           -1.9       [-         ]
+45.0           47.2           +2.2       [++        ]
+55.0           53.8           -1.2       [-         ]
+65.0           67.5           +2.5       [++        ]
+75.0           72.1           -2.9       [--        ]
+85.0           86.3           +1.3       [+         ]
+95.0           93.5           -1.5       [-         ]
+--------------------------------------------------
+Calibration Error: 1.85%
+Well Calibrated: Yes
+==================================================
+```
+
+#### Insight Generation
+
+El sistema genera insights automáticos en español:
+
+```python
+insights = [
+    "ALERTA: Drift detectado (score=0.45). Considerar reentrenamiento.",
+    "Comments: MAE alto (0.72). Revisar features o datos de comments.",
+    "Reel: MAE elevado (0.65, n=50). Posible subrepresentación o patrón diferente.",
+    "Prime time (18-21h): MAE alto (0.58). Mayor variabilidad en horas pico.",
+    "Weekend: MAE 35% mayor que weekday. Comportamiento diferente en fines de semana."
+]
+```
+
+#### Tests
+
+```bash
+# Ejecutar tests del módulo de evaluación
+pytest tests/test_evaluate_model.py -v
+
+# Tests incluidos:
+# - test_compute_mae, test_compute_rmse, test_compute_r2
+# - test_evaluate_global_metrics, test_evaluate_by_format, test_evaluate_by_time
+# - test_detect_drift_mae, test_detect_drift_ks_test, test_compute_drift_score
+# - test_analyze_calibration
+# - test_generate_insights
+# - test_should_evaluate_online, test_reset_online_counter
+# - test_evaluate_basic, test_evaluate_with_drift_baseline
+# - test_save_and_load_evaluation, test_get_baseline_mae
+```
+
+#### Archivos de Log
+
+```
+logs/
+├── eval_restaurante.json
+├── eval_inmobiliaria.json
+├── eval_cafeteria.json
+└── ...
+
+# Estructura:
+{
+  "niche": "restaurante",
+  "last_updated": "2025-01-18T10:30:00Z",
+  "latest": { ... },  # Última evaluación completa
+  "history": [ ... ]   # Últimas 100 evaluaciones
+}
 ```
 
 ### Logging de Cold Start
