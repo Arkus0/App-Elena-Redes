@@ -4,7 +4,7 @@ Semantic Embeddings Feature Module for BrandPulse AI
 =====================================================
 
 Modernizes the feature engineering pipeline by adding semantic embeddings
-from sentence-transformers, replacing/augmenting manual heuristic features.
+from sentence-transformers with CONFIGURABLE dimensionality.
 
 MODEL: sentence-transformers/all-MiniLM-L6-v2
 - Lightweight: ~80MB model, fast inference
@@ -12,28 +12,34 @@ MODEL: sentence-transformers/all-MiniLM-L6-v2
 - Output: 384-dimensional dense vectors
 - Normalized: L2 normalized embeddings
 
+EMBEDDING PRECISION MODES:
+==========================
+- "max" / "high" (384 dims): Full raw embeddings - mejor matices creativos/locales
+- "medium" (256 dims): TruncatedSVD reduction - balance precision/speed
+- "low" (128 dims): TruncatedSVD reduction - ultra rápido
+
+DEFAULT: "max" (full 384 dims)
+- Seguro con volúmenes típicos SMB: 100-2000 posts
+- Training rápido: <1 minuto
+- RAM estimado: <2GB en PC normal
+- Captura mejor slang regional (Almería/Andaluz)
+
 PIPELINE:
 1. Load model (auto-downloads if not cached)
 2. Generate 384-dim embedding from caption text
-3. Apply PCA to reduce to 30 dimensions (embedding_1 to embedding_30)
-4. Concatenate with existing manual features for XGBoost
-
-Why 30 dimensions?
-- 384 dims would dominate XGBoost feature space
-- 30 dims captures ~85-90% of semantic variance
-- Better balance with ~58 existing manual features
+3. Apply TruncatedSVD if reduction needed (configurable)
+4. Return features for XGBoost
 
 Usage:
-    from ml.features_embeddings import EmbeddingExtractor
+    from ml.features_embeddings import EmbeddingExtractor, EmbeddingPrecision
 
-    extractor = EmbeddingExtractor()
-
-    # Get 384-dim raw embedding
-    embedding = extractor.get_caption_embedding("Tu texto aqui")
-
-    # Get 30-dim PCA-reduced features for ML
+    # Full 384 dims (default - recommended for SMB volumes)
+    extractor = EmbeddingExtractor(precision="max")
     features = extractor.get_embedding_features("Tu texto aqui")
-    # Returns: {"embedding_1": 0.123, "embedding_2": -0.456, ..., "embedding_30": 0.789}
+
+    # Reduced dims for very large datasets
+    extractor = EmbeddingExtractor(precision="medium")  # 256 dims
+    extractor = EmbeddingExtractor(precision="low")     # 128 dims
 
 Author: BrandPulse AI
 """
@@ -41,8 +47,10 @@ Author: BrandPulse AI
 import gc
 import logging
 import pickle
+import time
+from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple, Any
 import warnings
 
 import numpy as np
@@ -55,39 +63,245 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Configuration
+# Configuration & Constants
 # =============================================================================
 
 # Model configuration
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384  # Output dimension of all-MiniLM-L6-v2
-PCA_COMPONENTS = 30  # Reduce to 30 dimensions for XGBoost
 MAX_SEQ_LENGTH = 256  # Max tokens for embedding
 
 # File paths
 PROJECT_ROOT = Path(__file__).parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
-PCA_MODEL_PATH = MODELS_DIR / "embedding_pca_30.pkl"
 
 # Ensure directories exist
 MODELS_DIR.mkdir(exist_ok=True)
 
 
 # =============================================================================
-# Embedding Feature Names (for ML pipeline)
+# Embedding Precision Enum
 # =============================================================================
 
-def get_embedding_feature_names() -> List[str]:
+class EmbeddingPrecision(str, Enum):
+    """
+    Embedding precision levels for BrandPulse AI.
+
+    Default is MAX (full 384 dims) - recommended for typical SMB data volumes.
+    """
+    LOW = "low"        # 128 dims - ultra fast, lower precision
+    MEDIUM = "medium"  # 256 dims - balanced
+    HIGH = "high"      # 384 dims - full precision
+    MAX = "max"        # 384 dims - full raw embeddings (default)
+
+    @property
+    def dimensions(self) -> int:
+        """Get number of dimensions for this precision level."""
+        return PRECISION_TO_DIMS.get(self.value, EMBEDDING_DIM)
+
+    @property
+    def uses_reduction(self) -> bool:
+        """Check if this precision uses dimensionality reduction."""
+        return self.value in ("low", "medium")
+
+
+# Precision to dimensions mapping
+PRECISION_TO_DIMS: Dict[str, int] = {
+    "low": 128,
+    "medium": 256,
+    "high": 384,
+    "max": 384,
+}
+
+# Default precision (full embeddings)
+DEFAULT_PRECISION = EmbeddingPrecision.MAX
+
+
+# =============================================================================
+# Embedding Feature Names
+# =============================================================================
+
+def get_embedding_feature_names(dims: int = EMBEDDING_DIM) -> List[str]:
     """
     Get list of embedding feature column names.
 
+    Args:
+        dims: Number of dimensions
+
     Returns:
-        List of feature names: ["embedding_1", "embedding_2", ..., "embedding_30"]
+        List of feature names: ["embedding_1", ..., "embedding_N"]
     """
-    return [f"embedding_{i+1}" for i in range(PCA_COMPONENTS)]
+    return [f"embedding_{i+1}" for i in range(dims)]
 
 
-EMBEDDING_FEATURE_COLUMNS = get_embedding_feature_names()
+# Default feature columns (full 384 dims)
+EMBEDDING_FEATURE_COLUMNS = get_embedding_feature_names(EMBEDDING_DIM)
+PCA_COMPONENTS = EMBEDDING_DIM  # Backward compatible - now represents full dims
+
+
+# =============================================================================
+# Memory & Resource Estimation
+# =============================================================================
+
+def estimate_memory_usage(n_samples: int, dims: int) -> Dict[str, Any]:
+    """
+    Estimate memory usage for embedding operations.
+
+    Args:
+        n_samples: Number of samples
+        dims: Embedding dimensions
+
+    Returns:
+        Dict with memory estimates
+    """
+    # Float32 = 4 bytes per value
+    bytes_per_embedding = dims * 4
+    total_bytes = n_samples * bytes_per_embedding
+
+    # Convert to human readable
+    if total_bytes < 1024:
+        size_str = f"{total_bytes} B"
+    elif total_bytes < 1024 * 1024:
+        size_str = f"{total_bytes / 1024:.2f} KB"
+    elif total_bytes < 1024 * 1024 * 1024:
+        size_str = f"{total_bytes / (1024 * 1024):.2f} MB"
+    else:
+        size_str = f"{total_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+    return {
+        "n_samples": n_samples,
+        "dimensions": dims,
+        "bytes_per_embedding": bytes_per_embedding,
+        "total_bytes": total_bytes,
+        "human_readable": size_str,
+        "is_lightweight": total_bytes < 2 * 1024 * 1024 * 1024,  # < 2GB
+    }
+
+
+def get_ram_usage_mb() -> Optional[float]:
+    """
+    Get current process RAM usage in MB.
+
+    Returns:
+        RAM usage in MB or None if psutil not available
+    """
+    try:
+        import psutil
+        process = psutil.Process()
+        return process.memory_info().rss / (1024 * 1024)
+    except ImportError:
+        return None
+
+
+# =============================================================================
+# Dimensionality Reduction Functions
+# =============================================================================
+
+def get_reduced_embeddings(
+    embeddings: np.ndarray,
+    dims: Optional[int] = None,
+    fit_reducer: bool = False,
+    reducer: Optional[Any] = None
+) -> Tuple[np.ndarray, Optional[Any], Dict[str, Any]]:
+    """
+    Get embeddings with optional TruncatedSVD reduction.
+
+    This is the core function for configurable embedding dimensionality.
+
+    Args:
+        embeddings: Raw embeddings array of shape (n_samples, 384)
+        dims: Target dimensions. If None, returns full 384 dims (no reduction)
+        fit_reducer: If True, fit a new TruncatedSVD. If False, use provided reducer
+        reducer: Pre-fitted TruncatedSVD reducer (optional)
+
+    Returns:
+        Tuple of:
+        - Reduced/full embeddings array
+        - Fitted reducer (or None if no reduction)
+        - Stats dict with timing, variance explained, etc.
+
+    Example:
+        # Full 384 dims (no reduction)
+        full_embs, _, stats = get_reduced_embeddings(raw_embs, dims=None)
+        print(stats)  # {"mode": "full", "dims": 384, ...}
+
+        # Reduced to 256 dims
+        reduced_embs, svd, stats = get_reduced_embeddings(raw_embs, dims=256, fit_reducer=True)
+        print(stats)  # {"mode": "reduced", "dims": 256, "variance_explained": 0.95, ...}
+    """
+    start_time = time.time()
+    stats = {
+        "input_shape": embeddings.shape,
+        "input_dims": embeddings.shape[1] if embeddings.ndim > 1 else 1,
+    }
+
+    # Get RAM before
+    ram_before = get_ram_usage_mb()
+
+    # Case 1: No reduction requested (full dims)
+    if dims is None or dims >= EMBEDDING_DIM:
+        elapsed = time.time() - start_time
+        ram_after = get_ram_usage_mb()
+
+        stats.update({
+            "mode": "full",
+            "output_dims": EMBEDDING_DIM,
+            "reduction_applied": False,
+            "time_seconds": round(elapsed, 4),
+            "ram_before_mb": round(ram_before, 2) if ram_before else None,
+            "ram_after_mb": round(ram_after, 2) if ram_after else None,
+        })
+
+        logger.info(f"Embeddings: full {EMBEDDING_DIM} dims (no reduction), took {elapsed:.3f}s")
+        return embeddings, None, stats
+
+    # Case 2: Reduction requested
+    from sklearn.decomposition import TruncatedSVD
+
+    # Validate dimensions
+    dims = min(dims, EMBEDDING_DIM)
+    dims = max(dims, 1)
+
+    if embeddings.shape[0] < dims:
+        logger.warning(
+            f"Not enough samples ({embeddings.shape[0]}) for {dims} components. "
+            f"Using {embeddings.shape[0]} components."
+        )
+        dims = embeddings.shape[0]
+
+    # Fit or transform
+    if fit_reducer or reducer is None:
+        reducer = TruncatedSVD(n_components=dims, random_state=42)
+        reduced = reducer.fit_transform(embeddings)
+        variance_explained = float(sum(reducer.explained_variance_ratio_))
+        logger.info(
+            f"Embeddings: reducidos a {dims} dims (varianza {variance_explained*100:.1f}%)"
+        )
+    else:
+        reduced = reducer.transform(embeddings)
+        variance_explained = float(sum(reducer.explained_variance_ratio_)) if hasattr(reducer, 'explained_variance_ratio_') else None
+
+    elapsed = time.time() - start_time
+    ram_after = get_ram_usage_mb()
+
+    stats.update({
+        "mode": "reduced",
+        "output_dims": dims,
+        "reduction_applied": True,
+        "variance_explained": variance_explained,
+        "variance_percent": round(variance_explained * 100, 2) if variance_explained else None,
+        "time_seconds": round(elapsed, 4),
+        "ram_before_mb": round(ram_before, 2) if ram_before else None,
+        "ram_after_mb": round(ram_after, 2) if ram_after else None,
+        "ram_delta_mb": round(ram_after - ram_before, 2) if (ram_before and ram_after) else None,
+    })
+
+    logger.info(
+        f"Embeddings: reducidos a {dims} dims (varianza {variance_explained*100:.1f}%), "
+        f"took {elapsed:.3f}s"
+    )
+
+    return reduced.astype(np.float32), reducer, stats
 
 
 # =============================================================================
@@ -98,54 +312,86 @@ class EmbeddingExtractor:
     """
     Extract semantic embeddings from text using sentence-transformers.
 
+    NEW: Configurable embedding precision (full 384 vs reduced dims)
+
     Features:
     - Lazy loading: Model only loaded when first used
     - Auto-download: Downloads model from HuggingFace if not cached
-    - PCA reduction: 384-dim -> 30-dim for XGBoost compatibility
-    - Caching: PCA model can be pre-fitted and saved/loaded
+    - Configurable precision: full 384, 256, or 128 dims
+    - TruncatedSVD reduction: Better than PCA for sparse/text data
+    - Memory efficient: Estimates and logs RAM usage
 
     Example:
+        # Default: Full 384 dims (recommended for SMB volumes)
         extractor = EmbeddingExtractor()
-
-        # Raw 384-dim embedding
-        raw = extractor.get_caption_embedding("Nuevo apartamento en Triana!")
-
-        # 30-dim features for ML
         features = extractor.get_embedding_features("Nuevo apartamento en Triana!")
-        print(features)  # {"embedding_1": 0.1, "embedding_2": -0.2, ...}
+
+        # Reduced dims for very large datasets
+        extractor = EmbeddingExtractor(precision="medium")  # 256 dims
     """
 
     # Class-level singleton for model (shared across instances)
     _model = None
     _model_loaded = False
-    _pca = None
-    _pca_fitted = False
+
+    # Class-level reducers for each precision level
+    _reducers: Dict[int, Any] = {}
+    _reducers_fitted: Dict[int, bool] = {}
 
     def __init__(
         self,
         model_name: str = EMBEDDING_MODEL_NAME,
-        pca_components: int = PCA_COMPONENTS,
-        pca_model_path: Optional[str] = None,
-        auto_load_pca: bool = True
+        precision: Union[str, EmbeddingPrecision] = DEFAULT_PRECISION,
+        auto_load_reducer: bool = True
     ):
         """
         Initialize the embedding extractor.
 
         Args:
             model_name: HuggingFace model name for sentence-transformers
-            pca_components: Number of PCA components (default: 30)
-            pca_model_path: Path to pre-fitted PCA model (optional)
-            auto_load_pca: Whether to auto-load PCA model if exists
+            precision: Embedding precision level ("low", "medium", "high", "max")
+                      Default is "max" (full 384 dims)
+            auto_load_reducer: Whether to auto-load saved reducer if exists
         """
         self.model_name = model_name
-        self.pca_components = pca_components
-        self.pca_model_path = Path(pca_model_path) if pca_model_path else PCA_MODEL_PATH
 
+        # Parse precision
+        if isinstance(precision, str):
+            precision = precision.lower()
+            if precision in [p.value for p in EmbeddingPrecision]:
+                self._precision = EmbeddingPrecision(precision)
+            else:
+                logger.warning(f"Unknown precision '{precision}', using 'max'")
+                self._precision = EmbeddingPrecision.MAX
+        else:
+            self._precision = precision
+
+        self._target_dims = self._precision.dimensions
         self._available = self._check_availability()
 
-        # Auto-load PCA if exists
-        if auto_load_pca and self.pca_model_path.exists():
-            self._load_pca_model()
+        # Auto-load reducer if needed and exists
+        if auto_load_reducer and self._precision.uses_reduction:
+            self._load_reducer()
+
+        logger.info(
+            f"EmbeddingExtractor initialized: precision={self._precision.value}, "
+            f"dims={self._target_dims}"
+        )
+
+    @property
+    def precision(self) -> EmbeddingPrecision:
+        """Current embedding precision."""
+        return self._precision
+
+    @property
+    def target_dims(self) -> int:
+        """Target output dimensions."""
+        return self._target_dims
+
+    @property
+    def uses_reduction(self) -> bool:
+        """Whether dimensionality reduction is applied."""
+        return self._precision.uses_reduction
 
     def _check_availability(self) -> bool:
         """Check if sentence-transformers is available."""
@@ -190,38 +436,45 @@ class EmbeddingExtractor:
             logger.error(f"Failed to load embedding model: {e}")
             EmbeddingExtractor._model_loaded = False
 
-    def _load_pca_model(self):
-        """Load pre-fitted PCA model from disk."""
-        if EmbeddingExtractor._pca is not None:
+    def _get_reducer_path(self) -> Path:
+        """Get path for saving/loading reducer."""
+        return MODELS_DIR / f"embedding_svd_{self._target_dims}.pkl"
+
+    def _load_reducer(self):
+        """Load pre-fitted reducer from disk."""
+        if self._target_dims in EmbeddingExtractor._reducers:
             return
 
-        try:
-            if self.pca_model_path.exists():
-                with open(self.pca_model_path, 'rb') as f:
-                    EmbeddingExtractor._pca = pickle.load(f)
-                EmbeddingExtractor._pca_fitted = True
-                logger.info(f"Loaded PCA model from: {self.pca_model_path}")
-            else:
-                logger.debug(f"No PCA model found at: {self.pca_model_path}")
-        except Exception as e:
-            logger.warning(f"Could not load PCA model: {e}")
-            EmbeddingExtractor._pca_fitted = False
+        reducer_path = self._get_reducer_path()
+        if reducer_path.exists():
+            try:
+                with open(reducer_path, 'rb') as f:
+                    EmbeddingExtractor._reducers[self._target_dims] = pickle.load(f)
+                EmbeddingExtractor._reducers_fitted[self._target_dims] = True
+                logger.info(f"Loaded TruncatedSVD reducer from: {reducer_path}")
+            except Exception as e:
+                logger.warning(f"Could not load reducer: {e}")
 
-    def _init_pca(self):
-        """Initialize PCA model (but don't fit yet)."""
-        if EmbeddingExtractor._pca is None:
-            from sklearn.decomposition import PCA
-            EmbeddingExtractor._pca = PCA(n_components=self.pca_components)
-            EmbeddingExtractor._pca_fitted = False
-            logger.info(f"Initialized new PCA model: {self.pca_components} components")
+    def _save_reducer(self):
+        """Save fitted reducer to disk."""
+        if self._target_dims not in EmbeddingExtractor._reducers:
+            return
+
+        reducer_path = self._get_reducer_path()
+        try:
+            with open(reducer_path, 'wb') as f:
+                pickle.dump(EmbeddingExtractor._reducers[self._target_dims], f)
+            logger.info(f"Saved TruncatedSVD reducer to: {reducer_path}")
+        except Exception as e:
+            logger.warning(f"Could not save reducer: {e}")
 
     # =========================================================================
     # Core Embedding Methods
     # =========================================================================
 
-    def get_caption_embedding(self, text: str) -> np.ndarray:
+    def get_raw_embedding(self, text: str) -> np.ndarray:
         """
-        Generate 384-dimensional embedding for text.
+        Generate raw 384-dimensional embedding for text.
 
         Args:
             text: Input text (caption, description, etc.)
@@ -263,9 +516,9 @@ class EmbeddingExtractor:
             logger.error(f"Embedding generation failed: {e}")
             return np.zeros(EMBEDDING_DIM, dtype=np.float32)
 
-    def get_caption_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+    def get_raw_embeddings_batch(self, texts: List[str]) -> np.ndarray:
         """
-        Generate embeddings for multiple texts efficiently.
+        Generate raw embeddings for multiple texts efficiently.
 
         Args:
             texts: List of text strings
@@ -312,125 +565,151 @@ class EmbeddingExtractor:
             logger.error(f"Batch embedding generation failed: {e}")
             return np.zeros((len(texts), EMBEDDING_DIM), dtype=np.float32)
 
+    # Backward compatible alias
+    def get_caption_embedding(self, text: str) -> np.ndarray:
+        """Alias for get_raw_embedding (backward compatible)."""
+        return self.get_raw_embedding(text)
+
+    def get_caption_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+        """Alias for get_raw_embeddings_batch (backward compatible)."""
+        return self.get_raw_embeddings_batch(texts)
+
     # =========================================================================
-    # PCA Reduction Methods
+    # Configurable Reduction Methods
     # =========================================================================
 
-    def fit_pca(self, embeddings: np.ndarray, save: bool = True) -> "EmbeddingExtractor":
+    def fit_reducer(
+        self,
+        embeddings: np.ndarray,
+        save: bool = True
+    ) -> "EmbeddingExtractor":
         """
-        Fit PCA model on a corpus of embeddings.
+        Fit TruncatedSVD reducer on a corpus of embeddings.
 
-        Should be called with embeddings from your training data before
-        using get_embedding_features() for consistent dimensionality reduction.
+        Only needed if using precision != "max" (i.e., reduced dims).
 
         Args:
             embeddings: Array of shape (n_samples, 384)
-            save: Whether to save the fitted PCA model to disk
+            save: Whether to save the fitted reducer to disk
 
         Returns:
             self for chaining
         """
-        self._init_pca()
+        if not self.uses_reduction:
+            logger.info(f"No reduction needed for precision={self._precision.value}")
+            return self
 
-        if embeddings.shape[0] < self.pca_components:
-            logger.warning(
-                f"Not enough samples ({embeddings.shape[0]}) for "
-                f"PCA with {self.pca_components} components. "
-                f"Using {embeddings.shape[0]} components instead."
-            )
-            from sklearn.decomposition import PCA
-            EmbeddingExtractor._pca = PCA(n_components=embeddings.shape[0])
-
-        # Fit PCA
-        EmbeddingExtractor._pca.fit(embeddings)
-        EmbeddingExtractor._pca_fitted = True
-
-        # Calculate explained variance
-        explained_var = sum(EmbeddingExtractor._pca.explained_variance_ratio_) * 100
-        logger.info(
-            f"PCA fitted on {embeddings.shape[0]} samples: "
-            f"{EmbeddingExtractor._pca.n_components_} components, "
-            f"{explained_var:.1f}% variance explained"
+        # Fit reducer
+        _, reducer, stats = get_reduced_embeddings(
+            embeddings,
+            dims=self._target_dims,
+            fit_reducer=True
         )
 
-        # Save if requested
+        EmbeddingExtractor._reducers[self._target_dims] = reducer
+        EmbeddingExtractor._reducers_fitted[self._target_dims] = True
+
+        logger.info(
+            f"TruncatedSVD fitted on {embeddings.shape[0]} samples: "
+            f"{self._target_dims} components, "
+            f"{stats.get('variance_percent', 0):.1f}% variance explained"
+        )
+
         if save:
-            self.save_pca_model()
+            self._save_reducer()
 
         return self
 
-    def fit_pca_from_texts(
+    def fit_reducer_from_texts(
         self,
         texts: List[str],
         save: bool = True
     ) -> "EmbeddingExtractor":
         """
-        Convenience method: generate embeddings and fit PCA in one step.
+        Convenience method: generate embeddings and fit reducer in one step.
 
         Args:
             texts: List of caption texts
-            save: Whether to save the fitted PCA model
+            save: Whether to save the fitted reducer
 
         Returns:
             self for chaining
         """
-        logger.info(f"Fitting PCA from {len(texts)} texts...")
+        if not self.uses_reduction:
+            logger.info(f"No reduction needed for precision={self._precision.value}")
+            return self
+
+        logger.info(f"Fitting TruncatedSVD from {len(texts)} texts...")
 
         # Generate embeddings
-        embeddings = self.get_caption_embeddings_batch(texts)
+        embeddings = self.get_raw_embeddings_batch(texts)
 
-        # Filter out zero embeddings (failed encodings)
+        # Filter out zero embeddings
         valid_mask = np.any(embeddings != 0, axis=1)
         valid_embeddings = embeddings[valid_mask]
 
         logger.info(f"Generated {len(valid_embeddings)} valid embeddings")
 
         if len(valid_embeddings) < 10:
-            logger.warning("Too few valid embeddings for PCA fitting")
+            logger.warning("Too few valid embeddings for reducer fitting")
             return self
 
-        return self.fit_pca(valid_embeddings, save=save)
+        return self.fit_reducer(valid_embeddings, save=save)
 
-    def transform_to_pca(self, embedding: np.ndarray) -> np.ndarray:
+    def transform(self, embedding: np.ndarray) -> np.ndarray:
         """
-        Transform 384-dim embedding to PCA-reduced dimensions.
+        Transform embedding to target dimensions.
+
+        If precision is "max"/"high", returns unchanged.
+        If precision is "medium"/"low", applies TruncatedSVD.
 
         Args:
             embedding: Array of shape (384,) or (n, 384)
 
         Returns:
-            Array of shape (30,) or (n, 30)
+            Array of shape (target_dims,) or (n, target_dims)
         """
-        # Initialize PCA if needed
-        if EmbeddingExtractor._pca is None:
-            self._init_pca()
+        # No reduction needed
+        if not self.uses_reduction:
+            return embedding
 
-        # If PCA not fitted, return zeros
-        if not EmbeddingExtractor._pca_fitted:
+        # Check if reducer is fitted
+        reducer = EmbeddingExtractor._reducers.get(self._target_dims)
+        is_fitted = EmbeddingExtractor._reducers_fitted.get(self._target_dims, False)
+
+        if not is_fitted or reducer is None:
+            logger.warning(
+                f"Reducer not fitted for {self._target_dims} dims. "
+                f"Call fit_reducer() first or returning zeros."
+            )
             if embedding.ndim == 1:
-                return np.zeros(self.pca_components, dtype=np.float32)
+                return np.zeros(self._target_dims, dtype=np.float32)
             else:
-                return np.zeros((embedding.shape[0], self.pca_components), dtype=np.float32)
+                return np.zeros((embedding.shape[0], self._target_dims), dtype=np.float32)
 
         # Ensure 2D
+        squeeze = False
         if embedding.ndim == 1:
             embedding = embedding.reshape(1, -1)
             squeeze = True
-        else:
-            squeeze = False
 
         # Transform
         try:
-            reduced = EmbeddingExtractor._pca.transform(embedding)
+            reduced = reducer.transform(embedding)
             if squeeze:
                 reduced = reduced.squeeze()
             return reduced.astype(np.float32)
         except Exception as e:
-            logger.error(f"PCA transform failed: {e}")
+            logger.error(f"Transform failed: {e}")
             if squeeze:
-                return np.zeros(self.pca_components, dtype=np.float32)
+                return np.zeros(self._target_dims, dtype=np.float32)
             else:
-                return np.zeros((embedding.shape[0], self.pca_components), dtype=np.float32)
+                return np.zeros((embedding.shape[0], self._target_dims), dtype=np.float32)
+
+    # Backward compatible alias
+    def transform_to_pca(self, embedding: np.ndarray) -> np.ndarray:
+        """Alias for transform (backward compatible)."""
+        return self.transform(embedding)
 
     # =========================================================================
     # Feature Extraction for ML Pipeline
@@ -438,31 +717,29 @@ class EmbeddingExtractor:
 
     def get_embedding_features(self, text: str) -> Dict[str, float]:
         """
-        Get PCA-reduced embedding features as a dictionary.
+        Get embedding features as a dictionary for ML pipeline.
 
-        This is the main method for ML feature extraction.
-        Returns features named embedding_1 to embedding_30.
+        Returns features named embedding_1 to embedding_N where N = target_dims.
 
         Args:
             text: Input caption/text
 
         Returns:
-            Dict with keys "embedding_1" through "embedding_30"
+            Dict with keys "embedding_1" through "embedding_N"
         """
         # Get raw embedding
-        embedding = self.get_caption_embedding(text)
+        raw_embedding = self.get_raw_embedding(text)
 
-        # Apply PCA
-        reduced = self.transform_to_pca(embedding)
+        # Apply reduction if needed
+        if self.uses_reduction:
+            final_embedding = self.transform(raw_embedding)
+        else:
+            final_embedding = raw_embedding
 
         # Convert to dict
         features = {}
-        for i in range(len(reduced)):
-            features[f"embedding_{i+1}"] = round(float(reduced[i]), 6)
-
-        # Pad with zeros if PCA has fewer components
-        for i in range(len(reduced), self.pca_components):
-            features[f"embedding_{i+1}"] = 0.0
+        for i in range(len(final_embedding)):
+            features[f"embedding_{i+1}"] = round(float(final_embedding[i]), 6)
 
         return features
 
@@ -479,24 +756,24 @@ class EmbeddingExtractor:
         Returns:
             List of feature dictionaries
         """
-        # Get batch embeddings
-        embeddings = self.get_caption_embeddings_batch(texts)
+        # Get batch raw embeddings
+        raw_embeddings = self.get_raw_embeddings_batch(texts)
 
-        # Apply PCA
-        reduced = self.transform_to_pca(embeddings)
+        # Apply reduction if needed
+        if self.uses_reduction:
+            final_embeddings = self.transform(raw_embeddings)
+        else:
+            final_embeddings = raw_embeddings
 
         # Convert to list of dicts
         features_list = []
+        n_dims = final_embeddings.shape[1] if final_embeddings.ndim > 1 else len(final_embeddings)
+
         for i in range(len(texts)):
             features = {}
-            for j in range(reduced.shape[1] if reduced.ndim > 1 else len(reduced)):
-                val = reduced[i, j] if reduced.ndim > 1 else reduced[j]
+            for j in range(n_dims):
+                val = final_embeddings[i, j] if final_embeddings.ndim > 1 else final_embeddings[j]
                 features[f"embedding_{j+1}"] = round(float(val), 6)
-
-            # Pad with zeros if needed
-            for j in range(reduced.shape[1] if reduced.ndim > 1 else len(reduced), self.pca_components):
-                features[f"embedding_{j+1}"] = 0.0
-
             features_list.append(features)
 
         return features_list
@@ -508,46 +785,43 @@ class EmbeddingExtractor:
         Returns:
             Dict with all embedding features set to 0.0
         """
-        return {f"embedding_{i+1}": 0.0 for i in range(self.pca_components)}
+        return {f"embedding_{i+1}": 0.0 for i in range(self._target_dims)}
 
     # =========================================================================
-    # Model Persistence
+    # Backward Compatibility (PCA methods now use TruncatedSVD internally)
     # =========================================================================
+
+    def fit_pca(self, embeddings: np.ndarray, save: bool = True) -> "EmbeddingExtractor":
+        """
+        Backward compatible: Now uses TruncatedSVD internally.
+        Only applies if using reduced precision.
+        """
+        return self.fit_reducer(embeddings, save=save)
+
+    def fit_pca_from_texts(self, texts: List[str], save: bool = True) -> "EmbeddingExtractor":
+        """Backward compatible: Now uses TruncatedSVD internally."""
+        return self.fit_reducer_from_texts(texts, save=save)
 
     def save_pca_model(self, path: Optional[str] = None):
-        """Save fitted PCA model to disk."""
-        save_path = Path(path) if path else self.pca_model_path
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if EmbeddingExtractor._pca is not None and EmbeddingExtractor._pca_fitted:
-            with open(save_path, 'wb') as f:
-                pickle.dump(EmbeddingExtractor._pca, f)
-            logger.info(f"PCA model saved to: {save_path}")
-        else:
-            logger.warning("No fitted PCA model to save")
+        """Backward compatible: Save reducer."""
+        self._save_reducer()
 
     def load_pca_model(self, path: Optional[str] = None) -> bool:
-        """
-        Load a pre-fitted PCA model from disk.
+        """Backward compatible: Load reducer."""
+        self._load_reducer()
+        return self._target_dims in EmbeddingExtractor._reducers
 
-        Returns:
-            True if loaded successfully, False otherwise
-        """
-        load_path = Path(path) if path else self.pca_model_path
+    @property
+    def is_pca_fitted(self) -> bool:
+        """Check if reducer is fitted (or if no reduction needed)."""
+        if not self.uses_reduction:
+            return True  # No reduction needed = always "fitted"
+        return EmbeddingExtractor._reducers_fitted.get(self._target_dims, False)
 
-        if not load_path.exists():
-            logger.warning(f"PCA model not found: {load_path}")
-            return False
-
-        try:
-            with open(load_path, 'rb') as f:
-                EmbeddingExtractor._pca = pickle.load(f)
-            EmbeddingExtractor._pca_fitted = True
-            logger.info(f"PCA model loaded from: {load_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to load PCA model: {e}")
-            return False
+    @property
+    def pca_components(self) -> int:
+        """Backward compatible: Returns target dims."""
+        return self._target_dims
 
     # =========================================================================
     # Resource Management
@@ -564,19 +838,17 @@ class EmbeddingExtractor:
 
     @classmethod
     def clear_all(cls):
-        """Clear all class-level cached models."""
+        """Clear all class-level cached models and reducers."""
         if cls._model is not None:
             del cls._model
             cls._model = None
             cls._model_loaded = False
 
-        if cls._pca is not None:
-            del cls._pca
-            cls._pca = None
-            cls._pca_fitted = False
+        cls._reducers = {}
+        cls._reducers_fitted = {}
 
         gc.collect()
-        logger.info("All embedding models cleared")
+        logger.info("All embedding models and reducers cleared")
 
     # =========================================================================
     # Status and Info
@@ -592,72 +864,86 @@ class EmbeddingExtractor:
         """Check if embedding model is loaded."""
         return EmbeddingExtractor._model_loaded
 
-    @property
-    def is_pca_fitted(self) -> bool:
-        """Check if PCA model is fitted."""
-        return EmbeddingExtractor._pca_fitted
-
-    def get_status(self) -> Dict[str, any]:
+    def get_status(self) -> Dict[str, Any]:
         """Get status of the embedding extractor."""
         return {
             "sentence_transformers_available": self._available,
             "model_name": self.model_name,
             "model_loaded": EmbeddingExtractor._model_loaded,
-            "embedding_dim": EMBEDDING_DIM,
-            "pca_components": self.pca_components,
-            "pca_fitted": EmbeddingExtractor._pca_fitted,
-            "pca_model_path": str(self.pca_model_path),
-            "feature_names": EMBEDDING_FEATURE_COLUMNS,
+            "embedding_dim_raw": EMBEDDING_DIM,
+            "precision": self._precision.value,
+            "target_dims": self._target_dims,
+            "uses_reduction": self.uses_reduction,
+            "reducer_fitted": self.is_pca_fitted,
+            "feature_names": get_embedding_feature_names(self._target_dims),
         }
 
 
 # =============================================================================
-# Global Instance (Singleton Pattern)
+# Global Instance (Singleton Pattern) - Full Precision by Default
 # =============================================================================
 
-# Global instance for easy access
-_embedding_extractor: Optional[EmbeddingExtractor] = None
+# Global instances for each precision level
+_embedding_extractors: Dict[str, EmbeddingExtractor] = {}
 
 
-def get_embedding_extractor() -> EmbeddingExtractor:
+def get_embedding_extractor(
+    precision: Union[str, EmbeddingPrecision] = DEFAULT_PRECISION
+) -> EmbeddingExtractor:
     """
-    Get the global embedding extractor instance.
+    Get the global embedding extractor instance for a precision level.
 
     Creates the instance on first call (lazy initialization).
+
+    Args:
+        precision: Precision level ("low", "medium", "high", "max")
+                  Default is "max" (full 384 dims)
 
     Returns:
         EmbeddingExtractor instance
     """
-    global _embedding_extractor
-    if _embedding_extractor is None:
-        _embedding_extractor = EmbeddingExtractor()
-    return _embedding_extractor
+    if isinstance(precision, EmbeddingPrecision):
+        key = precision.value
+    else:
+        key = str(precision).lower()
+
+    if key not in _embedding_extractors:
+        _embedding_extractors[key] = EmbeddingExtractor(precision=key)
+
+    return _embedding_extractors[key]
 
 
-def get_caption_embedding(text: str) -> np.ndarray:
+def get_caption_embedding(text: str, precision: str = "max") -> np.ndarray:
     """
-    Convenience function: Get 384-dim embedding for text.
+    Convenience function: Get raw embedding for text.
 
     Args:
         text: Input text
+        precision: Precision level (default "max" = full 384 dims)
 
     Returns:
-        numpy array of shape (384,)
+        numpy array of shape (384,) or (target_dims,) if reduced
     """
-    return get_embedding_extractor().get_caption_embedding(text)
+    extractor = get_embedding_extractor(precision)
+    raw = extractor.get_raw_embedding(text)
+
+    if extractor.uses_reduction:
+        return extractor.transform(raw)
+    return raw
 
 
-def get_embedding_features(text: str) -> Dict[str, float]:
+def get_embedding_features(text: str, precision: str = "max") -> Dict[str, float]:
     """
-    Convenience function: Get PCA-reduced embedding features.
+    Convenience function: Get embedding features for ML pipeline.
 
     Args:
         text: Input text
+        precision: Precision level (default "max" = full 384 dims)
 
     Returns:
-        Dict with embedding_1 to embedding_30
+        Dict with embedding features
     """
-    return get_embedding_extractor().get_embedding_features(text)
+    return get_embedding_extractor(precision).get_embedding_features(text)
 
 
 # =============================================================================
@@ -675,6 +961,7 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 70)
     print("Semantic Embeddings Feature Extractor - BrandPulse AI")
+    print("CONFIGURABLE PRECISION: full 384 / medium 256 / low 128")
     print("=" * 70 + "\n")
 
     # Test texts (Spanish captions typical for local SMBs)
@@ -686,42 +973,52 @@ if __name__ == "__main__":
         "Ramo de rosas frescas. Perfecto para cualquier ocasion. Envio gratis!",
     ]
 
-    # Initialize extractor
-    print("[1] Initializing Embedding Extractor...")
-    extractor = EmbeddingExtractor()
-    print(f"    Status: {json.dumps(extractor.get_status(), indent=2)}")
+    # Test each precision level
+    for precision in ["max", "medium", "low"]:
+        print(f"\n{'='*60}")
+        print(f"TESTING PRECISION: {precision.upper()}")
+        print(f"{'='*60}")
 
-    # Test raw embeddings
-    print("\n[2] Generating Raw Embeddings (384-dim)...")
-    for text in test_texts[:2]:
-        embedding = extractor.get_caption_embedding(text)
-        print(f"    Text: '{text[:50]}...'")
-        print(f"    Embedding shape: {embedding.shape}")
-        print(f"    First 5 values: {embedding[:5].round(4)}")
-        print()
+        extractor = EmbeddingExtractor(precision=precision)
+        print(f"Status: {json.dumps(extractor.get_status(), indent=2)}")
 
-    # Fit PCA on test data
-    print("[3] Fitting PCA on test corpus...")
-    extractor.fit_pca_from_texts(test_texts, save=True)
+        # Generate raw embeddings
+        print(f"\n[1] Generating Raw Embeddings...")
+        start = time.time()
+        raw_embeddings = extractor.get_raw_embeddings_batch(test_texts)
+        raw_time = time.time() - start
+        print(f"    Raw shape: {raw_embeddings.shape}, time: {raw_time:.3f}s")
 
-    # Test PCA-reduced features
-    print("\n[4] Generating PCA-Reduced Features (30-dim)...")
-    for text in test_texts:
-        features = extractor.get_embedding_features(text)
-        print(f"    Text: '{text[:40]}...'")
-        print(f"    Features: embedding_1={features['embedding_1']:.4f}, "
-              f"embedding_2={features['embedding_2']:.4f}, "
-              f"..., embedding_30={features['embedding_30']:.4f}")
-        print()
+        # Fit reducer if needed
+        if extractor.uses_reduction:
+            print(f"\n[2] Fitting TruncatedSVD reducer...")
+            start = time.time()
+            extractor.fit_reducer(raw_embeddings, save=False)
+            fit_time = time.time() - start
+            print(f"    Fit time: {fit_time:.3f}s")
 
-    # Batch processing
-    print("[5] Batch Processing Test...")
-    batch_features = extractor.get_embedding_features_batch(test_texts)
-    print(f"    Processed {len(batch_features)} texts in batch")
+        # Get features
+        print(f"\n[3] Getting embedding features...")
+        start = time.time()
+        features_list = extractor.get_embedding_features_batch(test_texts)
+        feat_time = time.time() - start
+        print(f"    Features per sample: {len(features_list[0])}")
+        print(f"    Total time: {feat_time:.3f}s")
 
-    # Cleanup
-    extractor.unload_model()
+        # Memory estimate
+        mem = estimate_memory_usage(len(test_texts), extractor.target_dims)
+        print(f"\n[4] Memory estimate for {len(test_texts)} samples:")
+        print(f"    {mem['human_readable']} (lightweight: {mem['is_lightweight']})")
+
+        # Sample features
+        print(f"\n[5] Sample features for first text:")
+        first_features = features_list[0]
+        print(f"    embedding_1 = {first_features.get('embedding_1', 0):.6f}")
+        print(f"    embedding_2 = {first_features.get('embedding_2', 0):.6f}")
+        last_key = f"embedding_{extractor.target_dims}"
+        print(f"    {last_key} = {first_features.get(last_key, 0):.6f}")
 
     print("\n" + "=" * 70)
     print("Test Complete!")
+    print("Default precision is 'max' (full 384 dims) - safe for SMB volumes")
     print("=" * 70 + "\n")

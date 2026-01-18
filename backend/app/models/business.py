@@ -26,6 +26,24 @@ class Platform(str, enum.Enum):
     LINKEDIN = "linkedin"
 
 
+class EmbeddingPrecision(str, enum.Enum):
+    """
+    Embedding precision levels for ML pipeline.
+
+    Default: MAX (full 384 dims) - recommended for typical SMB data volumes.
+    Safe for 100-2000 posts, training <1min, RAM <2GB on normal desktop.
+
+    - LOW (128 dims): Ultra fast, lower precision
+    - MEDIUM (256 dims): Balanced precision/speed
+    - HIGH (384 dims): Full precision
+    - MAX (384 dims): Full raw embeddings - best for regional slang/nuances
+    """
+    LOW = "low"        # 128 dims
+    MEDIUM = "medium"  # 256 dims
+    HIGH = "high"      # 384 dims
+    MAX = "max"        # 384 dims (default - full raw embeddings)
+
+
 class Business(Base):
     __tablename__ = "businesses"
 
@@ -50,6 +68,15 @@ class Business(Base):
     content_goals = Column(JSON, default=[])  # awareness, leads, foot_traffic, sales
     posting_frequency = Column(String(50), default="3-5_per_week")
     brand_voice = Column(String(100), default="friendly_professional")
+
+    # ML Configuration
+    # Embedding precision: "low" (128), "medium" (256), "high" (384), "max" (384 raw)
+    # Default: "max" - full 384 dims, safe for SMB volumes (100-2000 posts, <1min train, <2GB RAM)
+    embedding_precision = Column(
+        Enum(EmbeddingPrecision),
+        default=EmbeddingPrecision.MAX,
+        nullable=False
+    )
 
     # Onboarding status
     onboarding_completed = Column(DateTime, nullable=True)

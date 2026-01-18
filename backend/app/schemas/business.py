@@ -4,7 +4,7 @@ Business Schemas - Onboarding and business management
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field
-from app.models.business import BusinessType
+from app.models.business import BusinessType, EmbeddingPrecision
 
 
 class CompetitorInput(BaseModel):
@@ -36,6 +36,7 @@ class BusinessUpdate(BaseModel):
     content_goals: Optional[List[str]] = None
     posting_frequency: Optional[str] = None
     brand_voice: Optional[str] = None
+    embedding_precision: Optional[EmbeddingPrecision] = None
 
 
 class BusinessResponse(BaseModel):
@@ -51,6 +52,7 @@ class BusinessResponse(BaseModel):
     content_goals: List[str]
     posting_frequency: str
     brand_voice: str
+    embedding_precision: EmbeddingPrecision
     onboarding_completed: Optional[datetime]
     last_analysis_at: Optional[datetime]
     created_at: datetime

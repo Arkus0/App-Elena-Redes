@@ -48,35 +48,51 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import xgboost as xgb
 
-# Import embedding feature extractor
+# Import embedding feature extractor (now with configurable precision)
 try:
     from ml.features_embeddings import (
         EmbeddingExtractor,
+        EmbeddingPrecision,
         get_embedding_extractor,
-        EMBEDDING_FEATURE_COLUMNS,
-        PCA_COMPONENTS
+        get_embedding_feature_names,
+        EMBEDDING_DIM,
+        PRECISION_TO_DIMS,
+        DEFAULT_PRECISION,
     )
     EMBEDDINGS_AVAILABLE = True
+    # Default: full 384 dims (safe for SMB volumes 100-2000 posts)
+    EMBEDDING_FEATURE_COLUMNS = get_embedding_feature_names(EMBEDDING_DIM)
 except ImportError:
     EMBEDDINGS_AVAILABLE = False
-    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(30)]
-    PCA_COMPONENTS = 30
+    EMBEDDING_DIM = 384  # Full dims by default
+    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(EMBEDDING_DIM)]
+    PRECISION_TO_DIMS = {"low": 128, "medium": 256, "high": 384, "max": 384}
+    DEFAULT_PRECISION = "max"
 
-# Import multimodal fusion module
+# Import multimodal fusion module (now with configurable precision)
 try:
     from backend.ml.multimodal_fusion import (
         fuse_multimodal_features,
         add_multimodal_features_conditional,
-        TRANSCRIPT_FEATURE_COLUMNS,
-        OCR_FEATURE_COLUMNS,
-        INTERACTION_FEATURE_COLUMNS,
-        MULTIMODAL_FEATURE_COLUMNS,
+        get_transcript_feature_names,
+        get_ocr_feature_names,
+        get_interaction_feature_names,
+        get_multimodal_feature_names,
+        TRANSCRIPT_DEFAULT_DIM,
+        OCR_DEFAULT_DIM,
     )
     MULTIMODAL_AVAILABLE = True
+    # Default: full dims for all modalities
+    TRANSCRIPT_FEATURE_COLUMNS = get_transcript_feature_names(TRANSCRIPT_DEFAULT_DIM)
+    OCR_FEATURE_COLUMNS = get_ocr_feature_names(OCR_DEFAULT_DIM)
+    INTERACTION_FEATURE_COLUMNS = get_interaction_feature_names()
+    MULTIMODAL_FEATURE_COLUMNS = get_multimodal_feature_names()
 except ImportError:
     MULTIMODAL_AVAILABLE = False
-    TRANSCRIPT_FEATURE_COLUMNS = [f"transcript_emb_{i+1}" for i in range(20)]
-    OCR_FEATURE_COLUMNS = [f"ocr_emb_{i+1}" for i in range(20)]
+    TRANSCRIPT_DEFAULT_DIM = 384  # Full dims by default
+    OCR_DEFAULT_DIM = 384
+    TRANSCRIPT_FEATURE_COLUMNS = [f"transcript_emb_{i+1}" for i in range(384)]
+    OCR_FEATURE_COLUMNS = [f"ocr_emb_{i+1}" for i in range(384)]
     INTERACTION_FEATURE_COLUMNS = [
         "interaction_hook_x_sentiment",
         "interaction_hook_x_is_reel",
@@ -86,6 +102,8 @@ except ImportError:
         "interaction_transcript_richness",
         "interaction_ocr_richness",
         "interaction_multimodal_text_density",
+        "interaction_semantic_hook_x_vader",
+        "interaction_semantic_hook_x_cta_strong",
     ]
     MULTIMODAL_FEATURE_COLUMNS = TRANSCRIPT_FEATURE_COLUMNS + OCR_FEATURE_COLUMNS + INTERACTION_FEATURE_COLUMNS
 
@@ -166,8 +184,14 @@ MANUAL_FEATURE_COLUMNS = [
 ]
 
 # Combined feature columns: embeddings + multimodal + manual heuristics
-# Total: 30 (caption) + 20 (transcript) + 20 (ocr) + 8 (interactions) + ~58 (manual) ≈ 136 features
+# With full dims (default "max" precision):
+#   Total: 384 (caption) + 384 (transcript) + 384 (ocr) + 10 (interactions) + ~58 (manual) ≈ 1220 features
+# XGBoost handles this efficiently with early stopping and max_depth auto-adjustment
+# Safe for SMB volumes (100-2000 posts, train <1min, RAM <2GB on normal desktop)
 FEATURE_COLUMNS = EMBEDDING_FEATURE_COLUMNS + MULTIMODAL_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
+
+# Global precision setting (can be overridden via CLI --precision)
+CURRENT_PRECISION = DEFAULT_PRECISION if EMBEDDINGS_AVAILABLE else "max"
 
 BUSINESS_TYPES = [
     "inmobiliaria", "floristeria", "cafeteria", "peluqueria",
@@ -222,51 +246,79 @@ def load_data_from_database(niche: str = None) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def add_embedding_features(df: pd.DataFrame, caption_column: str = "caption") -> pd.DataFrame:
+def add_embedding_features(
+    df: pd.DataFrame,
+    caption_column: str = "caption",
+    precision: str = None
+) -> pd.DataFrame:
     """
     Add semantic embedding features to DataFrame.
 
-    Generates embeddings for each caption and adds embedding_1 to embedding_30 columns.
-    Also fits PCA on the corpus if not already fitted.
+    Generates embeddings for each caption with CONFIGURABLE precision:
+    - "max" (default): Full 384 dims - mejor matices creativos/locales
+    - "high": Full 384 dims
+    - "medium": 256 dims via TruncatedSVD
+    - "low": 128 dims via TruncatedSVD (ultra fast)
+
+    Default is "max" (full 384 dims) - safe for SMB volumes (100-2000 posts).
 
     Args:
         df: DataFrame with caption column
         caption_column: Name of column containing text
+        precision: Embedding precision ("low", "medium", "high", "max")
+                  Default: CURRENT_PRECISION (typically "max")
 
     Returns:
         DataFrame with embedding features added
     """
+    global CURRENT_PRECISION
+
+    # Use specified precision or global default
+    if precision is None:
+        precision = CURRENT_PRECISION
+    else:
+        CURRENT_PRECISION = precision  # Update global for consistency
+
+    # Get dimensions for this precision
+    dims = PRECISION_TO_DIMS.get(precision.lower(), EMBEDDING_DIM)
+    feature_cols = [f"embedding_{i+1}" for i in range(dims)]
+
     if not EMBEDDINGS_AVAILABLE:
         logger.warning("Embeddings not available. Adding zero columns.")
-        for col in EMBEDDING_FEATURE_COLUMNS:
+        for col in feature_cols:
             df[col] = 0.0
         return df
 
+    logger.info("=" * 60)
+    logger.info(f"EMBEDDING FEATURES (precision={precision}, dims={dims})")
+    logger.info("=" * 60)
     logger.info(f"Generating semantic embeddings for {len(df)} samples...")
 
     try:
-        extractor = get_embedding_extractor()
+        # Get extractor with specified precision
+        extractor = get_embedding_extractor(precision=precision)
 
         # Get captions
         captions = df[caption_column].fillna("").astype(str).tolist()
 
-        # Fit PCA on this corpus if not already fitted
-        if not extractor.is_pca_fitted:
-            logger.info("Fitting PCA on training corpus...")
-            extractor.fit_pca_from_texts(captions, save=True)
+        # Fit reducer if needed (only for reduced precision)
+        if extractor.uses_reduction and not extractor.is_pca_fitted:
+            logger.info(f"Fitting TruncatedSVD reducer on training corpus ({dims} dims)...")
+            extractor.fit_reducer_from_texts(captions, save=True)
 
         # Generate embedding features for all texts
         features_list = extractor.get_embedding_features_batch(captions)
 
         # Add to DataFrame
-        for i, col in enumerate(EMBEDDING_FEATURE_COLUMNS):
+        for col in feature_cols:
             df[col] = [f.get(col, 0.0) for f in features_list]
 
-        logger.info(f"Added {len(EMBEDDING_FEATURE_COLUMNS)} embedding features")
+        logger.info(f"Added {len(feature_cols)} embedding features (precision={precision})")
+        logger.info("=" * 60)
 
     except Exception as e:
         logger.error(f"Embedding generation failed: {e}. Using zeros.")
-        for col in EMBEDDING_FEATURE_COLUMNS:
+        for col in feature_cols:
             df[col] = 0.0
 
     return df
@@ -377,27 +429,41 @@ def add_semantic_hook_features(df: pd.DataFrame, caption_column: str = "caption"
     return df
 
 
-def add_multimodal_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_multimodal_features(df: pd.DataFrame, precision: str = None) -> pd.DataFrame:
     """
     Add multimodal fusion features for video/reel content.
 
-    Applies late fusion combining:
-    - Transcript embeddings (20 dims from Whisper transcription)
-    - OCR embeddings (20 dims from EasyOCR text detection)
-    - Cross-modal interaction features (8 features)
+    Applies late fusion combining with CONFIGURABLE precision:
+    - Transcript embeddings (384 dims full, or reduced via TruncatedSVD)
+    - OCR embeddings (384 dims full, or reduced via TruncatedSVD)
+    - Cross-modal interaction features (10 features)
+
+    Default is "max" (full dims) - safe for SMB volumes.
 
     Args:
         df: DataFrame with optional columns:
             - whisper_transcript: Audio transcription text
             - easyocr_text: Visual text overlay
             - media_type or is_reel: To detect video content
+        precision: Embedding precision ("low", "medium", "high", "max")
 
     Returns:
         DataFrame with multimodal features added
     """
+    # Use specified precision or global default
+    if precision is None:
+        precision = CURRENT_PRECISION
+
+    # Get dimensions for this precision
+    dims = PRECISION_TO_DIMS.get(precision.lower(), 384)
+    transcript_cols = [f"transcript_emb_{i+1}" for i in range(dims)]
+    ocr_cols = [f"ocr_emb_{i+1}" for i in range(dims)]
+    interaction_cols = INTERACTION_FEATURE_COLUMNS
+    all_multimodal_cols = transcript_cols + ocr_cols + interaction_cols
+
     if not MULTIMODAL_AVAILABLE:
         logger.warning("Multimodal fusion not available. Adding zero columns.")
-        for col in MULTIMODAL_FEATURE_COLUMNS:
+        for col in all_multimodal_cols:
             df[col] = 0.0
         return df
 
@@ -413,36 +479,49 @@ def add_multimodal_features(df: pd.DataFrame) -> pd.DataFrame:
     has_ocr = 'easyocr_text' in df.columns
 
     if has_video and (has_transcript or has_ocr):
-        logger.info("Applying multimodal late fusion...")
+        logger.info(f"Applying multimodal late fusion (precision={precision}, dims={dims})...")
         logger.info(f"  - Transcript column: {has_transcript}")
         logger.info(f"  - OCR column: {has_ocr}")
 
         try:
-            df = fuse_multimodal_features(df, fit_pca_if_needed=True, save_pca=True)
-            logger.info(f"Multimodal features added: {len(MULTIMODAL_FEATURE_COLUMNS)} columns")
+            df = fuse_multimodal_features(
+                df,
+                fit_reducers_if_needed=True,
+                save_reducers=True,
+                precision=precision
+            )
+            logger.info(f"Multimodal features added: {len(all_multimodal_cols)} columns")
         except Exception as e:
             logger.error(f"Multimodal fusion failed: {e}. Using zeros.")
-            for col in MULTIMODAL_FEATURE_COLUMNS:
+            for col in all_multimodal_cols:
                 df[col] = 0.0
     else:
         # No video content or no multimodal columns - add zeros for consistency
         logger.info("No multimodal data detected. Adding zero multimodal features.")
-        for col in MULTIMODAL_FEATURE_COLUMNS:
+        for col in all_multimodal_cols:
             df[col] = 0.0
 
     return df
 
 
-def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+def prepare_features(df: pd.DataFrame, precision: str = None) -> Tuple[pd.DataFrame, pd.Series]:
     """
     Prepare features and target for training.
 
     Args:
         df: Raw DataFrame
+        precision: Embedding precision ("low", "medium", "high", "max")
+                  Default: CURRENT_PRECISION (typically "max")
 
     Returns:
         Tuple of (features_df, target_series)
     """
+    # Use specified precision or global default
+    if precision is None:
+        precision = CURRENT_PRECISION
+
+    # Get dimensions for dynamic feature column generation
+    dims = PRECISION_TO_DIMS.get(precision.lower(), 384)
     # Ensure we have the target column
     if "engagement_rate" not in df.columns:
         if "engagement_score" in df.columns:
@@ -477,13 +556,19 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
             caption_col = col
             break
 
+    # Generate dynamic feature columns for this precision
+    emb_cols = [f"embedding_{i+1}" for i in range(dims)]
+    transcript_cols = [f"transcript_emb_{i+1}" for i in range(dims)]
+    ocr_cols = [f"ocr_emb_{i+1}" for i in range(dims)]
+    all_embedding_cols = emb_cols + transcript_cols + ocr_cols
+
     # Add embedding features if not present
-    if not any(col in df.columns for col in EMBEDDING_FEATURE_COLUMNS):
+    if not any(col in df.columns for col in emb_cols):
         if caption_col:
-            df = add_embedding_features(df, caption_column=caption_col)
+            df = add_embedding_features(df, caption_column=caption_col, precision=precision)
         else:
             logger.warning("No caption column found. Adding zero embeddings.")
-            for col in EMBEDDING_FEATURE_COLUMNS:
+            for col in emb_cols:
                 df[col] = 0.0
 
     # Add semantic hook features (primary hook detection method)
@@ -501,15 +586,18 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
             df["interaction_semantic_hook_x_cta_strong"] = 0.0
 
     # Add multimodal features for video content
-    if not any(col in df.columns for col in MULTIMODAL_FEATURE_COLUMNS):
-        df = add_multimodal_features(df)
+    if not any(col in df.columns for col in transcript_cols + ocr_cols):
+        df = add_multimodal_features(df, precision=precision)
+
+    # Build dynamic feature columns for this precision level
+    dynamic_feature_cols = emb_cols + transcript_cols + ocr_cols + INTERACTION_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
 
     # Select feature columns that exist
-    feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
+    feature_cols = [c for c in dynamic_feature_cols if c in df.columns]
     X = df[feature_cols].fillna(0)
     y = df["engagement_rate"]
 
-    logger.info(f"Prepared features: {X.shape[1]} columns, {X.shape[0]} samples")
+    logger.info(f"Prepared features: {X.shape[1]} columns, {X.shape[0]} samples (precision={precision})")
 
     return X, y
 
@@ -702,7 +790,8 @@ def train_niche_model(
     df: pd.DataFrame,
     force_finetune: bool = False,
     force_scratch: bool = False,
-    cold_start_threshold: int = COLD_START_THRESHOLD
+    cold_start_threshold: int = COLD_START_THRESHOLD,
+    precision: str = None
 ) -> Tuple[xgb.XGBRegressor, Dict[str, Any]]:
     """
     Train a model for a specific niche with automatic cold start handling.
@@ -718,13 +807,27 @@ def train_niche_model(
         force_finetune: Force fine-tuning even with enough data
         force_scratch: Force from-scratch training even with little data
         cold_start_threshold: Threshold below which to use fine-tuning
+        precision: Embedding precision ("low", "medium", "high", "max")
+                  Default: "max" (full 384 dims - safe for SMB volumes)
 
     Returns:
         Tuple of (model, metrics)
     """
+    global CURRENT_PRECISION
+
+    # Use specified precision or global default
+    if precision is None:
+        precision = CURRENT_PRECISION
+    else:
+        CURRENT_PRECISION = precision
+
+    # Get dims for logging
+    dims = PRECISION_TO_DIMS.get(precision.lower(), 384)
+
     n_samples = len(df)
     logger.info(f"\nTraining model for niche: {niche}")
     logger.info(f"Available samples: {n_samples}")
+    logger.info(f"Embedding precision: {precision} ({dims} dims)")
 
     # Validate minimum samples
     if n_samples < MIN_SAMPLES_FOR_TRAINING:
@@ -733,8 +836,8 @@ def train_niche_model(
             f"(minimum: {MIN_SAMPLES_FOR_TRAINING}). Use base model directly for inference."
         )
 
-    # Prepare features
-    X, y = prepare_features(df)
+    # Prepare features with specified precision
+    X, y = prepare_features(df, precision=precision)
 
     # Train/test split
     X_train, X_test, y_train, y_test = train_test_split(
@@ -764,6 +867,8 @@ def train_niche_model(
     metrics["niche"] = niche
     metrics["n_samples"] = n_samples
     metrics["cold_start"] = use_finetune
+    metrics["embedding_precision"] = precision
+    metrics["embedding_dims"] = dims
     metrics["trained_at"] = datetime.now().isoformat()
 
     return model, metrics
@@ -881,6 +986,14 @@ Examples:
         default=COLD_START_THRESHOLD,
         help=f"Cold start threshold (default: {COLD_START_THRESHOLD})"
     )
+    parser.add_argument(
+        "--precision",
+        type=str,
+        default="max",
+        choices=["low", "medium", "high", "max"],
+        help="Embedding precision: low (128), medium (256), high (384), max (384 raw). "
+             "Default: max - full dims, safe for SMB volumes (100-2000 posts, train <1min, RAM <2GB)"
+    )
 
     # Output options
     parser.add_argument(
@@ -901,9 +1014,14 @@ Examples:
 
     # Use threshold from args (allows override via command line)
     cold_start_threshold = args.threshold
+    precision = args.precision
+
+    # Get dims for display
+    precision_dims = PRECISION_TO_DIMS.get(precision.lower(), 384)
 
     print("\n" + "=" * 70)
     print(f"NICHE MODEL TRAINING - {args.niche.upper()}")
+    print(f"Embedding precision: {precision} ({precision_dims} dims)")
     print("=" * 70 + "\n")
 
     try:
@@ -923,7 +1041,8 @@ Examples:
             df=df,
             force_finetune=args.force_finetune,
             force_scratch=args.force_scratch,
-            cold_start_threshold=cold_start_threshold
+            cold_start_threshold=cold_start_threshold,
+            precision=precision
         )
 
         # Save model
@@ -937,6 +1056,7 @@ Examples:
         print(f"Niche:              {args.niche}")
         print(f"Training type:      {metrics['training_type']}")
         print(f"Samples used:       {metrics['n_samples']}")
+        print(f"Embedding precision:{metrics.get('embedding_precision', 'max')} ({metrics.get('embedding_dims', 384)} dims)")
         print(f"Cold start mode:    {'Yes (fine-tuned)' if metrics.get('cold_start') else 'No (from scratch)'}")
         print(f"Test RMSE:          {metrics['test_rmse']:.4f}")
         print(f"Test R2:            {metrics['test_r2']:.4f}")
