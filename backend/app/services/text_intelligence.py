@@ -394,10 +394,28 @@ class OCRExtractor:
 # =============================================================================
 # Semantic Embeddings with PCA Reduction
 # =============================================================================
+#
+# DEPRECATION NOTICE (2024):
+# ==========================
+# The PCA-based semantic encoding (sem_pca_1 to sem_pca_10) is DEPRECATED.
+#
+# Please use ml/features_embeddings.py instead, which provides:
+# - Configurable dimensions (128/256/384 via precision setting)
+# - TruncatedSVD reduction (better for text data than PCA)
+# - 0-based column naming: embedding_0 to embedding_N
+# - Integration with GrowthPredictionEngine dynamic detection
+#
+# This class is kept for backward compatibility ONLY.
+# New code should use: from ml.features_embeddings import get_embedding_features
+# =============================================================================
 
 class SemanticEncoder:
     """
-    Generate semantic embeddings and reduce dimensionality with PCA.
+    [DEPRECATED] Generate semantic embeddings and reduce dimensionality with PCA.
+
+    ⚠️  DEPRECATION WARNING: This class uses fixed 10-dim PCA (sem_pca_1-10).
+    ⚠️  Use ml/features_embeddings.py instead for configurable precision.
+    ⚠️  GrowthPredictionEngine now dynamically detects embedding_* columns.
 
     Workflow:
     1. Concatenate: Caption + Transcription + OCR text
@@ -416,6 +434,15 @@ class SemanticEncoder:
 
     Dynamic quantization quantizes weights to int8 but keeps activations
     in float32, providing a good balance of speed and accuracy.
+
+    MIGRATION GUIDE:
+    ================
+    Old: semantic_encoder.encode_and_reduce(caption, transcription, ocr_text)
+         -> Returns: {"sem_pca_1": ..., "sem_pca_10": ...}
+
+    New: from ml.features_embeddings import get_embedding_features
+         get_embedding_features(combined_text, precision="max")
+         -> Returns: {"embedding_0": ..., "embedding_383": ...}
     """
 
     def __init__(self, config: Optional[TextConfig] = None):
@@ -669,7 +696,8 @@ class SemanticEncoder:
         self,
         caption: str = "",
         transcription: str = "",
-        ocr_text: str = ""
+        ocr_text: str = "",
+        use_new_format: bool = False
     ) -> Dict[str, Any]:
         """
         Full pipeline: encode combined text and apply PCA.
@@ -678,15 +706,22 @@ class SemanticEncoder:
             caption: User caption
             transcription: Whisper transcription
             ocr_text: OCR text
+            use_new_format: If True, returns embedding_0 to embedding_N format
+                           (uses ml/features_embeddings.py internally)
 
         Returns:
-            Dict with sem_pca_1 to sem_pca_10 and metadata
+            Dict with sem_pca_1 to sem_pca_10 (legacy) or embedding_0 to embedding_N (new)
         """
-        # Generate embedding
-        embedding = self.encode_combined_text(caption, transcription, ocr_text)
-
         # Check if any text was provided
         has_text = bool(caption or transcription or ocr_text)
+
+        # NEW FORMAT: Use features_embeddings.py for modern pipeline
+        if use_new_format:
+            return self._encode_new_format(caption, transcription, ocr_text, has_text)
+
+        # LEGACY FORMAT: Use PCA (deprecated)
+        # Generate embedding
+        embedding = self.encode_combined_text(caption, transcription, ocr_text)
 
         # Get PCA components
         pca_result = self.transform_to_pca(embedding)
@@ -700,6 +735,79 @@ class SemanticEncoder:
         ])
 
         return pca_result
+
+    def _encode_new_format(
+        self,
+        caption: str = "",
+        transcription: str = "",
+        ocr_text: str = "",
+        has_text: bool = False
+    ) -> Dict[str, Any]:
+        """
+        [NEW] Generate embeddings using features_embeddings.py (0-based columns).
+
+        This is the recommended method for new code. Uses configurable precision
+        and returns embedding_0 to embedding_N format compatible with
+        GrowthPredictionEngine's dynamic detection.
+        """
+        try:
+            # Import the new embedding module
+            from ml.features_embeddings import get_embedding_features, get_embedding_extractor
+
+            # Combine text sources
+            parts = []
+            if caption and caption.strip():
+                parts.append(f"[CAPTION] {caption.strip()}")
+            if transcription and transcription.strip():
+                parts.append(f"[SPEECH] {transcription.strip()}")
+            if ocr_text and ocr_text.strip():
+                parts.append(f"[TEXT] {ocr_text.strip()}")
+
+            combined_text = " ".join(parts) if parts else ""
+
+            # Get embedding features using new system
+            extractor = get_embedding_extractor()  # Uses default precision (max)
+            features = extractor.get_embedding_features(combined_text)
+
+            # Log usage
+            n_dims = len(features)
+            logger.info(f"Embeddings activos: {n_dims} dims (nuevo formato embedding_0 a embedding_{n_dims-1})")
+
+            # Add metadata
+            features["semantic_status"] = "success" if has_text else "no_text"
+            features["text_sources"] = sum([1 if caption else 0, 1 if transcription else 0, 1 if ocr_text else 0])
+            features["embedding_format"] = "new"  # Flag for new format
+
+            return features
+
+        except ImportError:
+            logger.warning("features_embeddings.py not available, falling back to PCA format")
+            # Fallback to legacy PCA if new module not available
+            embedding = self.encode_combined_text(caption, transcription, ocr_text)
+            pca_result = self.transform_to_pca(embedding)
+            pca_result["semantic_status"] = "success" if has_text else "no_text"
+            pca_result["text_sources"] = sum([1 if caption else 0, 1 if transcription else 0, 1 if ocr_text else 0])
+            return pca_result
+
+    def get_full_embedding(
+        self,
+        caption: str = "",
+        transcription: str = "",
+        ocr_text: str = ""
+    ) -> Dict[str, float]:
+        """
+        [NEW] Get full 384-dim embedding without PCA reduction.
+
+        Returns embedding_0 to embedding_383 for use with new pipeline.
+        Recommended for GrowthPredictionEngine which now handles full dims.
+        """
+        embedding = self.encode_combined_text(caption, transcription, ocr_text)
+
+        # Convert to 0-based dict format
+        result = {f"embedding_{i}": float(embedding[i]) for i in range(len(embedding))}
+
+        logger.info(f"Embeddings activos: {len(embedding)} dims (full precision)")
+        return result
 
     def save_pca(self, path: str):
         """Save fitted PCA model to disk."""
@@ -866,13 +974,27 @@ class TextIntelligenceEngine:
         self,
         caption: str = "",
         transcription: str = "",
-        ocr_text: str = ""
+        ocr_text: str = "",
+        use_new_format: bool = True
     ) -> Dict[str, Any]:
-        """Extract semantic PCA features from text sources."""
+        """
+        Extract semantic features from text sources.
+
+        Args:
+            caption: User caption
+            transcription: Whisper transcription
+            ocr_text: OCR extracted text
+            use_new_format: If True (default), returns embedding_0 to embedding_N
+                           If False, returns legacy sem_pca_1 to sem_pca_10
+
+        Returns:
+            Dict with embedding features (new format) or PCA features (legacy)
+        """
         return self.semantic_encoder.encode_and_reduce(
             caption=caption,
             transcription=transcription,
-            ocr_text=ocr_text
+            ocr_text=ocr_text,
+            use_new_format=use_new_format
         )
 
     def extract_all_features(
@@ -881,7 +1003,8 @@ class TextIntelligenceEngine:
         caption: str = "",
         include_transcription: bool = True,
         include_ocr: bool = True,
-        include_semantics: bool = True
+        include_semantics: bool = True,
+        use_new_embedding_format: bool = True
     ) -> Dict[str, Any]:
         """
         Extract all text intelligence features from a video.
@@ -891,7 +1014,9 @@ class TextIntelligenceEngine:
             caption: User-provided caption for the content
             include_transcription: Whether to run Whisper
             include_ocr: Whether to run EasyOCR
-            include_semantics: Whether to generate PCA features
+            include_semantics: Whether to generate semantic features
+            use_new_embedding_format: If True (default), generates embedding_0 to embedding_N
+                                      If False, generates legacy sem_pca_1 to sem_pca_10
 
         Returns:
             Flat dict with all text intelligence features
@@ -933,21 +1058,27 @@ class TextIntelligenceEngine:
                     "ocr_status": ocr_result.get("ocr_status", "unknown")
                 })
 
-            # Step 3: Semantic Embeddings + PCA
+            # Step 3: Semantic Embeddings
             if include_semantics:
                 sem_result = self.semantic_encoder.encode_and_reduce(
                     caption=caption,
                     transcription=transcription_text,
-                    ocr_text=ocr_text
+                    ocr_text=ocr_text,
+                    use_new_format=use_new_embedding_format
                 )
 
-                # Add PCA components (sem_pca_1 to sem_pca_10)
+                # Add embedding features (new: embedding_0 to embedding_N, legacy: sem_pca_1-10)
                 for key, value in sem_result.items():
-                    if key.startswith("sem_pca_"):
+                    # New format: embedding_0 to embedding_N
+                    if key.startswith("embedding_"):
+                        result[key] = value
+                    # Legacy format: sem_pca_1 to sem_pca_10 (deprecated)
+                    elif key.startswith("sem_pca_"):
                         result[key] = value
 
                 result["semantic_text_sources"] = sem_result.get("text_sources", 0)
                 result["semantic_status"] = sem_result.get("semantic_status", "unknown")
+                result["embedding_format"] = sem_result.get("embedding_format", "legacy")
 
         except Exception as e:
             logger.error(f"Text intelligence extraction failed: {e}")
