@@ -54,6 +54,8 @@ import xgboost as xgb
 import shap
 import joblib
 
+logger = logging.getLogger(__name__)
+
 # Add project root to path for ml module imports
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -160,8 +162,6 @@ except ImportError:
     VADER_AVAILABLE = False
 
 from app.core.config import settings
-
-logger = logging.getLogger(__name__)
 
 
 # =============================================================================
