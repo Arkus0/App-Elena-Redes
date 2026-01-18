@@ -29,7 +29,61 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - **Formato**: One-hot encoding (Reel, Carousel, Static, TikTok).
 - **Niche Flags**: Detección de keywords por vertical (inmobiliaria: "casa", "tour", "Triana"; floristería: "flores", "arreglo", "ramo").
 
-> **Arquitectura de Features**: El sistema prioriza embeddings semánticos (30 features) y mantiene heurísticas manuales (43 features) como backup, resultando en **73 features totales** para XGBoost.
+> **Arquitectura de Features**: El sistema prioriza embeddings semánticos (30 features) + multimodales (48 features) y mantiene heurísticas manuales (~58 features), resultando en **~136 features totales** para XGBoost.
+
+### 🎬 Multimodal Late Fusion (Nuevo)
+
+Sistema de fusión multimodal para maximizar predicción de engagement en Reels/TikTok:
+
+```
+Caption Text  → MiniLM → PCA(30) →
+Transcript    → MiniLM → PCA(20) →  [CONCAT] → XGBoost → Engagement Score
+OCR Text      → MiniLM → PCA(20) →            + SHAP Explainability
+Hook Score    → scalar           →
+Heuristics    → ~58 features     →
+Interactions  → 8 features       →
+```
+
+**Componentes:**
+- **Caption Embeddings** (30 dims): Semántica del texto del post
+- **Transcript Embeddings** (20 dims): Audio transcrito via Whisper
+- **OCR Embeddings** (20 dims): Texto visual via EasyOCR
+- **Interaction Features** (8 dims): Cross-modal synergies
+
+**Interaction Features para capturar sinergias:**
+| Feature | Descripción |
+|---------|-------------|
+| `hook_x_sentiment` | Hook fuerte + sentimiento positivo = viral |
+| `hook_x_is_reel` | Reels benefician más de hooks potentes |
+| `hook_x_cta_count` | Hook + múltiples CTAs = máximo engagement |
+| `transcript_richness` | Densidad de contenido hablado |
+| `ocr_richness` | Cantidad de texto visual en overlay |
+| `multimodal_text_density` | Coherencia caption/audio/visual |
+
+**Uso:**
+```python
+from backend.ml.multimodal_fusion import fuse_multimodal_features
+
+# DataFrame con datos de video
+df = pd.DataFrame({
+    'caption': ['Nuevo Reel increíble!'],
+    'whisper_transcript': ['Hola, les muestro este truco...'],
+    'easyocr_text': ['3 TIPS'],
+    'hook_score': [0.85],
+    'sentiment_compound': [0.6],
+    'is_reel': [1],
+})
+
+# Aplicar fusión multimodal
+df_fused = fuse_multimodal_features(df)
+# Añade 48 nuevas columnas para XGBoost
+```
+
+**Ventajas del Late Fusion:**
+- Compatible con XGBoost (features heterogéneos)
+- SHAP explainability preservada (qué modalidad contribuye más)
+- Degradación graceful (modalidades faltantes → zeros)
+- Sin arquitecturas complejas de atención
 
 ### 👁️ Video & Audio Analytics (Edge Optimized)
 - **Hook Theory Analysis**: Análisis crítico de los primeros 3 segundos (energía visual, cortes, presencia de caras).
