@@ -35,10 +35,114 @@ from app.schemas.user_config import (
     UserConfigCreate, UserConfigUpdate, UserConfigResponse,
     PipelineConfig, DiscoveryConfig, KPIWeights, LightModeConfig,
     PrecisionOption, MultimodalOption, KPITemplate, UserConfigInfoResponse,
-    PRECISION_DIMS_MAP
+    PRECISION_DIMS_MAP, UserConfigBase,
+    EmbeddingPrecision as EP, MultimodalMode as MM
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Constants (Static Config Info)
+# =============================================================================
+
+_PRECISION_OPTIONS = [
+    PrecisionOption(
+        value="ultra_low",
+        label="Ultra Baja (64 dims)",
+        dimensions=64,
+        description="Ultra rapido para PC modesto",
+        performance="Muy rapido, ~0.3GB RAM, train <15s",
+        is_recommended=False,
+    ),
+    PrecisionOption(
+        value="low",
+        label="Baja (128 dims) - Recomendada",
+        dimensions=128,
+        description="Recomendado para sobremesa normal",
+        performance="Rapido, ~0.5GB RAM, train <30s",
+        is_recommended=True,
+    ),
+    PrecisionOption(
+        value="medium",
+        label="Media (256 dims)",
+        dimensions=256,
+        description="Balance precision/velocidad",
+        performance="Moderado, ~1GB RAM, train <1min",
+        is_recommended=False,
+    ),
+    PrecisionOption(
+        value="high",
+        label="Alta (384 dims)",
+        dimensions=384,
+        description="Full precision con TruncatedSVD",
+        performance="Lento, ~1.5GB RAM, train <2min",
+        is_recommended=False,
+    ),
+    PrecisionOption(
+        value="max",
+        label="Maxima (384 raw)",
+        dimensions=384,
+        description="Sin reduccion - mejor matices creativos",
+        performance="Mas lento, ~2GB RAM",
+        is_recommended=False,
+    ),
+]
+
+_MULTIMODAL_OPTIONS = [
+    MultimodalOption(
+        value="light",
+        label="Modo Ligero - Recomendado",
+        description="Whisper tiny, 3s audio, 5 frames OCR. ~5s por video.",
+        estimated_time_seconds=5.0,
+        is_recommended=True,
+    ),
+    MultimodalOption(
+        value="full",
+        label="Modo Completo",
+        description="Whisper base, audio completo, todos frames. ~20s por video.",
+        estimated_time_seconds=20.0,
+        is_recommended=False,
+    ),
+]
+
+_KPI_TEMPLATES = [
+    KPITemplate(
+        name="brand_awareness",
+        display_name="Brand Awareness",
+        description="Maximiza alcance y visibilidad",
+        icon="eye",
+        weights=KPIWeights(likes=1.0, comments=1.0, shares=5.0, saves=2.0, views=10.0),
+    ),
+    KPITemplate(
+        name="leads",
+        display_name="Generacion de Leads",
+        description="Enfoca en guardados e interaccion profunda",
+        icon="target",
+        weights=KPIWeights(likes=1.0, comments=5.0, shares=8.0, saves=10.0, views=2.0),
+    ),
+    KPITemplate(
+        name="community",
+        display_name="Comunidad",
+        description="Prioriza comentarios y engagement profundo",
+        icon="users",
+        weights=KPIWeights(likes=3.0, comments=10.0, shares=5.0, saves=3.0, views=1.0),
+    ),
+    KPITemplate(
+        name="viral",
+        display_name="Potencial Viral",
+        description="Maximiza shares y alcance organico",
+        icon="share",
+        weights=KPIWeights(likes=2.0, comments=3.0, shares=15.0, saves=5.0, views=8.0),
+    ),
+    KPITemplate(
+        name="balanced",
+        display_name="Balanceado",
+        description="Equilibrio entre todas las metricas",
+        icon="balance",
+        weights=KPIWeights(likes=1.0, comments=2.0, shares=10.0, saves=5.0, views=3.0),
+    ),
+]
 
 
 class UserConfigService:
@@ -332,115 +436,15 @@ class UserConfigService:
 
     def get_config_info(self) -> UserConfigInfoResponse:
         """Retorna opciones disponibles para el frontend."""
-        precision_options = [
-            PrecisionOption(
-                value="ultra_low",
-                label="Ultra Baja (64 dims)",
-                dimensions=64,
-                description="Ultra rapido para PC modesto",
-                performance="Muy rapido, ~0.3GB RAM, train <15s",
-                is_recommended=False,
-            ),
-            PrecisionOption(
-                value="low",
-                label="Baja (128 dims) - Recomendada",
-                dimensions=128,
-                description="Recomendado para sobremesa normal",
-                performance="Rapido, ~0.5GB RAM, train <30s",
-                is_recommended=True,
-            ),
-            PrecisionOption(
-                value="medium",
-                label="Media (256 dims)",
-                dimensions=256,
-                description="Balance precision/velocidad",
-                performance="Moderado, ~1GB RAM, train <1min",
-                is_recommended=False,
-            ),
-            PrecisionOption(
-                value="high",
-                label="Alta (384 dims)",
-                dimensions=384,
-                description="Full precision con TruncatedSVD",
-                performance="Lento, ~1.5GB RAM, train <2min",
-                is_recommended=False,
-            ),
-            PrecisionOption(
-                value="max",
-                label="Maxima (384 raw)",
-                dimensions=384,
-                description="Sin reduccion - mejor matices creativos",
-                performance="Mas lento, ~2GB RAM",
-                is_recommended=False,
-            ),
-        ]
-
-        multimodal_options = [
-            MultimodalOption(
-                value="light",
-                label="Modo Ligero - Recomendado",
-                description="Whisper tiny, 3s audio, 5 frames OCR. ~5s por video.",
-                estimated_time_seconds=5.0,
-                is_recommended=True,
-            ),
-            MultimodalOption(
-                value="full",
-                label="Modo Completo",
-                description="Whisper base, audio completo, todos frames. ~20s por video.",
-                estimated_time_seconds=20.0,
-                is_recommended=False,
-            ),
-        ]
-
-        kpi_templates = [
-            KPITemplate(
-                name="brand_awareness",
-                display_name="Brand Awareness",
-                description="Maximiza alcance y visibilidad",
-                icon="eye",
-                weights=KPIWeights(likes=1.0, comments=1.0, shares=5.0, saves=2.0, views=10.0),
-            ),
-            KPITemplate(
-                name="leads",
-                display_name="Generacion de Leads",
-                description="Enfoca en guardados e interaccion profunda",
-                icon="target",
-                weights=KPIWeights(likes=1.0, comments=5.0, shares=8.0, saves=10.0, views=2.0),
-            ),
-            KPITemplate(
-                name="community",
-                display_name="Comunidad",
-                description="Prioriza comentarios y engagement profundo",
-                icon="users",
-                weights=KPIWeights(likes=3.0, comments=10.0, shares=5.0, saves=3.0, views=1.0),
-            ),
-            KPITemplate(
-                name="viral",
-                display_name="Potencial Viral",
-                description="Maximiza shares y alcance organico",
-                icon="share",
-                weights=KPIWeights(likes=2.0, comments=3.0, shares=15.0, saves=5.0, views=8.0),
-            ),
-            KPITemplate(
-                name="balanced",
-                display_name="Balanceado",
-                description="Equilibrio entre todas las metricas",
-                icon="balance",
-                weights=KPIWeights(likes=1.0, comments=2.0, shares=10.0, saves=5.0, views=3.0),
-            ),
-        ]
-
-        from app.schemas.user_config import UserConfigBase, EmbeddingPrecision as EP, MultimodalMode as MM
-
         default_config = UserConfigBase(
             embedding_precision=EP.LOW,
             multimodal_mode=MM.LIGHT,
         )
 
         return UserConfigInfoResponse(
-            precision_options=precision_options,
-            multimodal_options=multimodal_options,
-            kpi_templates=kpi_templates,
+            precision_options=_PRECISION_OPTIONS,
+            multimodal_options=_MULTIMODAL_OPTIONS,
+            kpi_templates=_KPI_TEMPLATES,
             default_config=default_config,
         )
 
