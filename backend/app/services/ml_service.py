@@ -128,9 +128,19 @@ class TrainingQueueItem:
         sample["_source"] = "feedback_loop"
         return sample
 
-# Model storage directory
+# Model storage directories
 MODEL_DIR = Path("./ml_models")
 MODEL_DIR.mkdir(exist_ok=True)
+
+# Base model for cold start (pretrained on synthetic data)
+BASE_MODEL_PATH = MODEL_DIR / "base_xgboost.pkl"
+
+# Project root for accessing /models directory
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+ALT_BASE_MODEL_PATH = PROJECT_ROOT / "models" / "base_xgboost.pkl"
+
+# Cold start threshold
+COLD_START_THRESHOLD = 300  # Samples below this use fine-tuned base model
 
 
 class FeatureExtractor:
@@ -400,6 +410,12 @@ class MLPredictor:
 
     FORMAT_CLASSES = ["reel", "carousel", "static_image", "tiktok_video"]
 
+    # Supported business niches
+    BUSINESS_NICHES = [
+        "inmobiliaria", "floristeria", "cafeteria", "peluqueria",
+        "restaurante", "gimnasio", "clinica", "otros"
+    ]
+
     def __init__(self):
         self.engagement_model: Optional[xgb.XGBRegressor] = None
         self.format_model: Optional[RandomForestClassifier] = None
@@ -410,8 +426,16 @@ class MLPredictor:
         self.shap_explainer_format = None
         self.is_trained = False
 
+        # Cold start support: base model and niche-specific models
+        self.base_model: Optional[xgb.XGBRegressor] = None
+        self.base_model_loaded = False
+        self.niche_models: Dict[str, xgb.XGBRegressor] = {}
+        self.active_model_source: str = "none"  # "trained", "niche", "base", "heuristic"
+
         # Try to load existing models
         self._load_models()
+        self._load_base_model()
+        self._load_niche_models()
 
     def _get_model_path(self, name: str) -> Path:
         """Get path for a model file"""
@@ -445,6 +469,108 @@ class MLPredictor:
         except Exception as e:
             logger.warning(f"Could not load models: {e}")
             self.is_trained = False
+
+    def _load_base_model(self):
+        """
+        Load the pretrained base model for cold start scenarios.
+
+        The base model is trained on synthetic data covering all niches
+        and provides reasonable predictions when niche-specific data is scarce.
+        """
+        try:
+            # Try primary location
+            if BASE_MODEL_PATH.exists():
+                bundle = joblib.load(BASE_MODEL_PATH)
+                self.base_model = bundle.get("model")
+                self.base_model_loaded = True
+                logger.info(f"Loaded base model from: {BASE_MODEL_PATH}")
+                return
+
+            # Try alternative location (project root /models)
+            if ALT_BASE_MODEL_PATH.exists():
+                bundle = joblib.load(ALT_BASE_MODEL_PATH)
+                self.base_model = bundle.get("model")
+                self.base_model_loaded = True
+                logger.info(f"Loaded base model from: {ALT_BASE_MODEL_PATH}")
+                return
+
+            logger.info("Base model not found. Run pretrain_base_model.py to create it.")
+
+        except Exception as e:
+            logger.warning(f"Could not load base model: {e}")
+            self.base_model_loaded = False
+
+    def _load_niche_models(self):
+        """
+        Load niche-specific fine-tuned models.
+
+        These models are trained/fine-tuned on data specific to each business niche
+        and provide better predictions than the generic model for that niche.
+        """
+        try:
+            for niche in self.BUSINESS_NICHES:
+                niche_path = MODEL_DIR / f"niche_{niche}.pkl"
+                if niche_path.exists():
+                    bundle = joblib.load(niche_path)
+                    self.niche_models[niche] = bundle.get("model")
+                    logger.info(f"Loaded niche model for: {niche}")
+
+            if self.niche_models:
+                logger.info(f"Loaded {len(self.niche_models)} niche-specific models")
+
+        except Exception as e:
+            logger.warning(f"Could not load niche models: {e}")
+
+    def _get_model_for_niche(self, niche: str) -> Tuple[Optional[xgb.XGBRegressor], str]:
+        """
+        Get the best available model for a specific niche.
+
+        Priority order:
+        1. Niche-specific fine-tuned model
+        2. Main trained model (if available)
+        3. Base model (cold start fallback)
+        4. None (will use heuristics)
+
+        Args:
+            niche: Business niche name
+
+        Returns:
+            Tuple of (model, source_name) where source_name describes which model is used
+        """
+        # Priority 1: Niche-specific model
+        if niche in self.niche_models:
+            logger.debug(f"Using niche-specific model for: {niche}")
+            return self.niche_models[niche], f"niche_{niche}"
+
+        # Priority 2: Main trained model
+        if self.is_trained and self.engagement_model is not None:
+            logger.debug(f"Using main trained model for niche: {niche}")
+            return self.engagement_model, "trained"
+
+        # Priority 3: Base model (cold start)
+        if self.base_model_loaded and self.base_model is not None:
+            logger.info(f"Usando modelo base + fine-tune por cold start (niche: {niche})")
+            return self.base_model, "base"
+
+        # Priority 4: No model available
+        logger.warning(f"No model available for niche: {niche}. Using heuristics.")
+        return None, "heuristic"
+
+    def get_model_status(self) -> Dict[str, Any]:
+        """
+        Get status of all loaded models.
+
+        Returns:
+            Dictionary with model availability and sources
+        """
+        return {
+            "main_model_trained": self.is_trained,
+            "base_model_loaded": self.base_model_loaded,
+            "niche_models_loaded": list(self.niche_models.keys()),
+            "total_niche_models": len(self.niche_models),
+            "cold_start_threshold": COLD_START_THRESHOLD,
+            "model_dir": str(MODEL_DIR),
+        }
 
     def _save_models(self):
         """Save trained models to disk"""
@@ -606,30 +732,92 @@ class MLPredictor:
 
     def predict_engagement(self, content: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Predict engagement score for content
-        Returns score and SHAP explanation
-        """
-        if not self.is_trained:
-            # Return mock prediction if not trained
-            return self._mock_engagement_prediction(content)
+        Predict engagement score for content with cold start handling.
 
+        Uses niche-specific model if available, falls back to base model
+        for cold start scenarios, and uses heuristics as last resort.
+
+        Model selection priority:
+        1. Niche-specific fine-tuned model
+        2. Main trained model
+        3. Base model (cold start fallback)
+        4. Heuristic prediction
+
+        Returns:
+            Dict with score, confidence, explanation, model_source
+        """
+        # Extract features
         features = FeatureExtractor.extract_features(content)
         df = pd.DataFrame([features])
         X = self._prepare_features(df)
 
-        # Predict
-        score = float(self.engagement_model.predict(X)[0])
-        score = max(0, min(100, score))  # Clip to 0-100
+        # Determine niche from content
+        niche = content.get("business_type", "otros")
+        if niche not in self.BUSINESS_NICHES:
+            niche = "otros"
 
-        # SHAP explanation
-        explanation = self._get_shap_explanation(X, "engagement")
+        # Get appropriate model for this niche
+        model, model_source = self._get_model_for_niche(niche)
+        self.active_model_source = model_source
 
-        return {
-            "score": round(score, 1),
-            "confidence": self._calculate_confidence(X),
-            "explanation": explanation,
-            "feature_importance": self._get_feature_importance("engagement"),
-        }
+        # If no model available, use heuristics
+        if model is None:
+            return self._mock_engagement_prediction(content)
+
+        # Make prediction
+        try:
+            score = float(model.predict(X)[0])
+            score = max(0, min(100, score))  # Clip to 0-100
+
+            # Calculate confidence based on model source
+            base_confidence = self._calculate_confidence(X)
+            if model_source == "base":
+                # Lower confidence for base model (cold start)
+                confidence = base_confidence * 0.8
+                logger.info(f"Predicción con modelo base (cold start) - Niche: {niche}, Score: {score:.1f}")
+            elif model_source.startswith("niche_"):
+                # Higher confidence for niche-specific model
+                confidence = min(base_confidence * 1.1, 98)
+                logger.info(f"Predicción con modelo niche - {model_source}, Score: {score:.1f}")
+            else:
+                confidence = base_confidence
+
+            # SHAP explanation (only for main trained model with explainer)
+            if model_source == "trained" and self.shap_explainer_engagement is not None:
+                explanation = self._get_shap_explanation(X, "engagement")
+            else:
+                explanation = {
+                    "note": f"Predicción usando {model_source} modelo",
+                    "explanation_text": self._generate_model_source_explanation(model_source, niche)
+                }
+
+            return {
+                "score": round(score, 1),
+                "confidence": round(confidence, 1),
+                "explanation": explanation,
+                "feature_importance": self._get_feature_importance("engagement"),
+                "model_source": model_source,
+                "niche": niche,
+                "cold_start": model_source == "base",
+            }
+
+        except Exception as e:
+            logger.error(f"Prediction error with {model_source} model: {e}")
+            return self._mock_engagement_prediction(content)
+
+    def _generate_model_source_explanation(self, model_source: str, niche: str) -> str:
+        """Generate human-readable explanation based on model source."""
+        if model_source == "base":
+            return (
+                f"Usando modelo base preentrenado para cold start (niche: {niche}). "
+                f"Para predicciones más precisas, entrena con datos específicos del nicho."
+            )
+        elif model_source.startswith("niche_"):
+            return f"Predicción optimizada para el nicho {niche} con modelo fine-tuned."
+        elif model_source == "trained":
+            return "Predicción con modelo principal entrenado en datos reales."
+        else:
+            return "Predicción basada en heurísticas."
 
     def recommend_format(self, content: Dict[str, Any]) -> Dict[str, Any]:
         """

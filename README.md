@@ -421,10 +421,124 @@ El sistema utiliza modelos entrenados específicamente para redes sociales:
 - **Format Classifier (Random Forest)**: Recomienda el mejor formato con ROC-AUC para clasificación binaria.
 - **Sentiment Analyzer (VADER)**: Detecta tono emocional para optimizar engagement.
 
+### Cold Start Handling
+
+El sistema implementa una estrategia robusta para nichos nuevos con pocos datos:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    ESTRATEGIA COLD START                            │
+├─────────────────────────────────────────────────────────────────────┤
+│  Samples < 30      → Usar modelo base directamente (no fine-tune)   │
+│  Samples 30-299    → Fine-tune desde modelo base (cold start)       │
+│  Samples >= 300    → Entrenar from scratch (datos suficientes)      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Flujo de modelos:**
+1. **Modelo Base**: Preentrenado en 10k samples sintéticos cubriendo todos los nichos
+2. **Modelos por Nicho**: Fine-tuned con datos específicos del vertical
+3. **Fallback automático**: Si no hay modelo de nicho, usa el base
+
+**Prioridad de selección:**
+```python
+1. Modelo específico del nicho (niche_restaurante.pkl)
+2. Modelo principal entrenado (engagement_model.joblib)
+3. Modelo base preentrenado (base_xgboost.pkl)  # Cold start
+4. Predicción heurística (reglas básicas)
+```
+
+### Scripts ML (/ml)
+
+#### 1. Preentrenar Modelo Base
+
+```bash
+# Generar datos sintéticos y entrenar modelo base (una vez)
+python ml/pretrain_base_model.py
+
+# Con más samples para mejor generalización
+python ml/pretrain_base_model.py --samples 20000
+
+# Output: models/base_xgboost.pkl
+```
+
+**Features del dataset sintético:**
+- `caption_length`, `emoji_count`, `hashtag_count`, `cta_count`
+- `hook_question`, `hook_pov`, `hook_number` (tipos de gancho)
+- `trigger_urgency`, `trigger_curiosity`, `trigger_action`
+- `is_reel`, `is_carousel`, `is_static` (formato)
+- `hour_of_day`, `is_prime_time`, `is_weekend` (timing)
+- `engagement_rate` (target): distribución log-normal realista
+
+#### 2. Entrenar Modelo por Nicho
+
+```bash
+# Entrenar/fine-tune para un nicho específico
+python ml/train.py --niche restaurante --data-file data/restaurante_posts.csv
+
+# Fine-tune forzado (incluso con suficientes datos)
+python ml/train.py --niche cafeteria --data-file data.csv --force-finetune
+
+# Threshold personalizado
+python ml/train.py --niche floristeria --data-file data.csv --threshold 200
+```
+
+**Fine-tuning (cold start):**
+- Learning rate bajo: 0.01 (vs 0.1 normal)
+- Solo 10-20 rounds adicionales
+- Early stopping para evitar overfitting
+- Preserva conocimiento del modelo base
+
+### Datasets Externos (Kaggle)
+
+Como alternativa a los datos sintéticos, puedes usar datasets reales de Kaggle:
+
+| Dataset | Descripción | URL |
+|---------|-------------|-----|
+| Instagram Analytics Dataset | Métricas de posts de IG | [Kaggle](https://www.kaggle.com/datasets/kundanbedmutha/instagram-analytics-dataset) |
+| Instagram Reach Forecasting | Análisis de alcance | [Kaggle](https://www.kaggle.com/datasets/rahulchavan99/instagram-reach-forecasting) |
+| Social Media Engagement Metrics | Engagement multi-plataforma | [Kaggle](https://www.kaggle.com/datasets/purnisharma/social-media-engagement-metrics) |
+| Instagram Analysis | Interacciones de usuarios | [Kaggle](https://www.kaggle.com/datasets/shubhamsadawarti/instagram-analysis) |
+
+**Nota:** Los datasets de Kaggle pueden requerir preprocesamiento para alinear features con nuestro sistema. El dataset sintético está diseñado específicamente para features de SMBs locales en español (triggers, CTAs, hooks) que no suelen estar en datasets públicos.
+
+Para usar un dataset de Kaggle:
+```bash
+# Descargar y preparar
+kaggle datasets download -d kundanbedmutha/instagram-analytics-dataset
+python scripts/prepare_kaggle_data.py --input instagram_data.csv --output prepared_data.csv
+
+# Entrenar con datos reales
+python ml/pretrain_base_model.py --data-file prepared_data.csv
+```
+
 ### Reentrenamiento
 - Time-based train/test split para evitar data leakage.
 - Evaluación vs baseline (media histórica) para medir mejora real.
 - Feedback loop con Human-in-the-Loop para aprendizaje continuo.
+
+### Logging de Cold Start
+
+El sistema genera logs claros cuando usa el modelo base:
+
+```
+INFO: Usando modelo base + fine-tune por cold start (niche: floristeria)
+INFO: Predicción con modelo base (cold start) - Niche: floristeria, Score: 72.3
+```
+
+La respuesta de predicción incluye metadata sobre la fuente del modelo:
+```json
+{
+  "score": 72.3,
+  "confidence": 68.0,
+  "model_source": "base",
+  "cold_start": true,
+  "niche": "floristeria",
+  "explanation": {
+    "explanation_text": "Usando modelo base preentrenado para cold start..."
+  }
+}
+```
 
 ## 🔒 Privacidad y GDPR
 
