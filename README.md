@@ -61,6 +61,101 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - Clínicas
 - Y más...
 
+## Elena Bridge - Chrome Extension
+
+> **Extensión de Chrome para guardar contenido de Instagram y TikTok directamente al backend**
+
+Elena Bridge permite a tu clienta navegar por Instagram y TikTok, encontrar contenido que le guste, y guardarlo con un solo clic para análisis posterior.
+
+### Funcionalidades
+
+- **Detección automática** de posts, reels y videos
+- **Botón flotante contextual**:
+  - "Guardar Post" en posts de Instagram
+  - "Guardar Reel" en reels de Instagram
+  - "Guardar Video" en videos de TikTok
+  - "Analizar Perfil" en páginas de perfil
+- **Extracción "stealth"**: Lee solo el DOM visible, sin hacer peticiones a APIs de redes sociales
+- **Datos hidratados**: Prioriza datos del servidor (window._sharedData, SIGI_STATE) para máxima precisión
+
+### Datos Extraídos
+
+Para cada contenido se extrae:
+- **Autor**: username, nombre, foto de perfil, verificación
+- **Contenido**: caption, hashtags, menciones
+- **Métricas**: likes, comentarios, vistas, shares, guardados
+- **Media**: URLs de imágenes/videos, thumbnails, duración
+- **Audio**: título, artista, si es original (para reels/videos)
+- **Timestamp**: fecha de publicación
+
+### Instalación de la Extensión
+
+```bash
+# 1. Instalar dependencias
+cd extension
+npm install
+
+# 2. Compilar para desarrollo (con hot reload)
+npm run dev
+
+# 3. O compilar para producción
+npm run build
+```
+
+**Cargar en Chrome:**
+1. Ir a `chrome://extensions`
+2. Activar "Modo desarrollador" (esquina superior derecha)
+3. Click en "Cargar descomprimida"
+4. Seleccionar la carpeta `extension/dist`
+
+### Estructura de la Extensión
+
+```
+extension/
+├── manifest.json              # Manifest V3
+├── package.json               # Vite + React + TypeScript + CRXJS
+├── vite.config.ts
+├── src/
+│   ├── content/
+│   │   ├── injector.ts        # Content script (inyecta botón)
+│   │   └── styles.css         # Estilos del botón flotante
+│   ├── background/
+│   │   └── service-worker.ts  # Comunicación con API backend
+│   ├── popup/
+│   │   ├── Popup.tsx          # UI del popup
+│   │   └── styles.css
+│   ├── utils/
+│   │   ├── instagram-extractor.ts         # Perfiles IG
+│   │   ├── instagram-content-extractor.ts # Posts/Reels IG
+│   │   ├── tiktok-extractor.ts           # Perfiles TikTok
+│   │   └── tiktok-content-extractor.ts   # Videos TikTok
+│   └── types/
+│       └── index.ts           # Tipos TypeScript
+└── public/icons/              # Iconos de la extensión
+```
+
+### API Endpoint para la Extensión
+
+La extensión envía datos a `POST /api/ingest/raw`:
+
+```json
+{
+  "source": "elena_bridge_extension",
+  "version": "1.0.0",
+  "type": "content",
+  "content": {
+    "platform": "instagram",
+    "contentType": "reel",
+    "contentId": "ABC123",
+    "author": { "username": "ejemplo", "isVerified": true },
+    "caption": "Mi contenido viral...",
+    "hashtags": ["#viral", "#trending"],
+    "metrics": { "likes": 50000, "comments": 1200 },
+    "audio": { "title": "Trending Sound", "artist": "Artist" }
+  }
+}
+```
+
 ## Tech Stack
 
 ### Backend
@@ -81,6 +176,13 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - **Tailwind CSS** - Estilos
 - **Zustand** - State management
 - **React Query** - Data fetching
+
+### Extension (Elena Bridge)
+- **Vite + CRXJS** - Build con hot reload para Chrome extensions
+- **React 18 + TypeScript** - UI del popup
+- **Manifest V3** - Última versión del manifiesto de Chrome
+- **Content Scripts** - Inyección de botón flotante
+- **Service Worker** - Comunicación con backend API
 
 ## Instalación
 
@@ -210,6 +312,10 @@ Detecta tendencias emergentes y genera scripts adaptados a tu negocio usando la 
 ### Contenido & Análisis
 - `POST /api/v1/content/{business_id}/generate-calendar` - Generar calendario con IA
 - `GET /api/v1/competitors/{business_id}/{competitor_id}/analysis` - Ver patrones extraídos
+
+### Elena Bridge (Extensión)
+- `POST /api/ingest/raw` - Ingestar contenido desde la extensión (posts, reels, videos, perfiles)
+- `GET /api/ingest/status` - Verificar estado del endpoint de ingesta
 
 ### Autenticación & Negocio
 - `POST /api/v1/auth/login`
