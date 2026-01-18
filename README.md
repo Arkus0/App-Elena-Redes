@@ -832,7 +832,8 @@ La extensión envía datos a `POST /api/ingest/raw`:
 - **FastAPI** - Framework web async
 - **SQLAlchemy 2.0** - ORM con soporte async
 - **SQLite/PostgreSQL** - Base de datos
-- **XGBoost** - Modelo de predicción
+- **XGBoost** - Modelo de predicción batch
+- **River** - Online/incremental learning (AdaptiveRandomForest)
 - **SHAP** - Explicabilidad de predicciones
 - **Grok (xAI)** - Motor LLM principal para análisis creativo y generación de contenido
 - **sentence-transformers** - Embeddings semánticos (all-MiniLM-L6-v2)
@@ -977,6 +978,8 @@ Detecta tendencias emergentes y genera scripts adaptados a tu negocio usando la 
 
 ### A/B Testing & Feedback
 - `POST /api/v1/abtest/log-result` - Registrar resultado real de contenido publicado
+- `POST /api/v1/abtest/feedback` - Feedback con online learning automático (River)
+- `GET /api/v1/abtest/online-status` - Estado del modelo online por nicho
 - `GET /api/v1/abtest/stats` - Estadísticas de predicciones vs realidad
 
 ### Contenido & Análisis
@@ -1201,6 +1204,248 @@ python ml/pretrain_base_model.py --data-file prepared_data.csv
 - Time-based train/test split para evitar data leakage.
 - Evaluación vs baseline (media histórica) para medir mejora real.
 - Feedback loop con Human-in-the-Loop para aprendizaje continuo.
+
+### 🔄 Online/Incremental Learning con River (Nuevo)
+
+Sistema de aprendizaje incremental que actualiza el modelo en tiempo real cuando llega feedback de engagement sin necesidad de reentrenamiento batch completo.
+
+#### Arquitectura Online Learning
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ONLINE LEARNING PIPELINE (River)                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐     ┌─────────────────────┐     ┌────────────────────┐   │
+│  │   A/B Test   │     │    Online Model     │     │    Batch XGBoost   │   │
+│  │   Feedback   │────►│  (River ARF)        │────►│    (Si mejora >5%) │   │
+│  │   Endpoint   │     │  AdaptiveRandomForest│     │    Trigger Retrain │   │
+│  └──────────────┘     └─────────────────────┘     └────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│         ┌─────────────────────────────────────────┐                        │
+│         │  Evaluation cada 15 samples:            │                        │
+│         │  - MAE / R² tracking                    │                        │
+│         │  - Drift detection                      │                        │
+│         │  - Improvement signal (>5% MAE mejor)   │                        │
+│         └─────────────────────────────────────────┘                        │
+│                                                                              │
+│  Inference Priority:                                                         │
+│  1. Niche-specific XGBoost (si entrenado)                                   │
+│  2. Main trained XGBoost                                                    │
+│  3. Online River model (si drift detectado o cold start)                    │
+│  4. Base model / Heuristics                                                 │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### ¿Por qué Online Learning?
+
+| Aspecto | Ventaja |
+|---------|---------|
+| **Latencia** | Updates en <1s por sample (vs minutos/horas para batch retrain) |
+| **Adaptación** | Responde inmediatamente a cambios en engagement patterns |
+| **Cold Start** | Funciona con 1 sample (no necesita dataset mínimo) |
+| **Drift Detection** | Detecta cuando batch model está desactualizado |
+| **Memoria** | ~10KB por modelo de nicho (vs MBs para XGBoost) |
+
+#### Componente Principal
+
+**Ubicación:** `backend/ml/online_update.py`
+
+```python
+from backend.ml.online_update import (
+    # Funciones principales
+    online_update,           # Update batch incremental
+    online_update_single,    # Update single sample
+    get_online_predictor,    # Obtener predictor por nicho
+    reset_online_predictor,  # Reset modelo
+    detect_drift,            # Detectar drift
+
+    # Clases
+    OnlineEngagementPredictor,  # Wrapper River
+    OnlineUpdateResult,         # Resultado de update
+
+    # Configuración
+    EVALUATION_INTERVAL,     # 15 samples
+    IMPROVEMENT_THRESHOLD,   # 5%
+)
+```
+
+#### Uso Básico
+
+```python
+import pandas as pd
+import numpy as np
+from backend.ml.online_update import online_update
+
+# Cuando llega feedback real de A/B test
+features_df = pd.DataFrame([extracted_features])
+targets_df = pd.DataFrame({
+    "log_likes": [np.log1p(500)],      # 500 likes reales
+    "log_comments": [np.log1p(45)],    # 45 comments reales
+    "log_shares": [np.log1p(12)],
+    "log_saves": [np.log1p(80)],
+    "log_views": [np.log1p(5000)],
+})
+
+# Actualizar modelo online
+result = online_update(
+    niche="inmobiliaria",
+    new_features=features_df,
+    new_targets=targets_df,
+    save_model=True
+)
+
+print(f"Samples procesados: {result.samples_processed}")
+print(f"Total acumulado: {result.total_samples}")
+print(f"MAE actual: {result.current_mae:.4f}")
+print(f"¿Mejora detectada?: {result.improvement_detected}")
+print(f"¿Trigger retrain XGBoost?: {result.trigger_full_retrain}")
+```
+
+#### API Endpoints
+
+```bash
+# Feedback con online learning automático
+POST /api/v1/abtest/feedback
+{
+  "post_id": 123,
+  "actual_likes": 500,
+  "actual_comments": 45,
+  "actual_saves": 80,
+  "actual_shares": 12,
+  "actual_views": 5000,
+  "niche": "inmobiliaria"  # Opcional
+}
+
+# Respuesta:
+{
+  "post_id": 123,
+  "online_learning_enabled": true,
+  "samples_processed": 1,
+  "total_samples": 47,
+  "current_mae": 0.3421,
+  "improvement_detected": false,
+  "trigger_full_retrain": false,
+  "update_time_ms": 12.5,
+  "message": "Online learning updated for niche 'inmobiliaria'. Total samples: 47"
+}
+
+# Obtener status del modelo online
+GET /api/v1/abtest/online-status?niche=inmobiliaria
+
+# Respuesta:
+{
+  "niche": "inmobiliaria",
+  "is_initialized": true,
+  "samples_seen": 47,
+  "current_mae": 0.3421,
+  "best_mae": 0.3156,
+  "feature_count": 136,
+  "targets": ["log_likes", "log_comments", "log_shares", "log_saves", "log_views"],
+  "online_learning_available": true
+}
+```
+
+#### Inference con Fallback Online
+
+```python
+from app.services.ml_service import MLPredictor
+
+predictor = MLPredictor()
+
+# Predicción con fallback automático a online model
+result = predictor.predict_with_online_fallback(
+    content={"caption": "...", "business_type": "inmobiliaria"},
+    use_drift_detection=True,
+    recent_predictions=[72.5, 68.3, 75.1],  # Últimas predicciones batch
+    recent_actuals=[45.2, 82.1, 55.3]       # Resultados reales
+)
+
+# Si drift detectado (MAE > 30%), usa online model
+print(result["model_source"])  # "online_river" o "trained" o "base"
+print(result["drift_detected"])  # True/False
+```
+
+#### Modelo River: AdaptiveRandomForestRegressor
+
+El modelo online usa River's `AdaptiveRandomForestRegressor`:
+
+| Parámetro | Valor | Descripción |
+|-----------|-------|-------------|
+| `n_models` | 10 | Ensemble de 10 árboles |
+| `max_depth` | 6 | Profundidad similar a XGBoost |
+| `grace_period` | 50 | Samples antes del primer split |
+| `split_confidence` | 0.01 | Confidence para splits |
+
+**Características:**
+- Maneja concept drift automáticamente
+- Funciona con 1 sample (incremental puro)
+- Lightweight: ~10KB por modelo de nicho
+- Multi-output: modelo separado por métrica (likes, comments, etc.)
+
+#### Persistencia de Modelos Online
+
+```
+models/
+├── online_inmobiliaria.pkl    # Modelo online para nicho
+├── online_floristeria.pkl
+├── online_cafeteria.pkl
+└── ...
+```
+
+Los modelos se guardan automáticamente después de cada update.
+
+#### Evaluación y Señales de Mejora
+
+Cada 15 samples, el sistema evalúa:
+
+```python
+# Metrics tracking
+- MAE (Mean Absolute Error)
+- R² (Coefficient of determination)
+
+# Improvement detection
+if (previous_mae - current_mae) / previous_mae > 0.05:  # >5% mejora
+    trigger_full_retrain = True
+    # Señal para reentrenar XGBoost batch con datos acumulados
+```
+
+#### Tests
+
+```bash
+# Ejecutar tests de online learning
+pytest backend/tests/test_online_learning.py -v
+
+# Tests incluidos:
+# - test_50_incremental_updates (simula 50 batches, confirma mejora)
+# - test_partial_fit_single
+# - test_online_update_function
+# - test_drift_detection
+# - test_save_and_load
+# - test_update_time_under_1_second
+# - test_memory_efficiency
+```
+
+#### Integración con Feedback Loop Existente
+
+El sistema se integra con el endpoint existente `/abtest/log-result`:
+
+1. Usuario publica contenido → Predicción batch (XGBoost)
+2. 24-48h después → Feedback real llega a `/abtest/feedback`
+3. Online model se actualiza inmediatamente
+4. Si mejora >5%, se señala retrain batch
+5. Próximas predicciones: si drift, usa online; si no, usa batch
+
+```
+Timeline:
+─────────────────────────────────────────────────────────────────
+  Día 1             Día 2-3              Día 4+
+  [Predicción]      [Feedback Real]      [Modelo Mejorado]
+  XGBoost batch  →  Online update  →    XGBoost retrained
+                                    o   Online fallback si drift
+```
 
 ### Logging de Cold Start
 
