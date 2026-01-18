@@ -3,13 +3,14 @@ Embedding Configuration API Endpoints
 
 Provides endpoints for configuring embedding precision levels per business.
 
-Precision Levels:
-- "low" (128 dims): Ultra fast, lower precision
-- "medium" (256 dims): Balanced precision/speed
-- "high" (384 dims): Full precision
-- "max" (384 dims): Full raw embeddings - mejor matices creativos/locales (default)
+Precision Levels (precision es REQUERIDO):
+- "ultra_low" (64 dims): Ultra rapido para PC modesto/sobremesa Almeria
+- "low" (128 dims): Recomendado sobremesa normal (NEW DEFAULT)
+- "medium" (256 dims): Balance precision/velocidad
+- "high" (384 dims): Full dims con TruncatedSVD
+- "max" (full raw 384): Sin reduccion - mejor matices creativos/slang local
 
-Default is "max" - safe for typical SMB data volumes (100-2000 posts, train <1min, RAM <2GB)
+Default changed to "low" - seguro para sobremesa normal Almeria (100-2000 posts, train <1min, RAM <1GB)
 """
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -32,8 +33,8 @@ router = APIRouter(prefix="/embeddings", tags=["Embedding Configuration"])
 class EmbeddingPrecisionUpdate(BaseModel):
     """Request to update embedding precision."""
     precision: EmbeddingPrecision = Field(
-        default=EmbeddingPrecision.MAX,
-        description="Embedding precision level"
+        default=EmbeddingPrecision.LOW,  # Changed from MAX - safer for typical sobremesa
+        description="Embedding precision level: ultra_low (64), low (128), medium (256), high (384), max (full raw)"
     )
 
 
@@ -50,7 +51,7 @@ class EmbeddingConfigInfo(BaseModel):
     """Information about available embedding configurations."""
     available_precisions: list[Dict[str, Any]]
     current_precision: Optional[EmbeddingPrecision] = None
-    recommended: str = "max"
+    recommended: str = "low"  # Changed from "max" - safer for typical sobremesa
 
 
 # =============================================================================
@@ -58,33 +59,40 @@ class EmbeddingConfigInfo(BaseModel):
 # =============================================================================
 
 PRECISION_INFO = {
+    "ultra_low": {
+        "dimensions": 64,
+        "label": "Ultra Baja (64 dims - ultra rapido)",
+        "description": "Ultra rapido para PC modesto/sobremesa Almeria",
+        "performance": "Muy rapido, minimo RAM (~0.3GB). Ideal para PC antiguo o volumen muy alto.",
+        "use_case": "PC modesto, datasets muy grandes (>10000 posts)"
+    },
     "low": {
         "dimensions": 128,
-        "label": "Baja",
-        "description": "Ultra rapido, menor precision semantica",
-        "performance": "Mas rapido, menor RAM. Para datasets muy grandes (>5000 posts).",
-        "use_case": "Volumen alto, velocidad prioritaria"
+        "label": "Baja (128 dims - Recomendada)",
+        "description": "Recomendado para sobremesa normal Almeria - balance seguro",
+        "performance": "Rapido, bajo RAM (~0.5GB). Train <30s. Ideal para SMB tipico.",
+        "use_case": "Sobremesa normal, volumen tipico SMB (100-2000 posts)"
     },
     "medium": {
         "dimensions": 256,
-        "label": "Media",
+        "label": "Media (256 dims)",
         "description": "Balance entre precision y velocidad",
-        "performance": "Buen balance. Adecuado para 2000-5000 posts.",
+        "performance": "Buen balance, RAM moderado (~1GB). Para 2000-5000 posts.",
         "use_case": "Balance precision/velocidad"
     },
     "high": {
         "dimensions": 384,
-        "label": "Alta",
-        "description": "Precision completa, todas las dimensiones",
-        "performance": "Todas las dimensiones. Training rapido con <2000 posts.",
-        "use_case": "Precision maxima"
+        "label": "Alta (384 dims)",
+        "description": "Precision completa con TruncatedSVD (preserva varianza)",
+        "performance": "Full dims con reduccion. Train <1min con <2000 posts.",
+        "use_case": "Precision maxima con reduccion"
     },
     "max": {
         "dimensions": 384,
-        "label": "Maxima (Recomendada)",
-        "description": "Embeddings raw completos - captura mejor matices creativos y slang local (Almeria/andaluz)",
-        "performance": "Seguro en PC normal: train <1min, RAM <2GB con 100-2000 posts tipicos de SMB.",
-        "use_case": "SMB tipico, mejor precision semantica regional"
+        "label": "Maxima (full raw)",
+        "description": "Embeddings raw completos sin reduccion - mejor matices creativos y slang local (Almeria/andaluz)",
+        "performance": "Sin reduccion, RAM ~2GB. Solo si tienes buen hardware.",
+        "use_case": "Hardware potente, maxima precision semantica regional"
     }
 }
 
@@ -114,7 +122,7 @@ async def get_embedding_info():
     - Dimensions
     - Performance characteristics
     - Use cases
-    - Recommended default
+    - Recommended default (now "low" for typical sobremesa)
     """
     available = []
     for key, info in PRECISION_INFO.items():
@@ -125,12 +133,12 @@ async def get_embedding_info():
             "description": info["description"],
             "performance": info["performance"],
             "use_case": info["use_case"],
-            "is_recommended": key == "max"
+            "is_recommended": key == "low"  # Changed from "max" - safer for typical sobremesa
         })
 
     return EmbeddingConfigInfo(
         available_precisions=available,
-        recommended="max"
+        recommended="low"  # Changed from "max"
     )
 
 
@@ -174,10 +182,11 @@ async def update_business_embedding_precision(
     Update embedding precision configuration for a business.
 
     Available precision levels:
-    - **low** (128 dims): Ultra fast, lower semantic precision
-    - **medium** (256 dims): Balanced precision and speed
-    - **high** (384 dims): Full precision
-    - **max** (384 dims): Full raw embeddings, best for regional nuances (default)
+    - **ultra_low** (64 dims): Ultra rapido para PC modesto
+    - **low** (128 dims): Recomendado sobremesa normal (NEW DEFAULT)
+    - **medium** (256 dims): Balance precision/velocidad
+    - **high** (384 dims): Full dims con TruncatedSVD
+    - **max** (full raw 384): Sin reduccion - mejor matices creativos/slang
 
     Note: Changing precision requires model retraining for optimal results.
     """
@@ -273,7 +282,7 @@ async def get_embedding_benchmark_estimate(
         "n_samples": n_samples,
         "benchmarks": benchmarks,
         "recommendation": {
-            "precision": "max",
-            "reason": f"Con {n_samples} samples, 'max' es seguro y ofrece mejor precision semantica."
+            "precision": "low",
+            "reason": f"Con {n_samples} samples, 'low' (128 dims) es seguro para sobremesa normal Almeria y ofrece buen balance precision/velocidad."
         }
     }

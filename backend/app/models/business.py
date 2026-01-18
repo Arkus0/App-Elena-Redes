@@ -30,18 +30,19 @@ class EmbeddingPrecision(str, enum.Enum):
     """
     Embedding precision levels for ML pipeline.
 
-    Default: MAX (full 384 dims) - recommended for typical SMB data volumes.
-    Safe for 100-2000 posts, training <1min, RAM <2GB on normal desktop.
+    IMPORTANT: Default changed to LOW (128 dims) - safe for typical sobremesa.
 
-    - LOW (128 dims): Ultra fast, lower precision
-    - MEDIUM (256 dims): Balanced precision/speed
-    - HIGH (384 dims): Full precision
-    - MAX (384 dims): Full raw embeddings - best for regional slang/nuances
+    - ULTRA_LOW (64 dims): Ultra rapido para PC modesto
+    - LOW (128 dims): Recomendado sobremesa normal Almeria (NEW DEFAULT)
+    - MEDIUM (256 dims): Balance precision/velocidad
+    - HIGH (384 dims): Full dims con TruncatedSVD
+    - MAX (full raw): 384 dims sin reduccion - mejor matices creativos/slang local
     """
-    LOW = "low"        # 128 dims
-    MEDIUM = "medium"  # 256 dims
-    HIGH = "high"      # 384 dims
-    MAX = "max"        # 384 dims (default - full raw embeddings)
+    ULTRA_LOW = "ultra_low"  # 64 dims - ultra rapido, PC modesto
+    LOW = "low"              # 128 dims - recomendado sobremesa normal
+    MEDIUM = "medium"        # 256 dims - balance
+    HIGH = "high"            # 384 dims - full con TruncatedSVD
+    MAX = "max"              # full raw 384 dims sin reduccion
 
 
 class Business(Base):
@@ -70,11 +71,11 @@ class Business(Base):
     brand_voice = Column(String(100), default="friendly_professional")
 
     # ML Configuration
-    # Embedding precision: "low" (128), "medium" (256), "high" (384), "max" (384 raw)
-    # Default: "max" - full 384 dims, safe for SMB volumes (100-2000 posts, <1min train, <2GB RAM)
+    # Embedding precision: "ultra_low" (64), "low" (128), "medium" (256), "high" (384), "max" (full raw)
+    # Default: "low" - 128 dims, seguro para sobremesa normal Almeria (100-2000 posts, <1min train, <1GB RAM)
     embedding_precision = Column(
         Enum(EmbeddingPrecision),
-        default=EmbeddingPrecision.MAX,
+        default=EmbeddingPrecision.LOW,
         nullable=False
     )
 
