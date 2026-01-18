@@ -57,6 +57,20 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import xgboost as xgb
 
+# Import embedding feature extractor
+try:
+    from ml.features_embeddings import (
+        EmbeddingExtractor,
+        get_embedding_extractor,
+        EMBEDDING_FEATURE_COLUMNS,
+        PCA_COMPONENTS
+    )
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    EMBEDDINGS_AVAILABLE = False
+    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(30)]
+    PCA_COMPONENTS = 30
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -79,7 +93,8 @@ BACKEND_MODELS_DIR.mkdir(exist_ok=True, parents=True)
 # FEATURE DEFINITIONS (matching ml_service.py FeatureExtractor)
 # =============================================================================
 
-FEATURE_COLUMNS = [
+# Manual heuristic features (kept as backup)
+MANUAL_FEATURE_COLUMNS = [
     "caption_length", "caption_words", "caption_lines", "avg_word_length",
     "emoji_count", "emoji_density", "hashtag_count", "hashtag_density",
     "mention_count", "lexical_richness", "has_question", "has_strong_cta",
@@ -99,6 +114,9 @@ FEATURE_COLUMNS = [
     "niche_peluqueria", "niche_restaurante", "niche_gimnasio", "niche_clinica",
     "business_type_encoded",
 ]
+
+# Combined feature columns: semantic embeddings (prioritized) + manual heuristics (backup)
+FEATURE_COLUMNS = EMBEDDING_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
 
 BUSINESS_TYPES = [
     "inmobiliaria", "floristeria", "cafeteria", "peluqueria",
@@ -299,6 +317,65 @@ def _engineer_features_from_caption(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _add_embedding_features_from_captions(df: pd.DataFrame, caption_col: str = "caption") -> pd.DataFrame:
+    """
+    Generate semantic embedding features from caption text.
+
+    If embeddings are available, generates real embeddings.
+    Otherwise, generates synthetic random embeddings.
+
+    Args:
+        df: DataFrame with caption column
+        caption_col: Name of caption column
+
+    Returns:
+        DataFrame with embedding_1 to embedding_30 columns added
+    """
+    n = len(df)
+
+    if EMBEDDINGS_AVAILABLE and caption_col in df.columns:
+        logger.info(f"Generating semantic embeddings for {n} samples...")
+        try:
+            extractor = get_embedding_extractor()
+
+            # Get captions
+            captions = df[caption_col].fillna("").astype(str).tolist()
+
+            # Fit PCA if not fitted
+            if not extractor.is_pca_fitted:
+                logger.info("Fitting PCA on corpus...")
+                extractor.fit_pca_from_texts(captions, save=True)
+
+            # Generate features
+            features_list = extractor.get_embedding_features_batch(captions)
+
+            # Add to DataFrame
+            for col in EMBEDDING_FEATURE_COLUMNS:
+                df[col] = [f.get(col, 0.0) for f in features_list]
+
+            logger.info(f"Added {len(EMBEDDING_FEATURE_COLUMNS)} real embedding features")
+            return df
+
+        except Exception as e:
+            logger.warning(f"Embedding generation failed: {e}. Using synthetic embeddings.")
+
+    # Fallback: Generate synthetic embedding-like features
+    # These simulate the statistical properties of real embeddings
+    logger.info("Generating synthetic embedding features...")
+
+    np.random.seed(42)
+
+    # Synthetic embeddings: random normal values with gradual variance decay
+    # (higher components explain less variance in real PCA)
+    for i, col in enumerate(EMBEDDING_FEATURE_COLUMNS):
+        # Variance decreases for higher components (like real PCA)
+        variance = 1.0 / (1 + i * 0.1)
+        df[col] = np.random.normal(0, np.sqrt(variance), n)
+
+    logger.info(f"Added {len(EMBEDDING_FEATURE_COLUMNS)} synthetic embedding features")
+    return df
+
+
 def _add_missing_features(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
     """Add missing features with realistic random values."""
     np.random.seed(seed)
@@ -372,6 +449,17 @@ def _add_missing_features(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
         df['business_type_encoded'] = df['business_type'].apply(
             lambda x: encoder.transform([x])[0] if x in encoder.classes_ else len(BUSINESS_TYPES) - 1
         )
+
+    # Add embedding features if not present
+    if not any(col in df.columns for col in EMBEDDING_FEATURE_COLUMNS):
+        # Find caption column
+        caption_col = None
+        for col in ['caption', 'text', 'content', 'post_caption', 'description']:
+            if col in df.columns:
+                caption_col = col
+                break
+
+        df = _add_embedding_features_from_captions(df, caption_col or "caption")
 
     return df
 
@@ -614,6 +702,19 @@ def generate_synthetic_engagement_data(n_samples: int = 10000, seed: int = 42) -
 
     data["engagement_rate"] = engagement_rate_normalized
 
+    # ==========================================================================
+    # SEMANTIC EMBEDDING FEATURES (Synthetic)
+    # ==========================================================================
+    # Generate synthetic embedding-like features
+    # These simulate PCA-reduced sentence embeddings
+    # Higher components have lower variance (like real PCA)
+
+    for i in range(PCA_COMPONENTS):
+        col_name = f"embedding_{i+1}"
+        # Variance decreases for higher components
+        variance = 1.0 / (1 + i * 0.1)
+        data[col_name] = np.random.normal(0, np.sqrt(variance), n_samples)
+
     # Create DataFrame
     df = pd.DataFrame(data)
 
@@ -626,6 +727,7 @@ def generate_synthetic_engagement_data(n_samples: int = 10000, seed: int = 42) -
                 f"std={df['engagement_rate'].std():.2f}, "
                 f"min={df['engagement_rate'].min():.2f}, "
                 f"max={df['engagement_rate'].max():.2f}")
+    logger.info(f"Embedding features: {PCA_COMPONENTS} synthetic PCA components")
 
     return df
 

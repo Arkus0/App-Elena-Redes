@@ -48,6 +48,20 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import xgboost as xgb
 
+# Import embedding feature extractor
+try:
+    from ml.features_embeddings import (
+        EmbeddingExtractor,
+        get_embedding_extractor,
+        EMBEDDING_FEATURE_COLUMNS,
+        PCA_COMPONENTS
+    )
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    EMBEDDINGS_AVAILABLE = False
+    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(30)]
+    PCA_COMPONENTS = 30
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -80,8 +94,8 @@ FINETUNE_EARLY_STOPPING_ROUNDS = 5  # Stop if no improvement
 FULL_TRAIN_N_ESTIMATORS = 100
 FULL_TRAIN_LEARNING_RATE = 0.1
 
-# Feature columns (must match pretrain_base_model.py and ml_service.py)
-FEATURE_COLUMNS = [
+# Manual heuristic features (kept as backup)
+MANUAL_FEATURE_COLUMNS = [
     "caption_length", "caption_words", "caption_lines", "avg_word_length",
     "emoji_count", "emoji_density", "hashtag_count", "hashtag_density",
     "mention_count", "lexical_richness", "has_question", "has_strong_cta",
@@ -101,6 +115,10 @@ FEATURE_COLUMNS = [
     "niche_peluqueria", "niche_restaurante", "niche_gimnasio", "niche_clinica",
     "business_type_encoded",
 ]
+
+# Combined feature columns: semantic embeddings (prioritized) + manual heuristics (backup)
+# Embeddings capture semantic meaning, manual features capture surface patterns
+FEATURE_COLUMNS = EMBEDDING_FEATURE_COLUMNS + MANUAL_FEATURE_COLUMNS
 
 BUSINESS_TYPES = [
     "inmobiliaria", "floristeria", "cafeteria", "peluqueria",
@@ -155,6 +173,56 @@ def load_data_from_database(niche: str = None) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def add_embedding_features(df: pd.DataFrame, caption_column: str = "caption") -> pd.DataFrame:
+    """
+    Add semantic embedding features to DataFrame.
+
+    Generates embeddings for each caption and adds embedding_1 to embedding_30 columns.
+    Also fits PCA on the corpus if not already fitted.
+
+    Args:
+        df: DataFrame with caption column
+        caption_column: Name of column containing text
+
+    Returns:
+        DataFrame with embedding features added
+    """
+    if not EMBEDDINGS_AVAILABLE:
+        logger.warning("Embeddings not available. Adding zero columns.")
+        for col in EMBEDDING_FEATURE_COLUMNS:
+            df[col] = 0.0
+        return df
+
+    logger.info(f"Generating semantic embeddings for {len(df)} samples...")
+
+    try:
+        extractor = get_embedding_extractor()
+
+        # Get captions
+        captions = df[caption_column].fillna("").astype(str).tolist()
+
+        # Fit PCA on this corpus if not already fitted
+        if not extractor.is_pca_fitted:
+            logger.info("Fitting PCA on training corpus...")
+            extractor.fit_pca_from_texts(captions, save=True)
+
+        # Generate embedding features for all texts
+        features_list = extractor.get_embedding_features_batch(captions)
+
+        # Add to DataFrame
+        for i, col in enumerate(EMBEDDING_FEATURE_COLUMNS):
+            df[col] = [f.get(col, 0.0) for f in features_list]
+
+        logger.info(f"Added {len(EMBEDDING_FEATURE_COLUMNS)} embedding features")
+
+    except Exception as e:
+        logger.error(f"Embedding generation failed: {e}. Using zeros.")
+        for col in EMBEDDING_FEATURE_COLUMNS:
+            df[col] = 0.0
+
+    return df
+
+
 def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
     """
     Prepare features and target for training.
@@ -191,6 +259,22 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
         df["business_type_encoded"] = df["business_type"].apply(
             lambda x: encoder.transform([x])[0] if x in known_types else len(BUSINESS_TYPES) - 1
         )
+
+    # Add embedding features if not present
+    if not any(col in df.columns for col in EMBEDDING_FEATURE_COLUMNS):
+        # Find caption column
+        caption_col = None
+        for col in ["caption", "text", "content", "post_caption", "description"]:
+            if col in df.columns:
+                caption_col = col
+                break
+
+        if caption_col:
+            df = add_embedding_features(df, caption_column=caption_col)
+        else:
+            logger.warning("No caption column found. Adding zero embeddings.")
+            for col in EMBEDDING_FEATURE_COLUMNS:
+                df[col] = 0.0
 
     # Select feature columns that exist
     feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
