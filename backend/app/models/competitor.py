@@ -32,6 +32,13 @@ class Competitor(Base):
     scrape_status = Column(String(50), default="pending")  # pending, in_progress, completed, failed
     scrape_error = Column(String(500), nullable=True)
 
+    # Activity metrics (for filtering inactive competitors)
+    last_post_date = Column(DateTime, nullable=True)  # Date of most recent post
+    days_since_last_post = Column(Integer, nullable=True)  # Cached for queries
+    activity_status = Column(String(20), default="unknown")  # active, inactive, dormant, unknown
+    activity_score = Column(Integer, default=0)  # 0-100 score
+    posting_frequency = Column(Integer, nullable=True)  # Posts per month (avg)
+
     # Analysis data (JSON)
     top_performing_formats = Column(JSON, default=[])  # reels, carousels, static
     peak_posting_times = Column(JSON, default=[])
