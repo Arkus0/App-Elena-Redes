@@ -61,6 +61,98 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - Clínicas
 - Y más...
 
+## Instagram Discovery Script
+
+> **Descubre perfiles de Instagram relevantes para tu nicho local**
+
+El script `apify_instagram_discovery.py` permite descubrir competidores y perfiles similares en Instagram buscando por hashtags, ubicación y nicho. Genera una lista CSV/JSON de perfiles para que la usuaria los revise manualmente.
+
+### Flujo de Trabajo
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Discovery     │     │   Elena Bridge  │     │   BrandPulse    │
+│   Script        │────▶│   Extension     │────▶│   ML Analysis   │
+│   (perfiles)    │     │   (contenido)   │     │   (predicción)  │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+1. **Discovery Script**: Encuentra perfiles relevantes por hashtags
+2. **Elena Bridge**: Extrae posts/reels de los perfiles que te interesen
+3. **BrandPulse ML**: Analiza el contenido y predice engagement
+
+### Modos de Uso
+
+```bash
+# 1. Modo interactivo (te pregunta qué buscar)
+python backend/scripts/apify_instagram_discovery.py
+
+# 2. Con archivo de configuración guardado
+python backend/scripts/apify_instagram_discovery.py --config mi_busqueda.yaml
+
+# 3. Con argumentos directos
+python backend/scripts/apify_instagram_discovery.py \
+    --hashtags "inmobiliariaalmeria,casasalmeria" \
+    --location "almería,roquetas,aguadulce" \
+    --niche "inmobiliaria,casas,pisos,alquiler"
+
+# 4. Guardar configuración para reutilizar
+python backend/scripts/apify_instagram_discovery.py --save-config floristerias.yaml
+```
+
+### Opciones CLI
+
+| Argumento | Descripción | Default |
+|-----------|-------------|---------|
+| `--hashtags` | Hashtags a buscar (separados por comas) | - |
+| `--location` | Keywords de ubicación | - |
+| `--niche` | Keywords del nicho de negocio | - |
+| `--min-followers` | Mínimo de seguidores | 100 |
+| `--max-followers` | Máximo de seguidores | 50000 |
+| `--max-posts` | Posts a buscar por hashtag | 150 |
+| `--max-profiles` | Máximo perfiles en output | 150 |
+| `--no-enrich` | Desactivar enriquecimiento | False |
+| `--config` | Cargar desde archivo YAML/JSON | - |
+| `--save-config` | Guardar config para reutilizar | - |
+| `-i, --interactive` | Forzar modo interactivo | False |
+
+### Archivo de Configuración (YAML)
+
+```yaml
+# mi_busqueda.yaml
+hashtags:
+  - inmobiliariaalmeria
+  - casasalmeria
+  - pisosalmeria
+
+location_keywords:
+  - almería
+  - roquetas
+  - aguadulce
+
+niche_keywords:
+  - inmobiliaria
+  - casas
+  - pisos
+  - alquiler
+
+min_followers: 100
+max_followers: 50000
+max_posts_per_hashtag: 150
+max_profiles_output: 150
+enrich_profiles: true
+```
+
+### Output
+
+El script genera:
+- `discovery_output/instagram_discovery_YYYYMMDD_HHMMSS.csv`
+- `discovery_output/instagram_discovery_YYYYMMDD_HHMMSS.json`
+
+Con columnas: `username`, `followers`, `bio`, `category`, `relevance_score`, etc.
+
+---
+
 ## Elena Bridge - Chrome Extension
 
 > **Extensión de Chrome para guardar contenido de Instagram y TikTok directamente al backend**

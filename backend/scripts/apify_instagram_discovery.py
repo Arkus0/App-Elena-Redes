@@ -5,29 +5,26 @@ APIFY INSTAGRAM DISCOVERY - Descubrimiento de Perfiles Locales
 =============================================================================
 
 Script para descubrir perfiles de Instagram relevantes en un nicho de negocio
-local (inmobiliarias, floristerías, restaurantes, gimnasios, etc.) usando
-EXCLUSIVAMENTE el Apify Client.
+local usando EXCLUSIVAMENTE el Apify Client.
 
 OBJETIVO: Generar lista de usernames de competidores locales similares
-(cuentas pequeñas/medianas, no influencers grandes) para análisis manual.
+(cuentas pequeñas/medianas, no influencers grandes) para análisis manual
+posterior con la extensión Elena Bridge.
 
-FLUJO:
-1. Input: hashtags relevantes + keywords de ubicación/nicho
-2. Scraping de posts recientes por hashtag (límite bajo: 100-200 posts)
-3. Extracción de usernames únicos
-4. (Opcional) Enriquecimiento con datos de perfil
-5. Filtrado por criterios locales (followers, bio, categoría)
-6. Output: CSV/JSON con perfiles relevantes
+MODOS DE USO:
+    1. Interactivo (pregunta qué buscar):
+       python apify_instagram_discovery.py
 
-IMPORTANTE: Este script NO extrae contenido de posts/stories.
-Solo sirve para DESCUBRIR perfiles que la usuaria visitará manualmente.
+    2. Con archivo de configuración:
+       python apify_instagram_discovery.py --config mi_busqueda.yaml
 
-Uso:
-    export APIFY_API_TOKEN="tu_token_aquí"
-    python apify_instagram_discovery.py
+    3. Con argumentos CLI:
+       python apify_instagram_discovery.py --hashtags "inmobiliariaalmeria,casasalmeria" \
+           --location "almería,roquetas" --niche "inmobiliaria,casas"
 
-Autor: Elena Redes / BrandPulse AI
-Fecha: 2026-01
+IMPORTANTE: Este script solo DESCUBRE perfiles. La extracción de contenido
+individual se hace con la extensión Elena Bridge Chrome.
+
 =============================================================================
 """
 
@@ -37,7 +34,7 @@ import json
 import csv
 import time
 import logging
-import re
+import argparse
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Set
@@ -60,60 +57,71 @@ logger = logging.getLogger(__name__)
 class DiscoveryConfig:
     """
     Configuración del proceso de discovery.
-    Personaliza estos valores según tu nicho y ubicación.
+    Puede cargarse desde YAML, JSON, CLI o modo interactivo.
     """
     # === HASHTAGS A BUSCAR ===
-    # Hashtags relevantes para tu nicho (sin #)
-    hashtags: List[str] = field(default_factory=lambda: [
-        # Ejemplos para Almería - PERSONALIZA SEGÚN TU NICHO
-        "inmobiliariaalmeria",
-        "casasalmeria",
-        "pisosalmeria",
-        "alquileralmeria",
-        "ventacasasalmeria",
-        # Añade más según necesites
-    ])
+    hashtags: List[str] = field(default_factory=list)
 
     # === KEYWORDS DE UBICACIÓN (para filtrar bio) ===
-    location_keywords: List[str] = field(default_factory=lambda: [
-        "almería", "almeria", "andalucía", "andalucia",
-        "roquetas", "aguadulce", "níjar", "nijar",
-        "ejido", "mojacar", "cabo de gata",
-        # Añade pueblos/zonas de tu área
-    ])
+    location_keywords: List[str] = field(default_factory=list)
 
     # === KEYWORDS DE NICHO (para filtrar bio) ===
-    niche_keywords: List[str] = field(default_factory=lambda: [
-        # Ejemplo para inmobiliarias - CAMBIA SEGÚN TU NICHO
-        "inmobiliaria", "inmuebles", "casas", "pisos",
-        "alquiler", "venta", "propiedades", "real estate",
-        "vivienda", "hogar", "apartamentos",
-        # Para otros nichos:
-        # Floristerías: "floristería", "flores", "ramos", "bodas"
-        # Restaurantes: "restaurante", "gastronomía", "cocina"
-        # Gimnasios: "gimnasio", "fitness", "entrenamiento"
-    ])
+    niche_keywords: List[str] = field(default_factory=list)
 
     # === LÍMITES DE SCRAPING ===
-    max_posts_per_hashtag: int = 150  # Posts a extraer por hashtag (100-200 recomendado)
-    max_profiles_output: int = 150    # Máximo perfiles en output final
+    max_posts_per_hashtag: int = 150
+    max_profiles_output: int = 150
 
     # === FILTROS DE TAMAÑO DE CUENTA ===
-    min_followers: int = 100          # Mínimo followers (evitar cuentas vacías)
-    max_followers: int = 50000        # Máximo followers (evitar influencers)
+    min_followers: int = 100
+    max_followers: int = 50000
 
     # === ENRIQUECIMIENTO DE PERFILES ===
-    enrich_profiles: bool = True      # Obtener datos adicionales de cada perfil
-    enrich_batch_size: int = 10       # Perfiles a enriquecer por batch
+    enrich_profiles: bool = True
+    enrich_batch_size: int = 10
 
     # === RATE LIMITING ===
-    delay_between_requests: float = 2.0   # Segundos entre requests
-    max_retries: int = 3                   # Reintentos por request
-    retry_delay: float = 5.0               # Segundos entre reintentos
+    delay_between_requests: float = 2.0
+    max_retries: int = 3
+    retry_delay: float = 5.0
 
     # === OUTPUT ===
     output_dir: str = "./discovery_output"
     output_prefix: str = "instagram_discovery"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def save_to_yaml(self, path: str) -> None:
+        """Guarda la configuración a un archivo YAML."""
+        try:
+            import yaml
+            with open(path, 'w', encoding='utf-8') as f:
+                yaml.dump(self.to_dict(), f, allow_unicode=True, default_flow_style=False)
+            logger.info(f"Configuración guardada en: {path}")
+        except ImportError:
+            # Fallback a JSON si no hay PyYAML
+            json_path = path.replace('.yaml', '.json').replace('.yml', '.json')
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+            logger.info(f"Configuración guardada en: {json_path}")
+
+    @classmethod
+    def from_yaml(cls, path: str) -> 'DiscoveryConfig':
+        """Carga configuración desde archivo YAML o JSON."""
+        with open(path, 'r', encoding='utf-8') as f:
+            if path.endswith('.json'):
+                data = json.load(f)
+            else:
+                try:
+                    import yaml
+                    data = yaml.safe_load(f)
+                except ImportError:
+                    raise ImportError(
+                        "PyYAML no está instalado. Instálalo con: pip install pyyaml\n"
+                        "O usa un archivo .json en su lugar."
+                    )
+        return cls(**data)
 
 
 @dataclass
@@ -143,6 +151,163 @@ class DiscoveredProfile:
 
 
 # =============================================================================
+# MODO INTERACTIVO
+# =============================================================================
+
+def run_interactive_setup() -> DiscoveryConfig:
+    """
+    Modo interactivo: pregunta al usuario qué quiere buscar.
+    """
+    print("\n" + "=" * 60)
+    print("CONFIGURACIÓN INTERACTIVA")
+    print("=" * 60)
+    print("Responde las siguientes preguntas para configurar la búsqueda.")
+    print("Puedes dejar en blanco para usar valores por defecto.\n")
+
+    # === HASHTAGS ===
+    print("-" * 40)
+    print("1. HASHTAGS A BUSCAR")
+    print("-" * 40)
+    print("Introduce los hashtags que quieres buscar (sin #).")
+    print("Ejemplos: inmobiliariaalmeria, casasalmeria, pisosalmeria")
+    print("Separa múltiples hashtags con comas.\n")
+
+    hashtags_input = input("Hashtags: ").strip()
+    hashtags = [h.strip().lower().replace("#", "") for h in hashtags_input.split(",") if h.strip()]
+
+    if not hashtags:
+        print("No has introducido hashtags. Usando ejemplos por defecto.")
+        hashtags = ["inmobiliariaalmeria", "casasalmeria"]
+
+    # === UBICACIÓN ===
+    print("\n" + "-" * 40)
+    print("2. PALABRAS CLAVE DE UBICACIÓN")
+    print("-" * 40)
+    print("Palabras que deben aparecer en la bio para considerar el perfil local.")
+    print("Ejemplos: almería, roquetas, aguadulce, andalucía")
+    print("Separa múltiples palabras con comas.\n")
+
+    location_input = input("Ubicación: ").strip()
+    location_keywords = [l.strip().lower() for l in location_input.split(",") if l.strip()]
+
+    if not location_keywords:
+        print("No has introducido ubicación. Usando 'almería' por defecto.")
+        location_keywords = ["almería", "almeria"]
+
+    # === NICHO ===
+    print("\n" + "-" * 40)
+    print("3. PALABRAS CLAVE DEL NICHO")
+    print("-" * 40)
+    print("Palabras que identifican el tipo de negocio.")
+    print("Ejemplos para inmobiliarias: inmobiliaria, casas, pisos, alquiler, venta")
+    print("Ejemplos para floristerías: floristería, flores, ramos, bodas")
+    print("Separa múltiples palabras con comas.\n")
+
+    niche_input = input("Nicho: ").strip()
+    niche_keywords = [n.strip().lower() for n in niche_input.split(",") if n.strip()]
+
+    if not niche_keywords:
+        print("No has introducido nicho. Usando 'inmobiliaria, casas' por defecto.")
+        niche_keywords = ["inmobiliaria", "casas", "pisos"]
+
+    # === FILTROS DE FOLLOWERS ===
+    print("\n" + "-" * 40)
+    print("4. RANGO DE SEGUIDORES")
+    print("-" * 40)
+    print("Define el rango de seguidores para filtrar.")
+    print("Por defecto: mínimo 100, máximo 50000\n")
+
+    try:
+        min_input = input("Mínimo seguidores [100]: ").strip()
+        min_followers = int(min_input) if min_input else 100
+    except ValueError:
+        min_followers = 100
+
+    try:
+        max_input = input("Máximo seguidores [50000]: ").strip()
+        max_followers = int(max_input) if max_input else 50000
+    except ValueError:
+        max_followers = 50000
+
+    # === LÍMITES ===
+    print("\n" + "-" * 40)
+    print("5. LÍMITES DE BÚSQUEDA")
+    print("-" * 40)
+
+    try:
+        posts_input = input("Posts por hashtag [150]: ").strip()
+        max_posts = int(posts_input) if posts_input else 150
+    except ValueError:
+        max_posts = 150
+
+    try:
+        profiles_input = input("Máximo perfiles en output [150]: ").strip()
+        max_profiles = int(profiles_input) if profiles_input else 150
+    except ValueError:
+        max_profiles = 150
+
+    # === ENRIQUECIMIENTO ===
+    print("\n" + "-" * 40)
+    print("6. ENRIQUECIMIENTO DE PERFILES")
+    print("-" * 40)
+    print("¿Quieres obtener datos adicionales de cada perfil (bio, followers exactos)?")
+    print("Esto consume más créditos de Apify pero da mejores resultados.\n")
+
+    enrich_input = input("Enriquecer perfiles? [S/n]: ").strip().lower()
+    enrich_profiles = enrich_input not in ['n', 'no']
+
+    # === CREAR CONFIG ===
+    config = DiscoveryConfig(
+        hashtags=hashtags,
+        location_keywords=location_keywords,
+        niche_keywords=niche_keywords,
+        min_followers=min_followers,
+        max_followers=max_followers,
+        max_posts_per_hashtag=max_posts,
+        max_profiles_output=max_profiles,
+        enrich_profiles=enrich_profiles,
+    )
+
+    # === GUARDAR CONFIG ===
+    print("\n" + "-" * 40)
+    print("7. GUARDAR CONFIGURACIÓN")
+    print("-" * 40)
+    print("¿Quieres guardar esta configuración para reutilizarla?\n")
+
+    save_input = input("Guardar config? [s/N]: ").strip().lower()
+    if save_input in ['s', 'si', 'sí', 'yes', 'y']:
+        config_name = input("Nombre del archivo [mi_busqueda.yaml]: ").strip()
+        if not config_name:
+            config_name = "mi_busqueda.yaml"
+        if not config_name.endswith(('.yaml', '.yml', '.json')):
+            config_name += ".yaml"
+
+        Path("./discovery_configs").mkdir(exist_ok=True)
+        config_path = f"./discovery_configs/{config_name}"
+        config.save_to_yaml(config_path)
+
+    # === RESUMEN ===
+    print("\n" + "=" * 60)
+    print("RESUMEN DE CONFIGURACIÓN")
+    print("=" * 60)
+    print(f"Hashtags: {', '.join(hashtags)}")
+    print(f"Ubicación: {', '.join(location_keywords)}")
+    print(f"Nicho: {', '.join(niche_keywords)}")
+    print(f"Seguidores: {min_followers} - {max_followers}")
+    print(f"Posts/hashtag: {max_posts}")
+    print(f"Max perfiles: {max_profiles}")
+    print(f"Enriquecer: {'Sí' if enrich_profiles else 'No'}")
+    print("=" * 60)
+
+    confirm = input("\n¿Continuar con esta configuración? [S/n]: ").strip().lower()
+    if confirm in ['n', 'no']:
+        print("Búsqueda cancelada.")
+        sys.exit(0)
+
+    return config
+
+
+# =============================================================================
 # CLIENTE APIFY
 # =============================================================================
 
@@ -151,7 +316,6 @@ class ApifyDiscoveryClient:
     Cliente para interactuar con Apify API para discovery de perfiles.
     """
 
-    # Actores de Apify para Instagram
     HASHTAG_SCRAPER = "apify/instagram-hashtag-scraper"
     PROFILE_SCRAPER = "apify/instagram-profile-scraper"
 
@@ -161,7 +325,7 @@ class ApifyDiscoveryClient:
         if not self.api_token:
             raise ValueError(
                 "APIFY_API_TOKEN no configurado. "
-                "Configúralo como variable de entorno o pásalo al constructor."
+                "Configúralo con: export APIFY_API_TOKEN='tu_token_aquí'"
             )
 
         try:
@@ -181,41 +345,22 @@ class ApifyDiscoveryClient:
         retries: int = 3,
         retry_delay: float = 5.0
     ) -> List[Dict[str, Any]]:
-        """
-        Extrae posts recientes de un hashtag específico.
-
-        Args:
-            hashtag: Hashtag a buscar (sin #)
-            max_posts: Número máximo de posts a extraer
-            retries: Número de reintentos en caso de error
-            retry_delay: Segundos entre reintentos
-
-        Returns:
-            Lista de posts con información del owner
-        """
+        """Extrae posts recientes de un hashtag específico."""
         logger.info(f"Buscando posts en #{hashtag} (máx: {max_posts})")
 
         run_input = {
             "hashtags": [hashtag],
             "resultsLimit": max_posts,
             "resultsType": "posts",
-            # Solo necesitamos info básica del post y owner
-            "extendOutputFunction": """
-                async ({ data, item, page, request, customData }) => {
-                    return item;
-                }
-            """,
         }
 
         for attempt in range(1, retries + 1):
             try:
-                # Ejecutar el actor
                 run = self.client.actor(self.HASHTAG_SCRAPER).call(
                     run_input=run_input,
-                    timeout_secs=300,  # 5 minutos máximo
+                    timeout_secs=300,
                 )
 
-                # Obtener resultados
                 items = list(
                     self.client.dataset(run["defaultDatasetId"]).iterate_items()
                 )
@@ -224,9 +369,7 @@ class ApifyDiscoveryClient:
                 return items
 
             except Exception as e:
-                logger.warning(
-                    f"#{hashtag}: Error en intento {attempt}/{retries}: {e}"
-                )
+                logger.warning(f"#{hashtag}: Error en intento {attempt}/{retries}: {e}")
                 if attempt < retries:
                     logger.info(f"Reintentando en {retry_delay}s...")
                     time.sleep(retry_delay)
@@ -242,23 +385,12 @@ class ApifyDiscoveryClient:
         retries: int = 3,
         retry_delay: float = 5.0
     ) -> List[Dict[str, Any]]:
-        """
-        Obtiene detalles de perfiles específicos.
-
-        Args:
-            usernames: Lista de usernames a consultar
-            retries: Número de reintentos
-            retry_delay: Segundos entre reintentos
-
-        Returns:
-            Lista de perfiles con información detallada
-        """
+        """Obtiene detalles de perfiles específicos."""
         if not usernames:
             return []
 
         logger.info(f"Obteniendo detalles de {len(usernames)} perfiles")
 
-        # Construir URLs de perfiles
         profile_urls = [
             f"https://www.instagram.com/{username}/"
             for username in usernames
@@ -285,9 +417,7 @@ class ApifyDiscoveryClient:
                 return items
 
             except Exception as e:
-                logger.warning(
-                    f"Profile details: Error en intento {attempt}/{retries}: {e}"
-                )
+                logger.warning(f"Profile details: Error en intento {attempt}/{retries}: {e}")
                 if attempt < retries:
                     time.sleep(retry_delay)
                 else:
@@ -302,9 +432,7 @@ class ApifyDiscoveryClient:
 # =============================================================================
 
 class InstagramDiscoveryEngine:
-    """
-    Motor principal para descubrir perfiles relevantes en Instagram.
-    """
+    """Motor principal para descubrir perfiles relevantes en Instagram."""
 
     def __init__(self, config: DiscoveryConfig):
         self.config = config
@@ -312,22 +440,17 @@ class InstagramDiscoveryEngine:
         self.discovered_usernames: Set[str] = set()
         self.profiles: Dict[str, DiscoveredProfile] = {}
 
-        # Crear directorio de output
         Path(config.output_dir).mkdir(parents=True, exist_ok=True)
 
     def run_discovery(self) -> List[DiscoveredProfile]:
-        """
-        Ejecuta el proceso completo de discovery.
-
-        Returns:
-            Lista de perfiles descubiertos y filtrados
-        """
+        """Ejecuta el proceso completo de discovery."""
         logger.info("=" * 60)
         logger.info("INICIANDO DISCOVERY DE PERFILES INSTAGRAM")
         logger.info("=" * 60)
-        logger.info(f"Hashtags a buscar: {len(self.config.hashtags)}")
-        logger.info(f"Max posts/hashtag: {self.config.max_posts_per_hashtag}")
-        logger.info(f"Filtro followers: {self.config.min_followers}-{self.config.max_followers}")
+        logger.info(f"Hashtags: {', '.join(self.config.hashtags)}")
+        logger.info(f"Ubicación: {', '.join(self.config.location_keywords)}")
+        logger.info(f"Nicho: {', '.join(self.config.niche_keywords)}")
+        logger.info(f"Followers: {self.config.min_followers}-{self.config.max_followers}")
         logger.info("=" * 60)
 
         # Paso 1: Extraer posts de todos los hashtags
@@ -363,9 +486,7 @@ class InstagramDiscoveryEngine:
         return relevant_profiles
 
     def _scrape_all_hashtags(self) -> List[Dict[str, Any]]:
-        """
-        Extrae posts de todos los hashtags configurados.
-        """
+        """Extrae posts de todos los hashtags configurados."""
         all_posts = []
 
         for i, hashtag in enumerate(self.config.hashtags, 1):
@@ -378,13 +499,11 @@ class InstagramDiscoveryEngine:
                 retry_delay=self.config.retry_delay,
             )
 
-            # Marcar de qué hashtag viene cada post
             for post in posts:
                 post["_discovered_via_hashtag"] = hashtag
 
             all_posts.extend(posts)
 
-            # Rate limiting entre hashtags
             if i < len(self.config.hashtags):
                 logger.info(f"Esperando {self.config.delay_between_requests}s...")
                 time.sleep(self.config.delay_between_requests)
@@ -393,11 +512,8 @@ class InstagramDiscoveryEngine:
         return all_posts
 
     def _extract_unique_usernames(self, posts: List[Dict[str, Any]]) -> None:
-        """
-        Extrae usernames únicos de los posts y crea perfiles básicos.
-        """
+        """Extrae usernames únicos de los posts."""
         for post in posts:
-            # El username puede estar en diferentes campos según el actor
             username = (
                 post.get("ownerUsername") or
                 post.get("username") or
@@ -407,16 +523,13 @@ class InstagramDiscoveryEngine:
             if not username:
                 continue
 
-            # Normalizar username
             username = username.lower().strip()
 
-            # Evitar duplicados
             if username in self.discovered_usernames:
                 continue
 
             self.discovered_usernames.add(username)
 
-            # Crear perfil básico con datos disponibles del post
             profile = DiscoveredProfile(
                 username=username,
                 full_name=post.get("ownerFullName", ""),
@@ -430,9 +543,7 @@ class InstagramDiscoveryEngine:
             self.profiles[username] = profile
 
     def _enrich_profiles(self) -> None:
-        """
-        Enriquece los perfiles con datos adicionales del profile scraper.
-        """
+        """Enriquece los perfiles con datos adicionales."""
         usernames = list(self.profiles.keys())
         total_batches = (len(usernames) + self.config.enrich_batch_size - 1) // self.config.enrich_batch_size
 
@@ -452,7 +563,6 @@ class InstagramDiscoveryEngine:
                     retry_delay=self.config.retry_delay,
                 )
 
-                # Actualizar perfiles con datos enriquecidos
                 for detail in profile_details:
                     username = detail.get("username", "").lower().strip()
                     if username in self.profiles:
@@ -461,18 +571,11 @@ class InstagramDiscoveryEngine:
             except Exception as e:
                 logger.warning(f"Error enriqueciendo batch {batch_num + 1}: {e}")
 
-            # Rate limiting entre batches
             if batch_num < total_batches - 1:
                 time.sleep(self.config.delay_between_requests)
 
-    def _update_profile_from_details(
-        self,
-        username: str,
-        details: Dict[str, Any]
-    ) -> None:
-        """
-        Actualiza un perfil con datos del profile scraper.
-        """
+    def _update_profile_from_details(self, username: str, details: Dict[str, Any]) -> None:
+        """Actualiza un perfil con datos del profile scraper."""
         profile = self.profiles[username]
 
         profile.full_name = details.get("fullName", profile.full_name)
@@ -486,65 +589,47 @@ class InstagramDiscoveryEngine:
         profile.is_verified = details.get("verified", profile.is_verified)
 
     def _filter_and_score_profiles(self) -> List[DiscoveredProfile]:
-        """
-        Filtra perfiles por criterios y calcula puntuación de relevancia.
-        """
+        """Filtra perfiles por criterios y calcula puntuación de relevancia."""
         logger.info("Filtrando y puntuando perfiles...")
 
         relevant_profiles = []
 
         for username, profile in self.profiles.items():
-            # === FILTRO 1: Rango de followers ===
+            # Filtro de followers
             if profile.followers < self.config.min_followers:
-                logger.debug(f"@{username}: Descartado (muy pocos followers: {profile.followers})")
                 continue
-
             if profile.followers > self.config.max_followers:
-                logger.debug(f"@{username}: Descartado (demasiados followers: {profile.followers})")
                 continue
 
-            # === CALCULAR RELEVANCIA ===
+            # Calcular relevancia
             relevance_score, location_detected, niche_detected = self._calculate_relevance(profile)
 
             profile.relevance_score = relevance_score
             profile.location_detected = location_detected
             profile.niche_detected = niche_detected
 
-            # === FILTRO 2: Relevancia mínima ===
-            # Requerimos al menos ubicación O nicho detectado
+            # Filtro de relevancia mínima (al menos ubicación O nicho detectado)
             if not location_detected and not niche_detected:
-                logger.debug(f"@{username}: Descartado (sin indicadores de relevancia)")
                 continue
 
             relevant_profiles.append(profile)
 
-        # Ordenar por relevancia descendente
+        # Ordenar por relevancia
         relevant_profiles.sort(key=lambda p: p.relevance_score, reverse=True)
 
-        # Limitar cantidad de output
+        # Limitar output
         if len(relevant_profiles) > self.config.max_profiles_output:
             relevant_profiles = relevant_profiles[:self.config.max_profiles_output]
-            logger.info(f"Limitado a {self.config.max_profiles_output} perfiles top")
 
-        logger.info(f"Perfiles relevantes después de filtrado: {len(relevant_profiles)}")
-
+        logger.info(f"Perfiles relevantes: {len(relevant_profiles)}")
         return relevant_profiles
 
-    def _calculate_relevance(
-        self,
-        profile: DiscoveredProfile
-    ) -> tuple[float, str, str]:
-        """
-        Calcula puntuación de relevancia basada en bio, categoría, etc.
-
-        Returns:
-            (score, location_detected, niche_detected)
-        """
+    def _calculate_relevance(self, profile: DiscoveredProfile) -> tuple[float, str, str]:
+        """Calcula puntuación de relevancia."""
         score = 0.0
         location_detected = ""
         niche_detected = ""
 
-        # Texto a analizar (bio + nombre + categoría)
         text_to_analyze = " ".join([
             profile.bio.lower(),
             profile.full_name.lower(),
@@ -552,14 +637,14 @@ class InstagramDiscoveryEngine:
             profile.username.lower(),
         ])
 
-        # === PUNTOS POR UBICACIÓN ===
+        # Puntos por ubicación
         for keyword in self.config.location_keywords:
             if keyword.lower() in text_to_analyze:
-                score += 30  # Ubicación vale mucho
+                score += 30
                 if not location_detected:
                     location_detected = keyword
 
-        # === PUNTOS POR NICHO ===
+        # Puntos por nicho
         niche_matches = []
         for keyword in self.config.niche_keywords:
             if keyword.lower() in text_to_analyze:
@@ -567,38 +652,33 @@ class InstagramDiscoveryEngine:
                 niche_matches.append(keyword)
 
         if niche_matches:
-            niche_detected = ", ".join(niche_matches[:3])  # Max 3 keywords
+            niche_detected = ", ".join(niche_matches[:3])
 
-        # === BONUS POR CUENTA DE NEGOCIO ===
+        # Bonus por cuenta de negocio
         if profile.is_business:
             score += 15
 
-        # === BONUS POR CATEGORÍA RELEVANTE ===
+        # Bonus por categoría
         if profile.category:
             score += 10
 
-        # === PENALIZACIÓN POR CUENTA VERIFICADA (probablemente grande) ===
+        # Penalización por cuenta verificada (probablemente grande)
         if profile.is_verified:
             score -= 20
 
-        # === BONUS POR RANGO ÓPTIMO DE FOLLOWERS ===
-        # Preferimos cuentas entre 1k-15k (competidores reales, no micro)
+        # Bonus por rango óptimo de followers
         if 1000 <= profile.followers <= 15000:
             score += 10
 
-        # Normalizar score a 0-100
         score = min(max(score, 0), 100)
-
         return score, location_detected, niche_detected
 
     def _save_results(self, profiles: List[DiscoveredProfile]) -> None:
-        """
-        Guarda resultados en CSV y JSON.
-        """
+        """Guarda resultados en CSV y JSON."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = f"{self.config.output_prefix}_{timestamp}"
 
-        # === GUARDAR CSV ===
+        # CSV
         csv_path = Path(self.config.output_dir) / f"{base_name}.csv"
 
         if profiles:
@@ -617,19 +697,14 @@ class InstagramDiscoveryEngine:
 
             logger.info(f"CSV guardado: {csv_path}")
 
-        # === GUARDAR JSON ===
+        # JSON
         json_path = Path(self.config.output_dir) / f"{base_name}.json"
 
         output_data = {
             "metadata": {
                 "generated_at": datetime.now().isoformat(),
                 "total_profiles": len(profiles),
-                "config": {
-                    "hashtags": self.config.hashtags,
-                    "location_keywords": self.config.location_keywords,
-                    "niche_keywords": self.config.niche_keywords,
-                    "followers_range": f"{self.config.min_followers}-{self.config.max_followers}",
-                },
+                "config": self.config.to_dict(),
             },
             "profiles": [p.to_dict() for p in profiles],
         }
@@ -639,7 +714,7 @@ class InstagramDiscoveryEngine:
 
         logger.info(f"JSON guardado: {json_path}")
 
-        # === RESUMEN EN CONSOLA ===
+        # Resumen en consola
         print("\n" + "=" * 60)
         print("RESUMEN DE DISCOVERY")
         print("=" * 60)
@@ -650,139 +725,153 @@ class InstagramDiscoveryEngine:
         print("=" * 60)
 
         if profiles:
-            print("\nTOP 10 PERFILES MÁS RELEVANTES:")
+            print("\nTOP 10 PERFILES MAS RELEVANTES:")
             print("-" * 60)
             for i, p in enumerate(profiles[:10], 1):
                 print(f"{i:2}. @{p.username:<25} | {p.followers:>6} seg | Score: {p.relevance_score:.0f}")
                 if p.location_detected:
-                    print(f"    📍 {p.location_detected}")
+                    print(f"    Ubicacion: {p.location_detected}")
                 if p.niche_detected:
-                    print(f"    🏷️  {p.niche_detected}")
+                    print(f"    Nicho: {p.niche_detected}")
             print("-" * 60)
 
 
 # =============================================================================
-# CONFIGURACIONES PREDEFINIDAS POR NICHO
+# CLI PARSER
 # =============================================================================
 
-def get_config_inmobiliaria_almeria() -> DiscoveryConfig:
-    """Configuración para inmobiliarias en Almería."""
-    return DiscoveryConfig(
-        hashtags=[
-            "inmobiliariaalmeria",
-            "casasalmeria",
-            "pisosalmeria",
-            "alquileralmeria",
-            "ventaalmeria",
-            "propiedadesalmeria",
-            "inmobiliariaandalucia",
-            "almeriavivienda",
-            "apartamentosalmeria",
-            "hogaralmeria",
-        ],
-        location_keywords=[
-            "almería", "almeria", "andalucía", "andalucia",
-            "roquetas de mar", "roquetas", "aguadulce",
-            "ejido", "el ejido", "níjar", "nijar", "mojácar", "mojacar",
-            "cabo de gata", "garrucha", "vera", "carboneras",
-            "huércal", "huercal", "adra", "vícar", "vicar",
-        ],
-        niche_keywords=[
-            "inmobiliaria", "inmuebles", "real estate", "casas", "pisos",
-            "alquiler", "venta", "propiedades", "vivienda", "hogar",
-            "apartamentos", "chalets", "áticos", "locales", "oficinas",
-            "terrenos", "fincas", "promoción", "obra nueva",
-            "inversión inmobiliaria", "gestor", "api", "agente inmobiliario",
-        ],
-        max_posts_per_hashtag=150,
-        max_profiles_output=150,
-        min_followers=100,
-        max_followers=50000,
+def parse_arguments() -> argparse.Namespace:
+    """Parsea argumentos de línea de comandos."""
+    parser = argparse.ArgumentParser(
+        description="Descubre perfiles de Instagram relevantes para un nicho local.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ejemplos de uso:
+  # Modo interactivo (pregunta qué buscar)
+  python apify_instagram_discovery.py
+
+  # Con archivo de configuración
+  python apify_instagram_discovery.py --config mi_busqueda.yaml
+
+  # Con argumentos directos
+  python apify_instagram_discovery.py \\
+      --hashtags "inmobiliariaalmeria,casasalmeria" \\
+      --location "almería,roquetas" \\
+      --niche "inmobiliaria,casas,pisos"
+
+  # Guardar configuración para reutilizar
+  python apify_instagram_discovery.py --save-config floristerias.yaml
+        """
     )
 
-
-def get_config_floristeria_almeria() -> DiscoveryConfig:
-    """Configuración para floristerías en Almería."""
-    return DiscoveryConfig(
-        hashtags=[
-            "floristeriaalmeria",
-            "floresalmeria",
-            "ramosalmeria",
-            "bodaalmeria",
-            "eventosalmeria",
-            "floristeriasandalucia",
-        ],
-        location_keywords=[
-            "almería", "almeria", "andalucía", "andalucia",
-            "roquetas", "aguadulce", "ejido", "níjar",
-        ],
-        niche_keywords=[
-            "floristería", "floristeria", "flores", "ramos",
-            "bodas", "eventos", "decoración floral", "plantas",
-            "arreglos", "coronas", "centros", "envío flores",
-        ],
-        max_posts_per_hashtag=100,
-        max_profiles_output=100,
+    parser.add_argument(
+        '--config', '-c',
+        type=str,
+        help='Archivo de configuración YAML/JSON'
     )
 
-
-def get_config_restaurante_almeria() -> DiscoveryConfig:
-    """Configuración para restaurantes en Almería."""
-    return DiscoveryConfig(
-        hashtags=[
-            "restaurantealmeria",
-            "tapasalmeria",
-            "gastronomiaalmeria",
-            "comeralmeria",
-            "almeriagastronomica",
-            "chiringuitoroqueats",
-        ],
-        location_keywords=[
-            "almería", "almeria", "andalucía", "andalucia",
-            "roquetas", "aguadulce", "cabo de gata", "mojácar",
-        ],
-        niche_keywords=[
-            "restaurante", "tapas", "gastronomía", "cocina",
-            "chef", "comida", "menú", "terraza", "bar",
-            "mariscos", "pescado", "chiringuito",
-        ],
-        max_posts_per_hashtag=120,
-        max_profiles_output=100,
+    parser.add_argument(
+        '--hashtags',
+        type=str,
+        help='Hashtags separados por comas (sin #)'
     )
 
+    parser.add_argument(
+        '--location',
+        type=str,
+        help='Keywords de ubicación separados por comas'
+    )
 
-def get_config_gimnasio_almeria() -> DiscoveryConfig:
-    """Configuración para gimnasios en Almería."""
+    parser.add_argument(
+        '--niche',
+        type=str,
+        help='Keywords de nicho separados por comas'
+    )
+
+    parser.add_argument(
+        '--min-followers',
+        type=int,
+        default=100,
+        help='Mínimo de seguidores (default: 100)'
+    )
+
+    parser.add_argument(
+        '--max-followers',
+        type=int,
+        default=50000,
+        help='Máximo de seguidores (default: 50000)'
+    )
+
+    parser.add_argument(
+        '--max-posts',
+        type=int,
+        default=150,
+        help='Posts a buscar por hashtag (default: 150)'
+    )
+
+    parser.add_argument(
+        '--max-profiles',
+        type=int,
+        default=150,
+        help='Máximo perfiles en output (default: 150)'
+    )
+
+    parser.add_argument(
+        '--no-enrich',
+        action='store_true',
+        help='Desactivar enriquecimiento de perfiles'
+    )
+
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='./discovery_output',
+        help='Directorio de salida (default: ./discovery_output)'
+    )
+
+    parser.add_argument(
+        '--save-config',
+        type=str,
+        help='Guardar configuración en archivo YAML para reutilizar'
+    )
+
+    parser.add_argument(
+        '--interactive', '-i',
+        action='store_true',
+        help='Forzar modo interactivo'
+    )
+
+    return parser.parse_args()
+
+
+def build_config_from_args(args: argparse.Namespace) -> Optional[DiscoveryConfig]:
+    """Construye configuración desde argumentos CLI."""
+    if not args.hashtags:
+        return None
+
+    hashtags = [h.strip().lower().replace("#", "") for h in args.hashtags.split(",")]
+    location = [l.strip().lower() for l in args.location.split(",")] if args.location else []
+    niche = [n.strip().lower() for n in args.niche.split(",")] if args.niche else []
+
     return DiscoveryConfig(
-        hashtags=[
-            "gimnasioalmeria",
-            "fitnessalmeria",
-            "crossfitalmeria",
-            "entrenamientoalmeria",
-            "personaltraineralmeria",
-        ],
-        location_keywords=[
-            "almería", "almeria", "andalucía", "andalucia",
-            "roquetas", "aguadulce", "ejido",
-        ],
-        niche_keywords=[
-            "gimnasio", "gym", "fitness", "crossfit",
-            "entrenamiento", "personal trainer", "musculación",
-            "cardio", "spinning", "pilates", "yoga",
-        ],
-        max_posts_per_hashtag=100,
-        max_profiles_output=80,
+        hashtags=hashtags,
+        location_keywords=location,
+        niche_keywords=niche,
+        min_followers=args.min_followers,
+        max_followers=args.max_followers,
+        max_posts_per_hashtag=args.max_posts,
+        max_profiles_output=args.max_profiles,
+        enrich_profiles=not args.no_enrich,
+        output_dir=args.output_dir,
     )
 
 
 # =============================================================================
-# MAIN - PUNTO DE ENTRADA
+# MAIN
 # =============================================================================
 
 def main():
-    """
-    Punto de entrada principal del script.
-    """
+    """Punto de entrada principal."""
     print("""
     ╔═══════════════════════════════════════════════════════════╗
     ║     APIFY INSTAGRAM DISCOVERY - Perfiles Locales          ║
@@ -790,56 +879,70 @@ def main():
     ╚═══════════════════════════════════════════════════════════╝
     """)
 
-    # Verificar token de API
+    # Verificar token
     if not os.environ.get("APIFY_API_TOKEN"):
-        print("⚠️  ERROR: APIFY_API_TOKEN no está configurado.")
-        print("   Configúralo con: export APIFY_API_TOKEN='tu_token_aquí'")
+        print("ERROR: APIFY_API_TOKEN no está configurado.")
+        print("Configúralo con: export APIFY_API_TOKEN='tu_token_aquí'")
         sys.exit(1)
 
-    # =========================================================================
-    # SELECCIONA TU CONFIGURACIÓN AQUÍ
-    # =========================================================================
-    # Descomenta la línea correspondiente a tu nicho:
+    # Parsear argumentos
+    args = parse_arguments()
 
-    config = get_config_inmobiliaria_almeria()    # 🏠 Inmobiliarias
-    # config = get_config_floristeria_almeria()   # 🌸 Floristerías
-    # config = get_config_restaurante_almeria()   # 🍽️ Restaurantes
-    # config = get_config_gimnasio_almeria()      # 💪 Gimnasios
+    # Determinar fuente de configuración
+    config = None
 
-    # O crea tu propia configuración personalizada:
-    # config = DiscoveryConfig(
-    #     hashtags=["tuhashtag1", "tuhashtag2"],
-    #     location_keywords=["almería", "tu_zona"],
-    #     niche_keywords=["tu_nicho", "keywords"],
-    # )
+    # 1. Archivo de configuración
+    if args.config:
+        if not Path(args.config).exists():
+            print(f"ERROR: Archivo de configuración no encontrado: {args.config}")
+            sys.exit(1)
+        logger.info(f"Cargando configuración desde: {args.config}")
+        config = DiscoveryConfig.from_yaml(args.config)
 
-    # =========================================================================
+    # 2. Argumentos CLI
+    elif args.hashtags:
+        logger.info("Usando configuración desde argumentos CLI")
+        config = build_config_from_args(args)
 
-    # Crear motor y ejecutar discovery
+    # 3. Modo interactivo
+    if config is None or args.interactive:
+        config = run_interactive_setup()
+
+    # Guardar configuración si se solicita
+    if args.save_config:
+        Path("./discovery_configs").mkdir(exist_ok=True)
+        config_path = f"./discovery_configs/{args.save_config}"
+        config.save_to_yaml(config_path)
+        print(f"\nConfiguración guardada en: {config_path}")
+        print("Puedes reutilizarla con: python apify_instagram_discovery.py --config " + config_path)
+
+    # Ejecutar discovery
     try:
         engine = InstagramDiscoveryEngine(config)
         profiles = engine.run_discovery()
 
         if profiles:
-            print(f"\n✅ Discovery completado exitosamente!")
-            print(f"   {len(profiles)} perfiles relevantes encontrados.")
-            print(f"   Revisa los archivos en: {config.output_dir}/")
+            print(f"\nDiscovery completado!")
+            print(f"{len(profiles)} perfiles relevantes encontrados.")
+            print(f"Revisa los archivos en: {config.output_dir}/")
+            print("\nSiguiente paso: Usa la extension Elena Bridge para")
+            print("extraer el contenido de los perfiles que te interesen.")
         else:
-            print("\n⚠️  No se encontraron perfiles relevantes.")
-            print("   Prueba con otros hashtags o ajusta los filtros.")
+            print("\nNo se encontraron perfiles relevantes.")
+            print("Prueba con otros hashtags o ajusta los filtros.")
 
     except ValueError as e:
-        print(f"\n❌ Error de configuración: {e}")
+        print(f"\nError de configuración: {e}")
         sys.exit(1)
     except ImportError as e:
-        print(f"\n❌ Dependencia faltante: {e}")
+        print(f"\nDependencia faltante: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\n\n⚠️  Proceso interrumpido por el usuario.")
+        print("\n\nProceso interrumpido por el usuario.")
         sys.exit(0)
     except Exception as e:
-        logger.exception("Error inesperado durante el discovery")
-        print(f"\n❌ Error inesperado: {e}")
+        logger.exception("Error inesperado")
+        print(f"\nError inesperado: {e}")
         sys.exit(1)
 
 
