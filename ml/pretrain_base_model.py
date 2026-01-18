@@ -3,25 +3,40 @@
 Base Model Pretraining Script for Cold Start Mitigation
 =========================================================
 
-This script trains a robust base XGBoost model using a large synthetic dataset
-that simulates realistic Instagram engagement patterns across multiple niches.
+This script trains a robust base XGBoost model using either:
+1. A real dataset from Kaggle (recommended if available)
+2. Synthetic data simulating realistic Instagram engagement patterns
 
 The base model serves as a foundation for fine-tuning on niche-specific data,
 solving the cold start problem when a new niche has < 300 samples.
 
+DATA SOURCES:
+=============
+1. Kaggle Datasets (recommended):
+   - Instagram Reach: kaggle.com/datasets/rxsraghavagrawal/instagram-reach
+   - Instagram Analytics: kaggle.com/datasets/kundanbedmutha/instagram-analytics-dataset
+   - Social Media Engagement: kaggle.com/datasets/purnisharma/social-media-engagement-metrics
+
+2. Synthetic Data (fallback):
+   - 10,000 samples with realistic feature distributions
+   - Target: engagement_rate following log-normal distribution
+
 APPROACH:
 =========
-1. Generate 10,000 synthetic samples with realistic feature distributions
-   - Features: emojis_count, hashtags, caption_length, hour_of_day, etc.
-   - Target: engagement_rate following log-normal distribution (realistic for social media)
-
-2. Train XGBoostRegressor with same hyperparameters as production model
-
-3. Save as /models/base_xgboost.pkl for use in fine-tuning
+1. Load data from CSV (Kaggle) or generate synthetic samples
+2. Apply feature engineering to extract missing features from captions
+3. Train XGBoostRegressor with same hyperparameters as production model
+4. Save as /models/base_xgboost.pkl for use in fine-tuning
 
 Usage:
-    python ml/pretrain_base_model.py
-    python ml/pretrain_base_model.py --samples 20000 --output models/base_xgboost.pkl
+    # With Kaggle data (recommended)
+    python ml/pretrain_base_model.py --data-file data/instagram_reach.csv
+
+    # With synthetic data (fallback)
+    python ml/pretrain_base_model.py --synthetic --samples 10000
+
+    # Mix: Kaggle + synthetic augmentation
+    python ml/pretrain_base_model.py --data-file data/kaggle.csv --augment 5000
 
 Author: BrandPulse AI
 """
@@ -91,6 +106,274 @@ BUSINESS_TYPES = [
 ]
 
 CONTENT_FORMATS = ["reel", "carousel", "static"]
+
+# Regex patterns for feature extraction from captions
+import re
+
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F680-\U0001F6FF"  # transport & map symbols
+    "\U0001F1E0-\U0001F1FF"  # flags
+    "\U00002702-\U000027B0"
+    "\U000024C2-\U0001F251"
+    "]+",
+    flags=re.UNICODE
+)
+
+QUESTION_PATTERN = re.compile(r'\?|¿|cuál|qué|cómo|por qué|quién|dónde|cuándo|what|how|why|who|where|when', re.IGNORECASE)
+
+STRONG_CTA_KEYWORDS = ["comenta", "guarda", "dm", "visita", "taggea", "etiqueta", "escríbeme",
+                       "comment", "save", "tag", "follow", "share", "click", "link"]
+
+TRIGGER_PATTERNS = {
+    "question": r"\?|¿|cuál|qué|cómo|what|how|why",
+    "urgency": r"ahora|hoy|último|limitado|exclusivo|now|today|last|limited",
+    "social_proof": r"clientes|testimonios|opiniones|reviews|people|customers",
+    "value": r"gratis|regalo|descuento|oferta|free|gift|discount|offer",
+    "curiosity": r"secreto|descubre|sorpresa|increíble|secret|discover|amazing",
+    "action": r"comenta|guarda|comparte|sígueme|comment|save|share|follow",
+    "emotion": r"amor|feliz|alegría|pasión|love|happy|joy|passion",
+    "transformation": r"antes|después|transformación|cambio|before|after|transform",
+}
+
+HOOK_PATTERNS = {
+    "pov": r"pov[:\s]|punto de vista|point of view",
+    "question": r"^[¿?]|^\w+\s*\?",
+    "number": r"^\d+\s+\w+|top\s*\d+|\d+\s*(things|tips|ways|cosas|tips|formas)",
+    "bold_claim": r"nunca|siempre|todo|nadie|el mejor|never|always|best|worst",
+    "story": r"historia|storytime|cuando|un día|story|once",
+    "how_to": r"cómo\s+\w+|aprende\s+a|tutorial|how\s+to|learn",
+    "reveal": r"secreto|te cuento|descubre|reveal|secret|discover",
+}
+
+
+# =============================================================================
+# KAGGLE DATA LOADING AND FEATURE ENGINEERING
+# =============================================================================
+
+def load_kaggle_data(file_path: str) -> pd.DataFrame:
+    """
+    Load data from a Kaggle CSV file and apply feature engineering.
+
+    Supports common Kaggle Instagram datasets:
+    - Instagram Reach (rxsraghavagrawal)
+    - Instagram Analytics (kundanbedmutha)
+    - Social Media Engagement (purnisharma)
+
+    Args:
+        file_path: Path to CSV file
+
+    Returns:
+        DataFrame with engineered features
+    """
+    logger.info(f"Loading Kaggle data from: {file_path}")
+    df = pd.read_csv(file_path)
+    logger.info(f"Loaded {len(df)} rows with columns: {list(df.columns)}")
+
+    # Normalize column names
+    df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_')
+
+    # Calculate engagement rate if not present
+    df = _calculate_engagement_rate(df)
+
+    # Apply feature engineering to extract missing features
+    df = _engineer_features_from_caption(df)
+
+    # Add missing features with defaults/random values
+    df = _add_missing_features(df)
+
+    logger.info(f"After feature engineering: {len(df)} samples with {len(df.columns)} features")
+    return df
+
+
+def _calculate_engagement_rate(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate engagement_rate from available metrics."""
+    if 'engagement_rate' in df.columns:
+        return df
+
+    # Try different column name variations
+    likes = df.get('likes', df.get('like_count', df.get('likescount', pd.Series([0] * len(df)))))
+    comments = df.get('comments', df.get('comment_count', df.get('commentscount', pd.Series([0] * len(df)))))
+    saves = df.get('saves', df.get('save_count', pd.Series([0] * len(df))))
+    shares = df.get('shares', df.get('share_count', pd.Series([0] * len(df))))
+
+    # Weighted engagement score
+    raw_engagement = likes + (comments * 3) + (saves * 5) + (shares * 4)
+
+    # Normalize to 0-100 scale
+    max_eng = raw_engagement.quantile(0.95)
+    df['engagement_rate'] = (raw_engagement / max(max_eng, 1) * 100).clip(0, 100)
+
+    logger.info(f"Calculated engagement_rate: mean={df['engagement_rate'].mean():.2f}")
+    return df
+
+
+def _engineer_features_from_caption(df: pd.DataFrame) -> pd.DataFrame:
+    """Extract features from caption text using regex patterns."""
+
+    # Find caption column
+    caption_col = None
+    for col in ['caption', 'text', 'content', 'post_caption', 'description']:
+        if col in df.columns:
+            caption_col = col
+            break
+
+    if caption_col is None:
+        logger.warning("No caption column found. Using empty strings.")
+        df['caption'] = ''
+        caption_col = 'caption'
+
+    captions = df[caption_col].fillna('').astype(str)
+
+    # Basic text features
+    df['caption_length'] = captions.str.len()
+    df['caption_words'] = captions.str.split().str.len().fillna(0)
+    df['caption_lines'] = captions.str.count('\n') + 1
+
+    words_list = captions.str.split()
+    df['avg_word_length'] = words_list.apply(
+        lambda x: np.mean([len(w) for w in x]) if x and len(x) > 0 else 0
+    )
+
+    # Lexical richness
+    df['lexical_richness'] = words_list.apply(
+        lambda x: len(set(x)) / len(x) if x and len(x) > 0 else 0
+    )
+
+    # Emoji features
+    df['emoji_count'] = captions.apply(lambda x: len(EMOJI_PATTERN.findall(x)))
+    df['emoji_density'] = df['emoji_count'] / df['caption_length'].clip(lower=1) * 100
+
+    # Hashtag features (from caption or separate column)
+    if 'hashtags' in df.columns:
+        hashtag_col = df['hashtags'].fillna('').astype(str)
+        df['hashtag_count'] = hashtag_col.str.count('#') + hashtag_col.str.count(',') + 1
+        df.loc[hashtag_col == '', 'hashtag_count'] = 0
+    else:
+        df['hashtag_count'] = captions.str.count('#')
+
+    df['hashtag_density'] = df['hashtag_count'] / df['caption_words'].clip(lower=1)
+
+    # Mention features
+    df['mention_count'] = captions.str.count('@')
+
+    # Question detection
+    df['has_question'] = captions.apply(lambda x: 1 if QUESTION_PATTERN.search(x) else 0)
+
+    # Strong CTA detection
+    df['has_strong_cta'] = captions.apply(
+        lambda x: 1 if any(kw in x.lower() for kw in STRONG_CTA_KEYWORDS) else 0
+    )
+
+    # Trigger word features
+    for trigger_type, pattern in TRIGGER_PATTERNS.items():
+        df[f'trigger_{trigger_type}'] = captions.apply(
+            lambda x: len(re.findall(pattern, x.lower(), re.IGNORECASE))
+        ).clip(upper=5)
+
+    # Hook detection (from first line)
+    first_lines = captions.str.split('\n').str[0].fillna('')
+    for hook_type, pattern in HOOK_PATTERNS.items():
+        df[f'hook_{hook_type}'] = first_lines.apply(
+            lambda x: 1 if re.search(pattern, x.lower(), re.IGNORECASE) else 0
+        )
+
+    # CTA detection
+    cta_patterns = {
+        "comment": r"comenta|cuéntame|opina|comment|tell",
+        "save": r"guarda|guardar|save",
+        "share": r"comparte|compartir|share|tag",
+        "follow": r"sígueme|sigue|follow",
+        "dm": r"dm|mensaje|escríbeme|message",
+        "link": r"link|enlace|bio|click",
+    }
+    for cta_type, pattern in cta_patterns.items():
+        df[f'cta_{cta_type}'] = captions.apply(
+            lambda x: 1 if re.search(pattern, x.lower(), re.IGNORECASE) else 0
+        )
+    df['cta_count'] = sum(df[f'cta_{t}'] for t in cta_patterns.keys())
+
+    logger.info("Feature engineering from captions complete")
+    return df
+
+
+def _add_missing_features(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
+    """Add missing features with realistic random values."""
+    np.random.seed(seed)
+    n = len(df)
+
+    # Sentiment features (random since we can't compute without NLTK)
+    if 'sentiment_compound' not in df.columns:
+        df['sentiment_compound'] = np.clip(np.random.beta(7, 3, n) * 2 - 0.5, -1, 1)
+        df['sentiment_positive'] = np.clip(np.random.beta(5, 2, n), 0, 1)
+        df['sentiment_negative'] = np.clip(np.random.beta(1, 10, n), 0, 0.3)
+        df['sentiment_neutral'] = np.clip(1 - df['sentiment_positive'] - df['sentiment_negative'], 0, 1)
+
+    # Format features (assume all are static if not specified)
+    if 'is_reel' not in df.columns:
+        # Random format distribution: 55% reel, 25% carousel, 20% static
+        formats = np.random.choice(['reel', 'carousel', 'static'], size=n, p=[0.55, 0.25, 0.20])
+        df['is_reel'] = (formats == 'reel').astype(int)
+        df['is_carousel'] = (formats == 'carousel').astype(int)
+        df['is_static'] = (formats == 'static').astype(int)
+
+    # Video features
+    if 'video_duration' not in df.columns:
+        df['video_duration'] = np.where(
+            df['is_reel'] == 1,
+            np.clip(np.random.lognormal(3.5, 0.4, n), 5, 180),
+            0
+        )
+    df['video_optimal_length'] = ((df['video_duration'] >= 15) & (df['video_duration'] <= 60)).astype(int)
+
+    # Audio features
+    if 'has_audio' not in df.columns:
+        df['has_audio'] = np.where(df['is_reel'] == 1, 1, np.random.choice([0, 1], n, p=[0.7, 0.3]))
+    if 'is_trending_audio' not in df.columns:
+        df['is_trending_audio'] = np.where(df['has_audio'] == 1, np.random.choice([0, 1], n, p=[0.6, 0.4]), 0)
+
+    # Timing features (random if not present)
+    if 'hour_of_day' not in df.columns:
+        hour_probs = np.array([0.01, 0.005, 0.005, 0.005, 0.005, 0.01,
+                               0.02, 0.03, 0.05, 0.07, 0.08, 0.10,
+                               0.09, 0.07, 0.05, 0.04, 0.05, 0.06,
+                               0.08, 0.10, 0.09, 0.06, 0.03, 0.02])
+        hour_probs = hour_probs / hour_probs.sum()
+        df['hour_of_day'] = np.random.choice(range(24), n, p=hour_probs)
+
+    if 'day_of_week' not in df.columns:
+        df['day_of_week'] = np.random.choice(range(7), n)
+
+    df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
+    df['is_prime_time'] = np.isin(df['hour_of_day'], [11, 12, 13, 19, 20, 21]).astype(int)
+
+    # Niche features (random distribution)
+    if 'niche_inmobiliaria' not in df.columns:
+        niches = np.random.choice(
+            BUSINESS_TYPES[:-1],  # Exclude 'otros'
+            size=n,
+            p=[0.15, 0.10, 0.12, 0.12, 0.18, 0.13, 0.10, 0.10]
+        )
+        for niche in BUSINESS_TYPES[:-1]:
+            df[f'niche_{niche}'] = (niches == niche).astype(int)
+
+    # Business type encoded
+    if 'business_type_encoded' not in df.columns:
+        encoder = LabelEncoder()
+        encoder.fit(BUSINESS_TYPES)
+        # Infer from niche flags
+        niche_flags = [f'niche_{n}' for n in BUSINESS_TYPES[:-1]]
+        if all(col in df.columns for col in niche_flags):
+            df['business_type'] = df[niche_flags].idxmax(axis=1).str.replace('niche_', '')
+        else:
+            df['business_type'] = np.random.choice(BUSINESS_TYPES, n)
+        df['business_type_encoded'] = df['business_type'].apply(
+            lambda x: encoder.transform([x])[0] if x in encoder.classes_ else len(BUSINESS_TYPES) - 1
+        )
+
+    return df
 
 
 # =============================================================================
@@ -506,15 +789,36 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Train with default 10k samples
-    python ml/pretrain_base_model.py
+    # With Kaggle data (recommended)
+    python ml/pretrain_base_model.py --data-file data/instagram_reach.csv
 
-    # Train with more samples
-    python ml/pretrain_base_model.py --samples 20000
+    # With synthetic data only
+    python ml/pretrain_base_model.py --synthetic --samples 10000
+
+    # Mix: Kaggle + synthetic augmentation
+    python ml/pretrain_base_model.py --data-file data/kaggle.csv --augment 5000
 
     # Custom output path
-    python ml/pretrain_base_model.py --output models/my_base_model.pkl
+    python ml/pretrain_base_model.py --synthetic --output models/my_base_model.pkl
+
+Kaggle Datasets (download and use with --data-file):
+    - Instagram Reach: kaggle.com/datasets/rxsraghavagrawal/instagram-reach
+    - Instagram Analytics: kaggle.com/datasets/kundanbedmutha/instagram-analytics-dataset
+    - Social Media Engagement: kaggle.com/datasets/purnisharma/social-media-engagement-metrics
         """
+    )
+
+    # Data source (mutually exclusive)
+    data_group = parser.add_mutually_exclusive_group()
+    data_group.add_argument(
+        "--data-file", "-f",
+        type=str,
+        help="Path to Kaggle CSV file with engagement data"
+    )
+    data_group.add_argument(
+        "--synthetic", "-s",
+        action="store_true",
+        help="Use synthetic data only (default if no --data-file)"
     )
 
     parser.add_argument(
@@ -522,6 +826,12 @@ Examples:
         type=int,
         default=10000,
         help="Number of synthetic samples to generate (default: 10000)"
+    )
+    parser.add_argument(
+        "--augment", "-a",
+        type=int,
+        default=0,
+        help="Add N synthetic samples to augment Kaggle data (default: 0)"
     )
     parser.add_argument(
         "--output", "-o",
@@ -551,11 +861,31 @@ Examples:
     print("=" * 70 + "\n")
 
     try:
-        # Generate synthetic data
-        df = generate_synthetic_engagement_data(n_samples=args.samples, seed=args.seed)
+        # Determine data source
+        if args.data_file:
+            # Load Kaggle data
+            print(f"Loading data from: {args.data_file}")
+            df = load_kaggle_data(args.data_file)
+            data_source = f"Kaggle ({args.data_file})"
+
+            # Optionally augment with synthetic data
+            if args.augment > 0:
+                print(f"Augmenting with {args.augment} synthetic samples...")
+                synthetic_df = generate_synthetic_engagement_data(n_samples=args.augment, seed=args.seed)
+                df = pd.concat([df, synthetic_df], ignore_index=True)
+                data_source += f" + {args.augment} synthetic"
+
+        else:
+            # Generate synthetic data
+            print(f"Generating {args.samples} synthetic samples...")
+            df = generate_synthetic_engagement_data(n_samples=args.samples, seed=args.seed)
+            data_source = f"Synthetic ({args.samples} samples)"
+
+        print(f"Total samples: {len(df)}")
 
         # Train base model
         model, metrics = train_base_model(df)
+        metrics["data_source"] = data_source
 
         # Save model
         output_path = Path(args.output) if args.output else None
@@ -565,7 +895,8 @@ Examples:
         print("\n" + "=" * 70)
         print("PRETRAINING COMPLETE")
         print("=" * 70)
-        print(f"Samples generated:  {args.samples}")
+        print(f"Data source:        {data_source}")
+        print(f"Total samples:      {len(df)}")
         print(f"Test RMSE:          {metrics['test_rmse']:.4f}")
         print(f"Test R2:            {metrics['test_r2']:.4f}")
         print(f"CV RMSE:            {metrics['cv_rmse_mean']:.4f} (+/- {metrics['cv_rmse_std']:.4f})")
@@ -581,6 +912,12 @@ Examples:
 
         return 0
 
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {e}")
+        print("\nTo download Kaggle data:")
+        print("  kaggle datasets download -d rxsraghavagrawal/instagram-reach")
+        print("  unzip instagram-reach.zip")
+        return 1
     except Exception as e:
         logger.exception(f"Pretraining failed: {e}")
         return 1
