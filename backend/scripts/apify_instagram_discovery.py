@@ -35,7 +35,7 @@ import csv
 import time
 import logging
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Set
 from pathlib import Path
@@ -75,6 +75,13 @@ class DiscoveryConfig:
     # === FILTROS DE TAMAÑO DE CUENTA ===
     min_followers: int = 100
     max_followers: int = 50000
+
+    # === FILTROS DE ACTIVIDAD ===
+    # Filtrar cuentas inactivas para asegurar que la extensión pueda capturar contenido reciente
+    filter_inactive: bool = True  # Activar filtrado de inactividad
+    max_days_since_last_post: int = 30  # Máximo días desde último post (default: 30)
+    min_posts_last_month: int = 2  # Mínimo posts en el último mes
+    min_activity_score: int = 30  # Score mínimo de actividad (0-100)
 
     # === ENRIQUECIMIENTO DE PERFILES ===
     enrich_profiles: bool = True
@@ -145,6 +152,13 @@ class DiscoveredProfile:
     relevance_score: float = 0.0
     discovered_via_hashtag: str = ""
     discovered_at: str = ""
+
+    # Activity metrics (new - for filtering inactive accounts)
+    last_post_date: str = ""  # ISO format date of most recent post
+    days_since_last_post: int = -1  # -1 means unknown
+    posts_last_month: int = -1  # -1 means unknown
+    activity_score: float = 0.0  # 0-100, higher = more active
+    activity_status: str = "unknown"  # "active", "moderately_active", "inactive", "dormant", "unknown"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -256,6 +270,39 @@ def run_interactive_setup() -> DiscoveryConfig:
     enrich_input = input("Enriquecer perfiles? [S/n]: ").strip().lower()
     enrich_profiles = enrich_input not in ['n', 'no']
 
+    # === FILTROS DE ACTIVIDAD ===
+    print("\n" + "-" * 40)
+    print("7. FILTROS DE ACTIVIDAD")
+    print("-" * 40)
+    print("Filtra cuentas inactivas para asegurar que puedas capturar contenido reciente.")
+    print("Esto es importante para que la extensión encuentre posts que analizar.\n")
+
+    filter_input = input("Filtrar cuentas inactivas? [S/n]: ").strip().lower()
+    filter_inactive = filter_input not in ['n', 'no']
+
+    max_days_inactive = 30
+    min_posts_month = 2
+    min_activity_score = 30
+
+    if filter_inactive:
+        try:
+            days_input = input("Máximo días sin publicar [30]: ").strip()
+            max_days_inactive = int(days_input) if days_input else 30
+        except ValueError:
+            max_days_inactive = 30
+
+        try:
+            posts_input = input("Mínimo posts en último mes [2]: ").strip()
+            min_posts_month = int(posts_input) if posts_input else 2
+        except ValueError:
+            min_posts_month = 2
+
+        try:
+            score_input = input("Score mínimo de actividad 0-100 [30]: ").strip()
+            min_activity_score = int(score_input) if score_input else 30
+        except ValueError:
+            min_activity_score = 30
+
     # === CREAR CONFIG ===
     config = DiscoveryConfig(
         hashtags=hashtags,
@@ -266,6 +313,11 @@ def run_interactive_setup() -> DiscoveryConfig:
         max_posts_per_hashtag=max_posts,
         max_profiles_output=max_profiles,
         enrich_profiles=enrich_profiles,
+        # Activity filters
+        filter_inactive=filter_inactive,
+        max_days_since_last_post=max_days_inactive,
+        min_posts_last_month=min_posts_month,
+        min_activity_score=min_activity_score,
     )
 
     # === GUARDAR CONFIG ===
@@ -297,6 +349,13 @@ def run_interactive_setup() -> DiscoveryConfig:
     print(f"Posts/hashtag: {max_posts}")
     print(f"Max perfiles: {max_profiles}")
     print(f"Enriquecer: {'Sí' if enrich_profiles else 'No'}")
+    print("-" * 60)
+    print("FILTROS DE ACTIVIDAD:")
+    print(f"  Filtrar inactivos: {'Sí' if filter_inactive else 'No'}")
+    if filter_inactive:
+        print(f"  Max días sin post: {max_days_inactive}")
+        print(f"  Min posts/mes: {min_posts_month}")
+        print(f"  Min activity score: {min_activity_score}")
     print("=" * 60)
 
     confirm = input("\n¿Continuar con esta configuración? [S/n]: ").strip().lower()
@@ -512,7 +571,10 @@ class InstagramDiscoveryEngine:
         return all_posts
 
     def _extract_unique_usernames(self, posts: List[Dict[str, Any]]) -> None:
-        """Extrae usernames únicos de los posts."""
+        """Extrae usernames únicos de los posts y guarda fechas de posts."""
+        # También guardamos las fechas de posts por usuario para calcular actividad
+        user_post_dates: Dict[str, List[datetime]] = {}
+
         for post in posts:
             username = (
                 post.get("ownerUsername") or
@@ -524,6 +586,13 @@ class InstagramDiscoveryEngine:
                 continue
 
             username = username.lower().strip()
+
+            # Extraer fecha del post
+            post_date = self._parse_post_date(post)
+            if post_date:
+                if username not in user_post_dates:
+                    user_post_dates[username] = []
+                user_post_dates[username].append(post_date)
 
             if username in self.discovered_usernames:
                 continue
@@ -541,6 +610,136 @@ class InstagramDiscoveryEngine:
             )
 
             self.profiles[username] = profile
+
+        # Calcular métricas de actividad basadas en fechas de posts
+        self._calculate_activity_from_posts(user_post_dates)
+
+    def _parse_post_date(self, post: Dict[str, Any]) -> Optional[datetime]:
+        """Extrae la fecha de publicación de un post."""
+        # Diferentes campos posibles dependiendo del scraper
+        date_fields = ["timestamp", "taken_at", "takenAt", "date", "created_at", "createdAt"]
+
+        for field in date_fields:
+            date_value = post.get(field)
+            if date_value:
+                try:
+                    if isinstance(date_value, (int, float)):
+                        # Unix timestamp
+                        return datetime.fromtimestamp(date_value)
+                    elif isinstance(date_value, str):
+                        # ISO format or similar
+                        for fmt in ["%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
+                                    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"]:
+                            try:
+                                return datetime.strptime(date_value, fmt)
+                            except ValueError:
+                                continue
+                except Exception:
+                    continue
+        return None
+
+    def _calculate_activity_from_posts(self, user_post_dates: Dict[str, List[datetime]]) -> None:
+        """Calcula métricas de actividad basadas en fechas de posts."""
+        now = datetime.now()
+        one_month_ago = now - timedelta(days=30)
+
+        for username, post_dates in user_post_dates.items():
+            if username not in self.profiles:
+                continue
+
+            profile = self.profiles[username]
+
+            if not post_dates:
+                continue
+
+            # Ordenar fechas (más reciente primero)
+            post_dates.sort(reverse=True)
+
+            # Fecha del último post
+            last_post = post_dates[0]
+            profile.last_post_date = last_post.isoformat()
+            profile.days_since_last_post = (now - last_post).days
+
+            # Posts en el último mes
+            profile.posts_last_month = sum(1 for d in post_dates if d >= one_month_ago)
+
+            # Calcular activity score
+            profile.activity_score = self._calculate_activity_score(
+                days_since_last_post=profile.days_since_last_post,
+                posts_last_month=profile.posts_last_month,
+                total_posts=len(post_dates)
+            )
+
+            # Determinar status
+            profile.activity_status = self._determine_activity_status(
+                profile.days_since_last_post,
+                profile.posts_last_month
+            )
+
+    def _calculate_activity_score(
+        self,
+        days_since_last_post: int,
+        posts_last_month: int,
+        total_posts: int
+    ) -> float:
+        """
+        Calcula un score de actividad de 0-100.
+
+        Factores:
+        - Recency (40%): Cuánto tiempo desde el último post
+        - Frequency (40%): Posts en el último mes
+        - Volume (20%): Total de posts observados
+        """
+        # Factor 1: Recency (40% del score)
+        if days_since_last_post <= 3:
+            recency_score = 100
+        elif days_since_last_post <= 7:
+            recency_score = 90
+        elif days_since_last_post <= 14:
+            recency_score = 75
+        elif days_since_last_post <= 30:
+            recency_score = 50
+        elif days_since_last_post <= 60:
+            recency_score = 25
+        elif days_since_last_post <= 90:
+            recency_score = 10
+        else:
+            recency_score = 0
+
+        # Factor 2: Frequency (40% del score)
+        # 8+ posts/mes = 100, 4 = 50, 2 = 25, 1 = 12, 0 = 0
+        frequency_score = min(posts_last_month * 12.5, 100)
+
+        # Factor 3: Volume (20% del score)
+        # Bonus por tener varios posts observados
+        volume_score = min(total_posts * 10, 100)
+
+        # Weighted average
+        total_score = (
+            recency_score * 0.40 +
+            frequency_score * 0.40 +
+            volume_score * 0.20
+        )
+
+        return round(total_score, 1)
+
+    def _determine_activity_status(
+        self,
+        days_since_last_post: int,
+        posts_last_month: int
+    ) -> str:
+        """Determina el status de actividad basado en métricas."""
+        if days_since_last_post < 0:
+            return "unknown"
+
+        if days_since_last_post <= 7 and posts_last_month >= 2:
+            return "active"
+        elif days_since_last_post <= 30 and posts_last_month >= 1:
+            return "moderately_active"
+        elif days_since_last_post <= 90:
+            return "inactive"
+        else:
+            return "dormant"
 
     def _enrich_profiles(self) -> None:
         """Enriquece los perfiles con datos adicionales."""
@@ -593,13 +792,52 @@ class InstagramDiscoveryEngine:
         logger.info("Filtrando y puntuando perfiles...")
 
         relevant_profiles = []
+        filtered_by_activity = 0
+        filtered_by_followers = 0
+        filtered_by_relevance = 0
 
         for username, profile in self.profiles.items():
             # Filtro de followers
             if profile.followers < self.config.min_followers:
+                filtered_by_followers += 1
                 continue
             if profile.followers > self.config.max_followers:
+                filtered_by_followers += 1
                 continue
+
+            # === NUEVO: Filtro de actividad ===
+            if self.config.filter_inactive:
+                # Filtrar si no tenemos datos de actividad y se requiere
+                if profile.days_since_last_post < 0:
+                    # No tenemos datos, pero podemos pasar si enriquecemos después
+                    pass
+                else:
+                    # Filtrar por días desde último post
+                    if profile.days_since_last_post > self.config.max_days_since_last_post:
+                        logger.debug(
+                            f"@{username} filtrado: {profile.days_since_last_post} días sin posts "
+                            f"(máx: {self.config.max_days_since_last_post})"
+                        )
+                        filtered_by_activity += 1
+                        continue
+
+                    # Filtrar por posts en último mes
+                    if profile.posts_last_month >= 0 and profile.posts_last_month < self.config.min_posts_last_month:
+                        logger.debug(
+                            f"@{username} filtrado: {profile.posts_last_month} posts/mes "
+                            f"(mín: {self.config.min_posts_last_month})"
+                        )
+                        filtered_by_activity += 1
+                        continue
+
+                    # Filtrar por activity score
+                    if profile.activity_score < self.config.min_activity_score:
+                        logger.debug(
+                            f"@{username} filtrado: activity_score={profile.activity_score:.0f} "
+                            f"(mín: {self.config.min_activity_score})"
+                        )
+                        filtered_by_activity += 1
+                        continue
 
             # Calcular relevancia
             relevance_score, location_detected, niche_detected = self._calculate_relevance(profile)
@@ -610,18 +848,29 @@ class InstagramDiscoveryEngine:
 
             # Filtro de relevancia mínima (al menos ubicación O nicho detectado)
             if not location_detected and not niche_detected:
+                filtered_by_relevance += 1
                 continue
 
             relevant_profiles.append(profile)
 
-        # Ordenar por relevancia
-        relevant_profiles.sort(key=lambda p: p.relevance_score, reverse=True)
+        # Log de estadísticas de filtrado
+        logger.info(f"Estadísticas de filtrado:")
+        logger.info(f"  - Filtrados por followers: {filtered_by_followers}")
+        logger.info(f"  - Filtrados por inactividad: {filtered_by_activity}")
+        logger.info(f"  - Filtrados por relevancia: {filtered_by_relevance}")
+        logger.info(f"  - Perfiles que pasaron: {len(relevant_profiles)}")
+
+        # Ordenar por relevancia (combinando relevance_score y activity_score)
+        relevant_profiles.sort(
+            key=lambda p: (p.relevance_score * 0.6 + p.activity_score * 0.4),
+            reverse=True
+        )
 
         # Limitar output
         if len(relevant_profiles) > self.config.max_profiles_output:
             relevant_profiles = relevant_profiles[:self.config.max_profiles_output]
 
-        logger.info(f"Perfiles relevantes: {len(relevant_profiles)}")
+        logger.info(f"Perfiles relevantes finales: {len(relevant_profiles)}")
         return relevant_profiles
 
     def _calculate_relevance(self, profile: DiscoveredProfile) -> tuple[float, str, str]:
@@ -686,7 +935,10 @@ class InstagramDiscoveryEngine:
                 "username", "full_name", "followers", "following", "posts_count",
                 "bio", "category", "profile_url", "external_url",
                 "is_business", "is_verified", "location_detected", "niche_detected",
-                "relevance_score", "discovered_via_hashtag", "discovered_at"
+                "relevance_score", "discovered_via_hashtag", "discovered_at",
+                # Activity fields
+                "last_post_date", "days_since_last_post", "posts_last_month",
+                "activity_score", "activity_status"
             ]
 
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -726,14 +978,19 @@ class InstagramDiscoveryEngine:
 
         if profiles:
             print("\nTOP 10 PERFILES MAS RELEVANTES:")
-            print("-" * 60)
+            print("-" * 70)
             for i, p in enumerate(profiles[:10], 1):
-                print(f"{i:2}. @{p.username:<25} | {p.followers:>6} seg | Score: {p.relevance_score:.0f}")
+                activity_info = ""
+                if p.activity_status != "unknown":
+                    activity_info = f" | Act: {p.activity_score:.0f} ({p.activity_status})"
+                print(f"{i:2}. @{p.username:<20} | {p.followers:>6} seg | Rel: {p.relevance_score:.0f}{activity_info}")
                 if p.location_detected:
                     print(f"    Ubicacion: {p.location_detected}")
                 if p.niche_detected:
                     print(f"    Nicho: {p.niche_detected}")
-            print("-" * 60)
+                if p.days_since_last_post >= 0:
+                    print(f"    Ultimo post: hace {p.days_since_last_post} dias | Posts/mes: {p.posts_last_month}")
+            print("-" * 70)
 
 
 # =============================================================================
@@ -822,6 +1079,34 @@ Ejemplos de uso:
         help='Desactivar enriquecimiento de perfiles'
     )
 
+    # Activity filter arguments
+    parser.add_argument(
+        '--no-activity-filter',
+        action='store_true',
+        help='Desactivar filtrado por actividad (incluir cuentas inactivas)'
+    )
+
+    parser.add_argument(
+        '--max-days-inactive',
+        type=int,
+        default=30,
+        help='Máximo días desde último post (default: 30)'
+    )
+
+    parser.add_argument(
+        '--min-posts-month',
+        type=int,
+        default=2,
+        help='Mínimo posts en el último mes (default: 2)'
+    )
+
+    parser.add_argument(
+        '--min-activity-score',
+        type=int,
+        default=30,
+        help='Score mínimo de actividad 0-100 (default: 30)'
+    )
+
     parser.add_argument(
         '--output-dir',
         type=str,
@@ -863,6 +1148,11 @@ def build_config_from_args(args: argparse.Namespace) -> Optional[DiscoveryConfig
         max_profiles_output=args.max_profiles,
         enrich_profiles=not args.no_enrich,
         output_dir=args.output_dir,
+        # Activity filters
+        filter_inactive=not args.no_activity_filter,
+        max_days_since_last_post=args.max_days_inactive,
+        min_posts_last_month=args.min_posts_month,
+        min_activity_score=args.min_activity_score,
     )
 
 

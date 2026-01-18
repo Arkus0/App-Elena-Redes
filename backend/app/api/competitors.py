@@ -110,7 +110,7 @@ async def scrape_single_competitor(competitor_id: int, business_type: str):
     from app.core.database import async_session_maker
     from app.services.apify_service import ApifyService
     from app.services.pattern_extractor import PatternExtractor
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     apify_service = ApifyService()
     pattern_extractor = PatternExtractor()
@@ -143,8 +143,11 @@ async def scrape_single_competitor(competitor_id: int, business_type: str):
             competitor.following_count = profile.get("following", 0)
             competitor.posts_count = profile.get("posts_count") or profile.get("videos_count", 0)
 
-            # Save posts
+            # Save posts and track dates for activity calculation
             from app.models.scraped_post import ContentFormat
+
+            post_dates = []
+            now = datetime.utcnow()
 
             for post_data in data.get("posts", []):
                 format_map = {
@@ -155,6 +158,26 @@ async def scrape_single_competitor(competitor_id: int, business_type: str):
                     "linkedin_post": ContentFormat.LINKEDIN_POST,
                 }
                 content_format = format_map.get(post_data.get("type"), ContentFormat.STATIC_IMAGE)
+
+                # Parse post date
+                posted_at = None
+                date_value = post_data.get("timestamp") or post_data.get("taken_at") or post_data.get("date")
+                if date_value:
+                    try:
+                        if isinstance(date_value, (int, float)):
+                            posted_at = datetime.fromtimestamp(date_value)
+                        elif isinstance(date_value, str):
+                            for fmt in ["%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]:
+                                try:
+                                    posted_at = datetime.strptime(date_value, fmt)
+                                    break
+                                except ValueError:
+                                    continue
+                    except Exception:
+                        pass
+
+                if posted_at:
+                    post_dates.append(posted_at)
 
                 post = ScrapedPost(
                     competitor_id=competitor.id,
@@ -172,10 +195,60 @@ async def scrape_single_competitor(competitor_id: int, business_type: str):
                     saves_count=post_data.get("saves", 0),
                     views_count=post_data.get("video_views", 0) or post_data.get("plays", 0),
                     engagement_score=post_data.get("engagement_score", 0),
+                    posted_at=posted_at,
                 )
                 db.add(post)
 
-            competitor.last_scraped_at = datetime.utcnow()
+            # Calculate activity metrics
+            if post_dates:
+                post_dates.sort(reverse=True)
+                last_post = post_dates[0]
+                competitor.last_post_date = last_post
+                competitor.days_since_last_post = (now - last_post).days
+
+                # Posts in last month
+                one_month_ago = now - timedelta(days=30)
+                posts_last_month = sum(1 for d in post_dates if d >= one_month_ago)
+                competitor.posting_frequency = posts_last_month
+
+                # Calculate activity score (0-100)
+                days_since = competitor.days_since_last_post
+                if days_since <= 3:
+                    recency_score = 100
+                elif days_since <= 7:
+                    recency_score = 90
+                elif days_since <= 14:
+                    recency_score = 75
+                elif days_since <= 30:
+                    recency_score = 50
+                elif days_since <= 60:
+                    recency_score = 25
+                else:
+                    recency_score = 0
+
+                frequency_score = min(posts_last_month * 12.5, 100)
+                volume_score = min(len(post_dates) * 10, 100)
+
+                competitor.activity_score = int(
+                    recency_score * 0.40 +
+                    frequency_score * 0.40 +
+                    volume_score * 0.20
+                )
+
+                # Determine activity status
+                if days_since <= 7 and posts_last_month >= 2:
+                    competitor.activity_status = "active"
+                elif days_since <= 30 and posts_last_month >= 1:
+                    competitor.activity_status = "moderately_active"
+                elif days_since <= 90:
+                    competitor.activity_status = "inactive"
+                else:
+                    competitor.activity_status = "dormant"
+            else:
+                competitor.activity_status = "unknown"
+                competitor.activity_score = 0
+
+            competitor.last_scraped_at = now
             competitor.scrape_status = "completed"
             await db.commit()
 
