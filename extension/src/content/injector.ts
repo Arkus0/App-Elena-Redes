@@ -1,15 +1,19 @@
 /**
  * Elena Bridge - Content Script (Injector)
  *
- * Inyecta un botón flotante discreto en perfiles de Instagram y TikTok.
+ * Inyecta un botón flotante discreto en páginas de contenido de Instagram y TikTok.
+ * Funciona con: Posts, Reels, Videos, y Perfiles
+ *
  * Comportamiento "stealth": simula lectura humana, no hace peticiones a APIs de redes sociales.
  */
 
+import { isInstagramContentPage, extractInstagramContent, detectInstagramPageType } from '../utils/instagram-content-extractor';
+import { isTikTokContentPage, extractTikTokContent, detectTikTokPageType } from '../utils/tiktok-content-extractor';
 import { isInstagramProfilePage, extractInstagramProfile } from '../utils/instagram-extractor';
 import { isTikTokProfilePage, extractTikTokProfile } from '../utils/tiktok-extractor';
-import type { ExtractionResult, Platform, AnalysisStatus } from '../types';
+import type { ExtractionResult, Platform, PageType, AnalysisStatus } from '../types';
 
-// Identificador único para evitar inyecciones duplicadas
+// Identificadores únicos para evitar inyecciones duplicadas
 const BUTTON_ID = 'elena-bridge-analyze-btn';
 const CONTAINER_ID = 'elena-bridge-container';
 
@@ -29,25 +33,82 @@ function detectPlatform(): Platform {
 }
 
 /**
- * Verifica si estamos en una página de perfil válida
+ * Detecta el tipo de página actual
  */
-function isProfilePage(): boolean {
+function detectCurrentPageType(): PageType {
   const platform = detectPlatform();
 
   switch (platform) {
     case 'instagram':
-      return isInstagramProfilePage();
+      return detectInstagramPageType();
     case 'tiktok':
-      return isTikTokProfilePage();
+      return detectTikTokPageType();
     default:
-      return false;
+      return 'unknown';
+  }
+}
+
+/**
+ * Verifica si estamos en una página donde podemos extraer contenido
+ */
+function isExtractablePage(): boolean {
+  const platform = detectPlatform();
+  const pageType = detectCurrentPageType();
+
+  if (platform === 'unknown') return false;
+
+  // Páginas de contenido individual (lo principal)
+  if (pageType === 'post' || pageType === 'reel' || pageType === 'video') {
+    return true;
+  }
+
+  // También permitir perfiles para análisis completo
+  if (pageType === 'profile') {
+    if (platform === 'instagram') return isInstagramProfilePage();
+    if (platform === 'tiktok') return isTikTokProfilePage();
+  }
+
+  return false;
+}
+
+/**
+ * Obtiene el texto del botón según el tipo de página
+ */
+function getButtonText(pageType: PageType): string {
+  switch (pageType) {
+    case 'post':
+      return 'Guardar Post';
+    case 'reel':
+      return 'Guardar Reel';
+    case 'video':
+      return 'Guardar Video';
+    case 'profile':
+      return 'Analizar Perfil';
+    default:
+      return 'Analizar con Elena';
+  }
+}
+
+/**
+ * Obtiene el ícono según el tipo de página
+ */
+function getButtonIcon(pageType: PageType): string {
+  switch (pageType) {
+    case 'post':
+    case 'reel':
+    case 'video':
+      return '\u{1F4BE}'; // Floppy disk (guardar)
+    case 'profile':
+      return '\u{1F50D}'; // Lupa (analizar)
+    default:
+      return '\u{2728}'; // Sparkles
   }
 }
 
 /**
  * Actualiza el estado visual del botón
  */
-function updateButtonState(button: HTMLButtonElement, status: AnalysisStatus): void {
+function updateButtonState(button: HTMLButtonElement, status: AnalysisStatus, pageType: PageType): void {
   currentStatus = status;
 
   const iconSpan = button.querySelector('.elena-icon') as HTMLSpanElement;
@@ -57,8 +118,8 @@ function updateButtonState(button: HTMLButtonElement, status: AnalysisStatus): v
 
   switch (status) {
     case 'idle':
-      iconSpan.textContent = '\u{1F50D}'; // Lupa
-      textSpan.textContent = 'Analizar con Elena';
+      iconSpan.textContent = getButtonIcon(pageType);
+      textSpan.textContent = getButtonText(pageType);
       button.className = 'elena-bridge-btn';
       break;
     case 'extracting':
@@ -73,39 +134,70 @@ function updateButtonState(button: HTMLButtonElement, status: AnalysisStatus): v
       break;
     case 'success':
       iconSpan.textContent = '\u{2705}'; // Check verde
-      textSpan.textContent = 'Enviado';
+      textSpan.textContent = 'Guardado!';
       button.className = 'elena-bridge-btn elena-success';
-      // Volver a estado idle después de 3 segundos
-      setTimeout(() => updateButtonState(button, 'idle'), 3000);
+      setTimeout(() => updateButtonState(button, 'idle', pageType), 3000);
       break;
     case 'error':
       iconSpan.textContent = '\u{274C}'; // X roja
       textSpan.textContent = 'Error';
       button.className = 'elena-bridge-btn elena-error';
-      // Volver a estado idle después de 3 segundos
-      setTimeout(() => updateButtonState(button, 'idle'), 3000);
+      setTimeout(() => updateButtonState(button, 'idle', pageType), 3000);
       break;
   }
 }
 
 /**
- * Extrae datos del perfil según la plataforma
+ * Extrae datos según la plataforma y tipo de página
  */
-function extractProfileData(): ExtractionResult {
+function extractData(): ExtractionResult {
   const platform = detectPlatform();
+  const pageType = detectCurrentPageType();
 
-  switch (platform) {
-    case 'instagram':
-      return extractInstagramProfile();
-    case 'tiktok':
-      return extractTikTokProfile();
-    default:
-      return {
-        success: false,
-        data: null,
-        error: 'Plataforma no soportada'
-      };
+  console.log(`[Elena Bridge] Extracting ${pageType} from ${platform}`);
+
+  // Contenido individual (posts, reels, videos)
+  if (pageType === 'post' || pageType === 'reel') {
+    if (platform === 'instagram') {
+      return extractInstagramContent();
+    }
   }
+
+  if (pageType === 'video') {
+    if (platform === 'tiktok') {
+      return extractTikTokContent();
+    }
+  }
+
+  // Perfiles completos
+  if (pageType === 'profile') {
+    if (platform === 'instagram') {
+      const result = extractInstagramProfile();
+      return {
+        success: result.success,
+        pageType: 'profile',
+        profile: result.data || undefined,
+        recentPosts: result.recentPosts,
+        error: result.error
+      };
+    }
+    if (platform === 'tiktok') {
+      const result = extractTikTokProfile();
+      return {
+        success: result.success,
+        pageType: 'profile',
+        profile: result.data || undefined,
+        recentPosts: result.recentPosts,
+        error: result.error
+      };
+    }
+  }
+
+  return {
+    success: false,
+    pageType: 'unknown',
+    error: 'Plataforma o tipo de página no soportados'
+  };
 }
 
 /**
@@ -116,29 +208,39 @@ async function handleAnalyzeClick(event: Event): Promise<void> {
   event.stopPropagation();
 
   const button = event.currentTarget as HTMLButtonElement;
+  const pageType = detectCurrentPageType();
 
   if (currentStatus === 'extracting' || currentStatus === 'sending') {
-    console.log('[Elena Bridge] Analysis already in progress');
+    console.log('[Elena Bridge] Extraction already in progress');
     return;
   }
 
   console.log('[Elena Bridge] Button clicked - starting extraction');
-  updateButtonState(button, 'extracting');
+  updateButtonState(button, 'extracting', pageType);
 
   // Pequeña pausa para simular comportamiento humano
-  await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 500));
+  await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
 
   try {
-    const result = extractProfileData();
+    const result = extractData();
 
-    if (!result.success || !result.data) {
+    if (!result.success) {
       console.error('[Elena Bridge] Extraction failed:', result.error);
-      updateButtonState(button, 'error');
+      updateButtonState(button, 'error', pageType);
       return;
     }
 
-    console.log('[Elena Bridge] Extraction successful:', result.data.username);
-    updateButtonState(button, 'sending');
+    console.log('[Elena Bridge] Extraction successful');
+    console.log('[Elena Bridge] Page type:', result.pageType);
+
+    if (result.content) {
+      console.log('[Elena Bridge] Content ID:', result.content.contentId);
+      console.log('[Elena Bridge] Author:', result.content.author.username);
+    } else if (result.profile) {
+      console.log('[Elena Bridge] Profile:', result.profile.username);
+    }
+
+    updateButtonState(button, 'sending', pageType);
 
     // Enviar al service worker para que haga la petición a la API
     chrome.runtime.sendMessage({
@@ -147,22 +249,22 @@ async function handleAnalyzeClick(event: Event): Promise<void> {
     }, (response) => {
       if (chrome.runtime.lastError) {
         console.error('[Elena Bridge] Message error:', chrome.runtime.lastError);
-        updateButtonState(button, 'error');
+        updateButtonState(button, 'error', pageType);
         return;
       }
 
       if (response?.success) {
-        console.log('[Elena Bridge] Data sent successfully');
-        updateButtonState(button, 'success');
+        console.log('[Elena Bridge] Data sent successfully. Task ID:', response.taskId);
+        updateButtonState(button, 'success', pageType);
       } else {
         console.error('[Elena Bridge] API error:', response?.error);
-        updateButtonState(button, 'error');
+        updateButtonState(button, 'error', pageType);
       }
     });
 
   } catch (error) {
     console.error('[Elena Bridge] Unexpected error:', error);
-    updateButtonState(button, 'error');
+    updateButtonState(button, 'error', pageType);
   }
 }
 
@@ -170,6 +272,8 @@ async function handleAnalyzeClick(event: Event): Promise<void> {
  * Crea el botón flotante de Elena Bridge
  */
 function createFloatingButton(): HTMLElement {
+  const pageType = detectCurrentPageType();
+
   // Contenedor principal
   const container = document.createElement('div');
   container.id = CONTAINER_ID;
@@ -184,12 +288,12 @@ function createFloatingButton(): HTMLElement {
   // Icono
   const icon = document.createElement('span');
   icon.className = 'elena-icon';
-  icon.textContent = '\u{1F50D}'; // Lupa
+  icon.textContent = getButtonIcon(pageType);
 
   // Texto
   const text = document.createElement('span');
   text.className = 'elena-text';
-  text.textContent = 'Analizar con Elena';
+  text.textContent = getButtonText(pageType);
 
   button.appendChild(icon);
   button.appendChild(text);
@@ -203,23 +307,42 @@ function createFloatingButton(): HTMLElement {
 }
 
 /**
+ * Actualiza el botón existente para reflejar el tipo de página actual
+ */
+function updateExistingButton(): void {
+  const button = document.getElementById(BUTTON_ID) as HTMLButtonElement;
+  if (!button) return;
+
+  const pageType = detectCurrentPageType();
+  const iconSpan = button.querySelector('.elena-icon') as HTMLSpanElement;
+  const textSpan = button.querySelector('.elena-text') as HTMLSpanElement;
+
+  if (currentStatus === 'idle') {
+    iconSpan.textContent = getButtonIcon(pageType);
+    textSpan.textContent = getButtonText(pageType);
+  }
+}
+
+/**
  * Inyecta el botón en la página
  */
 function injectButton(): void {
   // Verificar si ya existe
   if (document.getElementById(CONTAINER_ID)) {
-    console.log('[Elena Bridge] Button already exists');
+    // Actualizar texto si cambió el tipo de página
+    updateExistingButton();
     return;
   }
 
-  // Verificar si estamos en una página de perfil
-  if (!isProfilePage()) {
-    console.log('[Elena Bridge] Not a profile page, skipping injection');
+  // Verificar si estamos en una página válida
+  if (!isExtractablePage()) {
+    console.log('[Elena Bridge] Not an extractable page, skipping injection');
     return;
   }
 
   const platform = detectPlatform();
-  console.log(`[Elena Bridge] Injecting button for ${platform} profile`);
+  const pageType = detectCurrentPageType();
+  console.log(`[Elena Bridge] Injecting button for ${platform} ${pageType}`);
 
   const container = createFloatingButton();
   document.body.appendChild(container);
@@ -228,14 +351,14 @@ function injectButton(): void {
 }
 
 /**
- * Elimina el botón si ya no estamos en una página de perfil
+ * Elimina el botón si ya no estamos en una página válida
  */
 function removeButtonIfNeeded(): void {
   const container = document.getElementById(CONTAINER_ID);
 
-  if (container && !isProfilePage()) {
+  if (container && !isExtractablePage()) {
     container.remove();
-    console.log('[Elena Bridge] Button removed - no longer on profile page');
+    console.log('[Elena Bridge] Button removed - not on extractable page');
   }
 }
 
@@ -245,7 +368,7 @@ function removeButtonIfNeeded(): void {
 function handleNavigation(): void {
   // Esperar a que el DOM se actualice
   setTimeout(() => {
-    if (isProfilePage()) {
+    if (isExtractablePage()) {
       injectButton();
     } else {
       removeButtonIfNeeded();
@@ -286,15 +409,16 @@ function init(): void {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === 'GET_STATUS') {
       sendResponse({
-        isProfilePage: isProfilePage(),
+        isContentPage: isExtractablePage(),
+        pageType: detectCurrentPageType(),
         platform: detectPlatform(),
         status: currentStatus
       });
       return true;
     }
 
-    if (message.action === 'EXTRACT_PROFILE') {
-      const result = extractProfileData();
+    if (message.action === 'EXTRACT_CONTENT') {
+      const result = extractData();
       sendResponse(result);
       return true;
     }

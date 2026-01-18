@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import type { Platform, AnalysisStatus } from '../types';
+import type { Platform, PageType, AnalysisStatus } from '../types';
 
 interface TabStatus {
-  isProfilePage: boolean;
+  isContentPage: boolean;
+  pageType: PageType;
   platform: Platform;
   status: AnalysisStatus;
 }
@@ -27,7 +28,8 @@ export default function Popup() {
           if (chrome.runtime.lastError) {
             // El content script no está cargado (no estamos en IG/TikTok)
             setTabStatus({
-              isProfilePage: false,
+              isContentPage: false,
+              pageType: 'unknown',
               platform: 'unknown',
               status: 'idle'
             });
@@ -58,6 +60,28 @@ export default function Popup() {
       case 'instagram': return 'Instagram';
       case 'tiktok': return 'TikTok';
       default: return 'Desconocido';
+    }
+  };
+
+  const getPageTypeLabel = (pageType: PageType): string => {
+    switch (pageType) {
+      case 'post': return 'Post detectado';
+      case 'reel': return 'Reel detectado';
+      case 'video': return 'Video detectado';
+      case 'profile': return 'Perfil detectado';
+      case 'story': return 'Story detectado';
+      default: return 'Pagina no soportada';
+    }
+  };
+
+  const getPageTypeIcon = (pageType: PageType): string => {
+    switch (pageType) {
+      case 'post': return '\u{1F4F8}'; // Camera with flash
+      case 'reel': return '\u{1F3AC}'; // Clapper board
+      case 'video': return '\u{1F4F9}'; // Video camera
+      case 'profile': return '\u{1F464}'; // Person silhouette
+      case 'story': return '\u{23F3}'; // Hourglass
+      default: return '\u{2753}'; // Question mark
     }
   };
 
@@ -96,19 +120,21 @@ export default function Popup() {
 
       {/* Estado de la pestaña actual */}
       <section className="tab-section">
-        <h2>Pestaña Actual</h2>
-        {tabStatus?.isProfilePage ? (
+        <h2>Pagina Actual</h2>
+        {tabStatus?.isContentPage ? (
           <div className="profile-detected">
-            <span className="platform-icon">{getPlatformIcon(tabStatus.platform)}</span>
+            <span className="platform-icon">{getPageTypeIcon(tabStatus.pageType)}</span>
             <div className="profile-info">
-              <span className="platform-name">{getPlatformName(tabStatus.platform)}</span>
-              <span className="profile-hint">Perfil detectado</span>
+              <span className="platform-name">
+                {getPlatformIcon(tabStatus.platform)} {getPlatformName(tabStatus.platform)}
+              </span>
+              <span className="profile-hint">{getPageTypeLabel(tabStatus.pageType)}</span>
             </div>
           </div>
         ) : (
           <div className="no-profile">
-            <p>No estás en un perfil de Instagram o TikTok</p>
-            <p className="hint">Navega a un perfil para usar Elena Bridge</p>
+            <p>No estas en contenido de Instagram o TikTok</p>
+            <p className="hint">Navega a un post, reel o video para guardar</p>
           </div>
         )}
       </section>
@@ -117,10 +143,22 @@ export default function Popup() {
       <section className="instructions-section">
         <h2>Como usar</h2>
         <ol>
-          <li>Navega a un perfil de Instagram o TikTok</li>
-          <li>Haz clic en el boton "Analizar con Elena"</li>
-          <li>Los datos se enviaran automaticamente al backend</li>
+          <li>Navega por Instagram o TikTok</li>
+          <li>Encuentra un post, reel o video que te guste</li>
+          <li>Haz clic en el boton flotante para guardarlo</li>
+          <li>Los datos se envian automaticamente al backend</li>
         </ol>
+      </section>
+
+      {/* Contenido soportado */}
+      <section className="supported-section">
+        <h2>Contenido Soportado</h2>
+        <div className="supported-list">
+          <span className="supported-item">{'\u{1F4F8}'} Posts</span>
+          <span className="supported-item">{'\u{1F3AC}'} Reels</span>
+          <span className="supported-item">{'\u{1F4F9}'} Videos</span>
+          <span className="supported-item">{'\u{1F464}'} Perfiles</span>
+        </div>
       </section>
 
       {/* Footer */}

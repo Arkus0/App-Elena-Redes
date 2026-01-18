@@ -2,6 +2,7 @@
  * Elena Bridge - Service Worker (Background Script)
  *
  * Maneja la comunicación entre el content script y la API backend.
+ * Soporta tanto contenido individual (posts, reels, videos) como perfiles completos.
  * Todas las peticiones HTTP se hacen desde aquí para evitar problemas de CORS.
  */
 
@@ -35,27 +36,69 @@ async function checkServerHealth(): Promise<boolean> {
 }
 
 /**
- * Envía datos al backend con reintentos
+ * Construye el payload para la API según el tipo de datos extraídos
  */
-async function sendToApi(data: ExtractionResult): Promise<ApiResponse> {
-  const payload = {
+function buildPayload(data: ExtractionResult) {
+  const basePayload = {
     source: 'elena_bridge_extension',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
-    profile: data.data,
-    recentPosts: data.recentPosts || [],
-    metadata: {
-      extractionMethod: data.data?.extractionMethod,
-      platform: data.data?.platform,
-      sourceUrl: data.data?.sourceUrl
-    }
+    pageType: data.pageType
   };
+
+  // Contenido individual (posts, reels, videos)
+  if (data.content) {
+    return {
+      ...basePayload,
+      type: 'content',
+      content: data.content,
+      metadata: {
+        contentType: data.content.contentType,
+        platform: data.content.platform,
+        contentId: data.content.contentId,
+        author: data.content.author.username,
+        sourceUrl: data.content.sourceUrl,
+        extractionMethod: data.content.extractionMethod
+      }
+    };
+  }
+
+  // Perfil completo
+  if (data.profile) {
+    return {
+      ...basePayload,
+      type: 'profile',
+      profile: data.profile,
+      recentPosts: data.recentPosts || [],
+      metadata: {
+        platform: data.profile.platform,
+        username: data.profile.username,
+        sourceUrl: data.profile.sourceUrl,
+        extractionMethod: data.profile.extractionMethod
+      }
+    };
+  }
+
+  // Fallback para datos legacy
+  return {
+    ...basePayload,
+    type: 'unknown',
+    raw: data
+  };
+}
+
+/**
+ * Envía datos al backend con reintentos
+ */
+async function sendToApi(data: ExtractionResult): Promise<ApiResponse> {
+  const payload = buildPayload(data);
 
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= API_CONFIG.retryAttempts; attempt++) {
     try {
       console.log(`[Elena Bridge SW] Sending to API (attempt ${attempt}/${API_CONFIG.retryAttempts})`);
+      console.log('[Elena Bridge SW] Payload type:', payload.type);
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), API_CONFIG.timeout);
@@ -65,7 +108,8 @@ async function sendToApi(data: ExtractionResult): Promise<ApiResponse> {
         headers: {
           'Content-Type': 'application/json',
           'X-Elena-Bridge-Version': '1.0.0',
-          'X-Extension-ID': chrome.runtime.id
+          'X-Extension-ID': chrome.runtime.id,
+          'X-Content-Type': payload.type
         },
         body: JSON.stringify(payload),
         signal: controller.signal
