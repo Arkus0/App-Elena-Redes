@@ -5,15 +5,16 @@
  * Allows users to configure embedding precision for ML predictions.
  *
  * Precision Levels:
- * - Baja (128 dims): Ultra fast, lower precision
- * - Media (256 dims): Balanced
- * - Alta (384 dims): Full precision
- * - Maxima (384 dims raw): Best for regional slang/nuances (default)
+ * - Ultra Baja (64 dims): Ultra rapido para PC modesto
+ * - Baja (128 dims): Recomendado sobremesa normal Almeria (NEW DEFAULT)
+ * - Media (256 dims): Balance precision/velocidad
+ * - Alta (384 dims): Full dims con TruncatedSVD
+ * - Maxima (full raw): Sin reduccion - mejor matices creativos/slang
  *
- * Default is "max" (full raw embeddings) - safe for SMB volumes:
+ * Default changed to "low" (128 dims) - safe for typical sobremesa:
  * - 100-2000 posts typical
- * - Training < 1 minute
- * - RAM < 2GB on normal desktop
+ * - Training < 30 seconds
+ * - RAM < 1GB on normal desktop
  */
 
 import React, { useState, useEffect } from 'react';
@@ -69,11 +70,14 @@ interface EmbeddingConfigurationProps {
 // Precision level icons
 const PrecisionIcon = ({ precision }: { precision: string }) => {
   switch (precision) {
+    case 'ultra_low':
+      return <Zap className="w-5 h-5 text-orange-500" />;
     case 'low':
       return <Zap className="w-5 h-5 text-yellow-500" />;
     case 'medium':
       return <TrendingUp className="w-5 h-5 text-blue-500" />;
     case 'high':
+      return <Cpu className="w-5 h-5 text-purple-500" />;
     case 'max':
       return <Cpu className="w-5 h-5 text-green-500" />;
     default:
@@ -90,7 +94,7 @@ export const EmbeddingConfiguration: React.FC<EmbeddingConfigurationProps> = ({
   const [options, setOptions] = useState<PrecisionOption[]>([]);
   const [currentConfig, setCurrentConfig] = useState<EmbeddingConfig | null>(null);
   const [benchmarks, setBenchmarks] = useState<BenchmarkResponse | null>(null);
-  const [selectedPrecision, setSelectedPrecision] = useState<string>('max');
+  const [selectedPrecision, setSelectedPrecision] = useState<string>('low');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -121,43 +125,52 @@ export const EmbeddingConfiguration: React.FC<EmbeddingConfigurationProps> = ({
         // Set defaults if API fails
         setOptions([
           {
-            value: 'low',
-            label: 'Baja',
-            dimensions: 128,
-            description: 'Ultra rapido, menor precision semantica',
-            performance: 'Mas rapido, menor RAM',
-            use_case: 'Volumen alto',
+            value: 'ultra_low',
+            label: 'Ultra Baja (64 dims - ultra rapido)',
+            dimensions: 64,
+            description: 'Ultra rapido para PC modesto/sobremesa Almeria',
+            performance: 'Muy rapido, minimo RAM (~0.3GB)',
+            use_case: 'PC modesto, volumen muy alto',
             is_recommended: false,
           },
           {
+            value: 'low',
+            label: 'Baja (128 dims - Recomendada)',
+            dimensions: 128,
+            description: 'Recomendado para sobremesa normal Almeria',
+            performance: 'Rapido, bajo RAM (~0.5GB). Train <30s',
+            use_case: 'Sobremesa normal',
+            is_recommended: true,
+          },
+          {
             value: 'medium',
-            label: 'Media',
+            label: 'Media (256 dims)',
             dimensions: 256,
             description: 'Balance entre precision y velocidad',
-            performance: 'Buen balance',
+            performance: 'Buen balance, RAM moderado (~1GB)',
             use_case: 'Balance',
             is_recommended: false,
           },
           {
             value: 'high',
-            label: 'Alta',
+            label: 'Alta (384 dims)',
             dimensions: 384,
-            description: 'Precision completa',
-            performance: 'Todas las dimensiones',
-            use_case: 'Precision maxima',
+            description: 'Precision completa con TruncatedSVD',
+            performance: 'Full dims con reduccion. Train <1min',
+            use_case: 'Precision maxima con reduccion',
             is_recommended: false,
           },
           {
             value: 'max',
-            label: 'Maxima (Recomendada)',
+            label: 'Maxima (full raw)',
             dimensions: 384,
-            description: 'Embeddings raw completos - mejor matices creativos y slang local',
-            performance: 'Seguro en PC normal: train <1min, RAM <2GB',
-            use_case: 'SMB tipico',
-            is_recommended: true,
+            description: 'Embeddings raw sin reduccion - mejor matices creativos y slang local (Almeria/andaluz)',
+            performance: 'Sin reduccion, RAM ~2GB. Solo si tienes buen hardware',
+            use_case: 'Hardware potente',
+            is_recommended: false,
           },
         ]);
-        setSelectedPrecision('max');
+        setSelectedPrecision('low');
       } finally {
         setLoading(false);
       }
@@ -184,7 +197,7 @@ export const EmbeddingConfiguration: React.FC<EmbeddingConfigurationProps> = ({
       console.error('Error updating embedding precision:', err);
       setError('Error al actualizar precision. Intenta de nuevo.');
       // Revert to previous
-      setSelectedPrecision(currentConfig?.precision || 'max');
+      setSelectedPrecision(currentConfig?.precision || 'low');
     } finally {
       setSaving(false);
     }
@@ -230,10 +243,11 @@ export const EmbeddingConfiguration: React.FC<EmbeddingConfigurationProps> = ({
             <HelpCircle className="w-5 h-5 text-gray-400 cursor-help" />
             {showTooltip === 'info' && (
               <div className="absolute right-0 z-10 w-72 p-3 mt-2 text-sm bg-gray-900 text-white rounded-lg shadow-lg">
-                <p className="font-medium mb-1">Full dims captura mejor slang regional</p>
+                <p className="font-medium mb-1">Elige segun tu PC - Baja recomendado sobremesa normal Almeria</p>
                 <p className="text-gray-300">
-                  Almeria/andaluz, jerga local, matices creativos.
-                  Seguro en PC normal con tus datos (train rapido).
+                  Ultra Baja (64 dims): PC modesto muy rapido.
+                  Baja (128 dims): Recomendado sobremesa normal.
+                  Maxima (full raw): Solo si tienes buen hardware, mejor matices creativos/slang.
                 </p>
               </div>
             )}

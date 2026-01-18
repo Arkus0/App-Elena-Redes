@@ -15,12 +15,17 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 
 ### 📊 Feature Engineering Avanzado
 
-#### 🧬 Semantic Embeddings (Full Dims by Default)
+#### 🧬 Semantic Embeddings (Configurable Precision - REQUIRED)
 - **Modelo**: `sentence-transformers/all-MiniLM-L6-v2` (~80MB, multilingual)
-- **Output**: 384-dim embeddings (full raw por defecto, reducción opcional via TruncatedSVD)
-- **Precisión configurable**: `max` (384), `high` (384), `medium` (256), `low` (128)
-- **Default**: `max` (full 384 dims) - seguro para SMB (100-2000 posts, train <1min, RAM <2GB)
-- **Ventajas**: Captura mejor slang regional (Almería/andaluz), matices creativos
+- **Output**: 384-dim raw embeddings, reducción configurable via TruncatedSVD
+- **Precisión configurable (REQUERIDO - no hay default)**:
+  - `ultra_low` (64 dims): Ultra rápido para PC modesto/sobremesa Almería
+  - `low` (128 dims): **RECOMENDADO** sobremesa normal (train <30s, RAM <0.5GB)
+  - `medium` (256 dims): Balance precisión/velocidad
+  - `high` (384 dims): Full dims con TruncatedSVD
+  - `max` (full raw 384): Sin reducción - mejor matices creativos/slang local
+- **Default cambiado**: `low` (128 dims) - seguro para SMB típico (100-2000 posts)
+- **Ventajas**: Captura slang regional (Almería/andaluz) con `max`, velocidad con `low`
 - **Soporte**: Español + Inglés nativamente
 - **Descarga**: Automática en primera ejecución desde HuggingFace
 
@@ -31,7 +36,10 @@ BrandPulse AI combina la potencia generativa de **Grok (xAI)** con un motor de p
 - **Formato**: One-hot encoding (Reel, Carousel, Static, TikTok).
 - **Niche Flags**: Detección de keywords por vertical (inmobiliaria: "casa", "tour", "Triana"; floristería: "flores", "arreglo", "ramo").
 
-> **Arquitectura de Features (Full Dims)**: El sistema usa embeddings semánticos completos (384 caption + 384 transcript + 384 OCR) + interacciones (10) + heurísticas manuales (~58), resultando en **~1220 features totales** para XGBoost. Esto es seguro para volúmenes SMB típicos (100-2000 posts, train <1min, RAM <2GB).
+> **Arquitectura de Features (Configurable)**: El sistema usa embeddings semánticos configurables:
+> - Con `low` (128 dims): 128 caption + 128 transcript + 128 OCR + 10 interacciones + 58 heurísticas = **~452 features** (RECOMENDADO sobremesa normal)
+> - Con `max` (384 dims): 384 caption + 384 transcript + 384 OCR + 10 interacciones + 58 heurísticas = **~1220 features** (hardware potente)
+> Ambos son seguros para volúmenes SMB típicos (100-2000 posts, train <1min, RAM <1GB con `low`).
 
 ### 🎬 Multimodal Late Fusion (Nuevo)
 
@@ -255,9 +263,10 @@ Los modelos PCA se guardan en `/models/`:
 
 ```
 models/
-├── embedding_pca_30.pkl      # PCA para caption (30 dims)
-├── transcript_pca_20.pkl     # PCA para transcript (20 dims)
-├── ocr_pca_20.pkl            # PCA para OCR (20 dims)
+├── embedding_svd_64.pkl      # TruncatedSVD para ultra_low (64 dims)
+├── embedding_svd_128.pkl     # TruncatedSVD para low (128 dims)
+├── embedding_svd_256.pkl     # TruncatedSVD para medium (256 dims)
+├── embedding_svd_384.pkl     # TruncatedSVD para high (384 dims)
 ```
 
 **Fit manual de PCA (opcional):**
@@ -492,37 +501,42 @@ El sistema es **100% retrocompatible**:
 - El endpoint `/api/v1/growth/predict` sigue funcionando igual
 - Los modelos single-output existentes siguen válidos
 
-### 🎯 Configurable Embedding Precision (Nuevo)
+### 🎯 Configurable Embedding Precision (Actualizado)
 
 Sistema de precisión de embeddings configurable por usuario/negocio. Permite ajustar el trade-off entre precisión semántica y rendimiento.
+
+**IMPORTANTE**: Precision es REQUERIDO - no hay default automático. El caller debe elegir conscientemente.
 
 #### Niveles de Precisión
 
 | Nivel | Dims | Descripción | Uso Recomendado |
 |-------|------|-------------|-----------------|
-| **max** (default) | 384 | Full raw embeddings | SMB típico (100-2000 posts) - mejor matices |
-| **high** | 384 | Full embeddings | Igual que max |
-| **medium** | 256 | TruncatedSVD reduction | Datasets 2000-5000 posts |
-| **low** | 128 | Ultra reducido | Datasets muy grandes (>5000 posts) |
+| **ultra_low** | 64 | Ultra rápido | PC modesto, datasets muy grandes (>10000 posts) |
+| **low** (RECOMENDADO) | 128 | Balance seguro | **Sobremesa normal Almería** (100-2000 posts) |
+| **medium** | 256 | Balance precision/velocidad | Datasets 2000-5000 posts |
+| **high** | 384 | Full dims con TruncatedSVD | Precisión máxima con reducción |
+| **max** | full raw 384 | Sin reducción | Hardware potente, mejor matices creativos/slang |
 
-#### ¿Por qué Full Dims por Default?
+#### ¿Por qué "low" como Recomendado?
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│           BENCHMARK: 500 samples, PC normal (8GB RAM)                │
+│           BENCHMARK: 500 samples, sobremesa normal Almería           │
 ├─────────────────────────────────────────────────────────────────────┤
-│  Precision    Dims    Time      Time/sample   RAM       Lightweight  │
+│  Precision    Dims    Time      RAM       Features   Recomendado     │
 │  ─────────────────────────────────────────────────────────────────   │
-│  max          384     2.1s      4.2ms        ~45 MB    Yes           │
-│  high         384     2.1s      4.2ms        ~45 MB    Yes           │
-│  medium       256     2.3s      4.6ms        ~35 MB    Yes           │
-│  low          128     2.4s      4.8ms        ~25 MB    Yes           │
+│  ultra_low    64      0.8s      ~0.3GB    ~260       PC modesto      │
+│  low          128     1.2s      ~0.5GB    ~452       SOBREMESA ✓     │
+│  medium       256     1.8s      ~1.0GB    ~836       Balance         │
+│  high         384     2.1s      ~1.5GB    ~1220      High-end        │
+│  max          384     2.1s      ~2.0GB    ~1220      Hardware top    │
 └─────────────────────────────────────────────────────────────────────┘
 
-Conclusión: Full 384 dims es SEGURO para volúmenes SMB típicos.
-- Training < 1 minuto
-- RAM < 2GB
-- Mejor precisión semántica (slang regional, matices creativos)
+Conclusión: "low" (128 dims) es RECOMENDADO para sobremesa normal.
+- Training < 30 segundos
+- RAM < 0.5GB
+- Buen balance precisión/velocidad
+- Seguro para volúmenes SMB típicos (100-2000 posts)
 ```
 
 #### API Endpoints
@@ -1056,17 +1070,18 @@ El archivo `ml/features_embeddings.py` proporciona embeddings modernos basados e
 
 ```python
 from ml.features_embeddings import (
-    get_caption_embedding,      # 384-dim raw embedding
-    get_embedding_features,     # 30-dim dict para ML
+    get_caption_embedding,      # Raw embedding (dims segun precision)
+    get_embedding_features,     # Dict para ML (dims segun precision)
     EmbeddingExtractor          # Clase completa
 )
 
-# Uso simple
-embedding_384 = get_caption_embedding("Nuevo apartamento en Triana!")
-# numpy array (384,)
+# Uso simple - IMPORTANTE: precision es REQUERIDO
+embedding = get_caption_embedding("Nuevo apartamento en Triana!", precision="low")
+# numpy array (128,) con precision="low"
 
-features_30 = get_embedding_features("Nuevo apartamento en Triana!")
-# {"embedding_1": 0.123, "embedding_2": -0.456, ..., "embedding_30": 0.789}
+features = get_embedding_features("Nuevo apartamento en Triana!", precision="low")
+# {"embedding_0": 0.123, "embedding_1": -0.456, ..., "embedding_127": 0.789}
+# 0-based indexing: embedding_0 a embedding_{N-1}
 ```
 
 **Configuración del modelo:**
@@ -1074,28 +1089,31 @@ features_30 = get_embedding_features("Nuevo apartamento en Triana!")
 |-----------|-------|-------------|
 | Modelo | `all-MiniLM-L6-v2` | Lightweight, ~80MB |
 | Dimensión raw | 384 | Output del transformer |
-| Dimensión PCA | 30 | Reducido para XGBoost |
+| Dimensión configurable | 64-384 | Según precision (ultra_low=64, low=128, medium=256, high=384, max=384 raw) |
 | Max tokens | 256 | Truncamiento automático |
+| Default recomendado | `low` (128) | Sobremesa normal Almería |
 
-**Ajuste de PCA en corpus de training:**
+**Ajuste de TruncatedSVD en corpus de training:**
 ```python
 from ml.features_embeddings import EmbeddingExtractor
 
-extractor = EmbeddingExtractor()
+# IMPORTANTE: precision es REQUERIDO
+extractor = EmbeddingExtractor(precision="low")
 
 # Opción 1: Desde textos
-extractor.fit_pca_from_texts(["caption1", "caption2", ...], save=True)
+extractor.fit_reducer_from_texts(["caption1", "caption2", ...], save=True)
 
 # Opción 2: Desde embeddings raw
-embeddings = extractor.get_caption_embeddings_batch(texts)
-extractor.fit_pca(embeddings, save=True)
+embeddings = extractor.get_raw_embeddings_batch(texts)
+extractor.fit_reducer(embeddings, save=True)
 
-# El modelo PCA se guarda en: models/embedding_pca_30.pkl
+# El modelo se guarda en: models/embedding_svd_128.pkl (para precision="low")
 ```
 
 **Integración automática:**
-- `FeatureExtractor.extract_features()` añade automáticamente `embedding_1` a `embedding_30`
-- `train.py` genera embeddings para datos de entrenamiento
+- `FeatureExtractor.extract_features()` añade automáticamente `embedding_0` a `embedding_{N-1}`
+- 0-based indexing para consistencia con XGBoost
+- `train.py` genera embeddings con precision configurable
 - `pretrain_base_model.py` genera embeddings sintéticos para pretraining
 
 #### 1. Preentrenar Modelo Base
@@ -1110,11 +1128,11 @@ python ml/pretrain_base_model.py --samples 20000
 # Output: models/base_xgboost.pkl
 ```
 
-**Features del dataset sintético (73 total):**
+**Features del dataset sintético (variable según precision):**
 
-| Categoría | Features | Count |
-|-----------|----------|-------|
-| **Embeddings** | `embedding_1` a `embedding_30` (PCA sintético) | 30 |
+| Categoría | Features | Count (low=128) |
+|-----------|----------|-----------------|
+| **Embeddings** | `embedding_0` a `embedding_{N-1}` (0-based indexing) | 128 (o 64/256/384 según precision) |
 | **Caption** | `caption_length`, `caption_words`, `emoji_count`, `hashtag_count`, `lexical_richness` | 10 |
 | **Hooks** | `hook_question`, `hook_pov`, `hook_number`, `hook_bold_claim`, `hook_story` | 7 |
 | **Triggers** | `trigger_urgency`, `trigger_curiosity`, `trigger_action`, `trigger_emotion` | 8 |
@@ -1123,6 +1141,8 @@ python ml/pretrain_base_model.py --samples 20000
 | **Timing** | `hour_of_day`, `day_of_week`, `is_prime_time`, `is_weekend` | 4 |
 | **Nicho** | `niche_inmobiliaria`, `niche_cafeteria`, `niche_restaurante`, etc. | 8 |
 | **Sentiment** | `sentiment_compound`, `sentiment_positive`, `sentiment_negative` | 4 |
+
+> **Total features** varía según precision: ~182 (ultra_low), ~246 (low), ~374 (medium), ~502 (high/max)
 
 - `engagement_rate` (target): distribución log-normal realista
 

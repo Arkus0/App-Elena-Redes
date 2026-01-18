@@ -12,34 +12,36 @@ MODEL: sentence-transformers/all-MiniLM-L6-v2
 - Output: 384-dimensional dense vectors
 - Normalized: L2 normalized embeddings
 
-EMBEDDING PRECISION MODES:
-==========================
-- "max" / "high" (384 dims): Full raw embeddings - mejor matices creativos/locales
-- "medium" (256 dims): TruncatedSVD reduction - balance precision/speed
-- "low" (128 dims): TruncatedSVD reduction - ultra rápido
+EMBEDDING PRECISION MODES (precision es REQUERIDO):
+===================================================
+- "ultra_low" (64 dims): Ultra rapido para PC modesto/sobremesa Almeria
+- "low" (128 dims): Recomendado sobremesa normal - balance seguro
+- "medium" (256 dims): Balance precision/velocidad
+- "high" (384 dims): Full dims con TruncatedSVD (preserva varianza)
+- "max" (None): Full raw 384 dims - sin reduccion
 
-DEFAULT: "max" (full 384 dims)
-- Seguro con volúmenes típicos SMB: 100-2000 posts
-- Training rápido: <1 minuto
-- RAM estimado: <2GB en PC normal
-- Captura mejor slang regional (Almería/Andaluz)
+IMPORTANTE: No hay default - debes especificar precision explicitamente.
+Recomendado para sobremesa normal Almeria: "low" (128 dims)
 
 PIPELINE:
 1. Load model (auto-downloads if not cached)
 2. Generate 384-dim embedding from caption text
-3. Apply TruncatedSVD if reduction needed (configurable)
+3. Apply TruncatedSVD if precision != "max" (configurable)
 4. Return features for XGBoost
 
 Usage:
     from ml.features_embeddings import EmbeddingExtractor, EmbeddingPrecision
 
-    # Full 384 dims (default - recommended for SMB volumes)
-    extractor = EmbeddingExtractor(precision="max")
+    # IMPORTANTE: precision es REQUERIDO
+    # Para sobremesa normal - recomendado:
+    extractor = EmbeddingExtractor(precision="low")  # 128 dims
     features = extractor.get_embedding_features("Tu texto aqui")
 
-    # Reduced dims for very large datasets
-    extractor = EmbeddingExtractor(precision="medium")  # 256 dims
-    extractor = EmbeddingExtractor(precision="low")     # 128 dims
+    # Para PC modesto (muy rapido):
+    extractor = EmbeddingExtractor(precision="ultra_low")  # 64 dims
+
+    # Full raw sin reduccion (si tienes buen hardware):
+    extractor = EmbeddingExtractor(precision="max")  # 384 dims raw
 
 Author: BrandPulse AI
 """
@@ -87,34 +89,48 @@ class EmbeddingPrecision(str, Enum):
     """
     Embedding precision levels for BrandPulse AI.
 
-    Default is MAX (full 384 dims) - recommended for typical SMB data volumes.
+    IMPORTANT: No default - precision must be explicitly passed.
+    Recommended for typical SMB (100-2000 posts): "low" (128 dims) for safety.
+
+    Levels:
+    - ultra_low (64 dims): Ultra rapido para PC modesto/sobremesa Almeria
+    - low (128 dims): Recomendado sobremesa normal
+    - medium (256 dims): Balance precision/velocidad
+    - high (384 dims): Full precision con reduccion
+    - max (None): Full raw 384 dims sin reduccion
     """
-    LOW = "low"        # 128 dims - ultra fast, lower precision
-    MEDIUM = "medium"  # 256 dims - balanced
-    HIGH = "high"      # 384 dims - full precision
-    MAX = "max"        # 384 dims - full raw embeddings (default)
+    ULTRA_LOW = "ultra_low"  # 64 dims - ultra rapido, PC modesto
+    LOW = "low"              # 128 dims - recomendado sobremesa normal
+    MEDIUM = "medium"        # 256 dims - balance
+    HIGH = "high"            # 384 dims - full precision con TruncatedSVD
+    MAX = "max"              # None = full raw 384 dims sin reduccion
 
     @property
     def dimensions(self) -> int:
         """Get number of dimensions for this precision level."""
-        return PRECISION_TO_DIMS.get(self.value, EMBEDDING_DIM)
+        dims = PRECISION_TO_DIMS.get(self.value)
+        # max returns None, which means full EMBEDDING_DIM
+        return dims if dims is not None else EMBEDDING_DIM
 
     @property
     def uses_reduction(self) -> bool:
         """Check if this precision uses dimensionality reduction."""
-        return self.value in ("low", "medium")
+        # max = full raw embeddings, no reduction
+        return self.value in ("ultra_low", "low", "medium", "high")
 
 
 # Precision to dimensions mapping
-PRECISION_TO_DIMS: Dict[str, int] = {
-    "low": 128,
-    "medium": 256,
-    "high": 384,
-    "max": 384,
+# IMPORTANT: max=None means full raw 384 dims (no reduction applied)
+PRECISION_TO_DIMS: Dict[str, Optional[int]] = {
+    "ultra_low": 64,   # ~30-64 realista rapido sobremesa
+    "low": 128,        # Recomendado sobremesa normal Almeria
+    "medium": 256,     # Balance precision/velocidad
+    "high": 384,       # Full dims con TruncatedSVD (preserva varianza)
+    "max": None,       # Full raw 384 dims - sin reduccion
 }
 
-# Default precision (full embeddings)
-DEFAULT_PRECISION = EmbeddingPrecision.MAX
+# REMOVED: No default precision - must be explicitly passed
+# This forces callers to consciously choose precision based on their hardware
 
 
 # =============================================================================
@@ -352,7 +368,7 @@ class EmbeddingExtractor:
     def __init__(
         self,
         model_name: str = EMBEDDING_MODEL_NAME,
-        precision: Union[str, EmbeddingPrecision] = DEFAULT_PRECISION,
+        precision: Union[str, EmbeddingPrecision] = None,
         auto_load_reducer: bool = True
     ):
         """
@@ -360,20 +376,34 @@ class EmbeddingExtractor:
 
         Args:
             model_name: HuggingFace model name for sentence-transformers
-            precision: Embedding precision level ("low", "medium", "high", "max")
-                      Default is "max" (full 384 dims)
+            precision: Embedding precision level (REQUIRED - no default)
+                      Options: 'ultra_low' (64), 'low' (128), 'medium' (256),
+                               'high' (384), 'max' (full raw 384)
             auto_load_reducer: Whether to auto-load saved reducer if exists
+
+        Raises:
+            ValueError: If precision is not provided or invalid
         """
         self.model_name = model_name
+
+        # Validate precision is provided
+        if precision is None:
+            raise ValueError(
+                "precision es REQUERIDO. Opciones: 'ultra_low', 'low', 'medium', 'high', 'max'. "
+                "Recomendado para sobremesa normal: 'low' (128 dims)."
+            )
 
         # Parse precision
         if isinstance(precision, str):
             precision = precision.lower()
-            if precision in [p.value for p in EmbeddingPrecision]:
+            valid_precisions = [p.value for p in EmbeddingPrecision]
+            if precision in valid_precisions:
                 self._precision = EmbeddingPrecision(precision)
             else:
-                logger.warning(f"Unknown precision '{precision}', using 'max'")
-                self._precision = EmbeddingPrecision.MAX
+                raise ValueError(
+                    f"Precision '{precision}' no valida. Opciones: {valid_precisions}. "
+                    f"Recomendado para sobremesa normal: 'low' (128 dims)."
+                )
         else:
             self._precision = precision
 
@@ -386,7 +416,7 @@ class EmbeddingExtractor:
 
         logger.info(
             f"EmbeddingExtractor initialized: precision={self._precision.value}, "
-            f"dims={self._target_dims}"
+            f"dims={self._target_dims}, uses_reduction={self._precision.uses_reduction}"
         )
 
     @property
@@ -914,24 +944,48 @@ _embedding_extractors: Dict[str, EmbeddingExtractor] = {}
 
 
 def get_embedding_extractor(
-    precision: Union[str, EmbeddingPrecision] = DEFAULT_PRECISION
+    precision: Union[str, EmbeddingPrecision]
 ) -> EmbeddingExtractor:
     """
     Get the global embedding extractor instance for a precision level.
 
     Creates the instance on first call (lazy initialization).
 
+    IMPORTANT: precision is REQUIRED - no default. Caller must explicitly
+    choose based on their hardware:
+    - "ultra_low" (64 dims): Ultra rapido, PC modesto
+    - "low" (128 dims): Recomendado sobremesa normal Almeria
+    - "medium" (256 dims): Balance precision/velocidad
+    - "high" (384 dims): Full dims con TruncatedSVD
+    - "max": Full raw 384 dims sin reduccion
+
     Args:
-        precision: Precision level ("low", "medium", "high", "max")
-                  Default is "max" (full 384 dims)
+        precision: Precision level (REQUIRED - no default)
 
     Returns:
         EmbeddingExtractor instance
+
+    Raises:
+        ValueError: If precision is not provided or invalid
     """
+    if precision is None:
+        raise ValueError(
+            "precision es REQUERIDO. Opciones: 'ultra_low', 'low', 'medium', 'high', 'max'. "
+            "Recomendado para sobremesa normal: 'low' (128 dims)."
+        )
+
     if isinstance(precision, EmbeddingPrecision):
         key = precision.value
     else:
         key = str(precision).lower()
+
+    # Validate precision value
+    valid_precisions = [p.value for p in EmbeddingPrecision]
+    if key not in valid_precisions:
+        raise ValueError(
+            f"Precision '{key}' no valida. Opciones: {valid_precisions}. "
+            f"Recomendado para sobremesa normal: 'low' (128 dims)."
+        )
 
     if key not in _embedding_extractors:
         _embedding_extractors[key] = EmbeddingExtractor(precision=key)
@@ -939,16 +993,17 @@ def get_embedding_extractor(
     return _embedding_extractors[key]
 
 
-def get_caption_embedding(text: str, precision: str = "max") -> np.ndarray:
+def get_caption_embedding(text: str, precision: str) -> np.ndarray:
     """
     Convenience function: Get raw embedding for text.
 
     Args:
         text: Input text
-        precision: Precision level (default "max" = full 384 dims)
+        precision: Precision level (REQUIRED - no default)
+                  Options: 'ultra_low', 'low', 'medium', 'high', 'max'
 
     Returns:
-        numpy array of shape (384,) or (target_dims,) if reduced
+        numpy array of shape (target_dims,) based on precision
     """
     extractor = get_embedding_extractor(precision)
     raw = extractor.get_raw_embedding(text)
@@ -958,13 +1013,14 @@ def get_caption_embedding(text: str, precision: str = "max") -> np.ndarray:
     return raw
 
 
-def get_embedding_features(text: str, precision: str = "max") -> Dict[str, float]:
+def get_embedding_features(text: str, precision: str) -> Dict[str, float]:
     """
     Convenience function: Get embedding features for ML pipeline.
 
     Args:
         text: Input text
-        precision: Precision level (default "max" = full 384 dims)
+        precision: Precision level (REQUIRED - no default)
+                  Options: 'ultra_low', 'low', 'medium', 'high', 'max'
 
     Returns:
         Dict with embedding features
@@ -987,7 +1043,8 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 70)
     print("Semantic Embeddings Feature Extractor - BrandPulse AI")
-    print("CONFIGURABLE PRECISION: full 384 / medium 256 / low 128")
+    print("PRECISION LEVELS: ultra_low=64 / low=128 / medium=256 / high=384 / max=384 raw")
+    print("RECOMENDADO SOBREMESA NORMAL: 'low' (128 dims)")
     print("=" * 70 + "\n")
 
     # Test texts (Spanish captions typical for local SMBs)
@@ -999,8 +1056,8 @@ if __name__ == "__main__":
         "Ramo de rosas frescas. Perfecto para cualquier ocasion. Envio gratis!",
     ]
 
-    # Test each precision level
-    for precision in ["max", "medium", "low"]:
+    # Test each precision level (including new ultra_low)
+    for precision in ["ultra_low", "low", "medium", "high", "max"]:
         print(f"\n{'='*60}")
         print(f"TESTING PRECISION: {precision.upper()}")
         print(f"{'='*60}")
@@ -1015,13 +1072,15 @@ if __name__ == "__main__":
         raw_time = time.time() - start
         print(f"    Raw shape: {raw_embeddings.shape}, time: {raw_time:.3f}s")
 
-        # Fit reducer if needed
+        # Fit reducer if needed (not for max)
         if extractor.uses_reduction:
-            print(f"\n[2] Fitting TruncatedSVD reducer...")
+            print(f"\n[2] Fitting TruncatedSVD reducer (precision={precision})...")
             start = time.time()
             extractor.fit_reducer(raw_embeddings, save=False)
             fit_time = time.time() - start
             print(f"    Fit time: {fit_time:.3f}s")
+        else:
+            print(f"\n[2] Skipping TruncatedSVD (max = full raw embeddings)")
 
         # Get features
         print(f"\n[3] Getting embedding features...")
@@ -1046,5 +1105,6 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 70)
     print("Test Complete!")
-    print("Default precision is 'max' (full 384 dims) - safe for SMB volumes")
+    print("IMPORTANTE: precision es REQUERIDO - no hay default")
+    print("Recomendado sobremesa normal Almeria: 'low' (128 dims)")
     print("=" * 70 + "\n")
