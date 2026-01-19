@@ -189,6 +189,8 @@ class ViralOpportunity(BaseModel):
     total_views: int
     total_videos: int
     growth_rate: str  # "rising", "peaked", "declining"
+    velocity_score: Optional[float] = None  # -1.0 to 1.0 (new velocity metric)
+    momentum_status: Optional[str] = None  # rising, trending, stable, stale
     time_sensitive: bool
 
     # Your opportunity

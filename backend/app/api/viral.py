@@ -24,6 +24,8 @@ from app.schemas.content import (
 )
 from app.services.content_generator import ContentGenerator
 from app.services.analytics_engine import AnalyticsEngine
+from app.services.trend_velocity import get_trend_velocity_checker, TrendType
+from app.services.apify_service import ApifyService
 
 router = APIRouter()
 content_generator = ContentGenerator()
@@ -96,17 +98,44 @@ async def scan_viral_opportunities(
         platform=request.platform,
     )
 
+    # Initialize Trend Velocity Checker
+    # We use a hybrid approach: try to use real Apify data, fallback to mock/simulation
+    try:
+        apify_service = ApifyService()
+    except Exception:
+        apify_service = None
+        logging.warning("ApifyService could not be initialized, falling back to mock data")
+
+    velocity_checker = get_trend_velocity_checker(apify_service)
+
     # Build response
     opportunities = []
     for idea in ideas:
+        trend_name = idea.get("idea_title", "")
+        # Use keyword or trend name for velocity check
+        trend_identifier = request.keyword if request.keyword and len(request.keyword) > 3 else trend_name
+
+        # Check velocity
+        velocity_result = await velocity_checker.check_trend_velocity(
+            trend_type=TrendType.HASHTAG,
+            trend_identifier=trend_identifier,
+            platform=request.platform
+        )
+
+        # Filter out STALE trends for new opportunities
+        if velocity_result.is_stale:
+            continue
+
         opportunities.append(ViralOpportunity(
-            trend_id=f"trend_{hash(idea.get('idea_title', ''))}"[:10],
-            trend_name=idea.get("idea_title", ""),
+            trend_id=f"trend_{hash(trend_name)}"[:10],
+            trend_name=trend_name,
             platform=idea.get("platform", request.platform),
             description=idea.get("script_outline", [""])[0] if isinstance(idea.get("script_outline"), list) else "",
             total_views=0,  # Would come from Apify in real implementation
             total_videos=0,
             growth_rate="rising",
+            velocity_score=velocity_result.velocity_score,
+            momentum_status=velocity_result.status.value,
             time_sensitive=idea.get("difficulty") == "facil",
             relevance_score=idea.get("relevance_score", 75),
             difficulty_score={"facil": 30, "medio": 60, "dificil": 85}.get(idea.get("difficulty", "medio"), 60),
@@ -221,6 +250,37 @@ async def get_trending_in_niche(
             "Los hooks con preguntas o sorpresas tienen 2x más views",
         ],
     }
+
+    # Initialize Trend Velocity Checker
+    try:
+        apify_service = ApifyService()
+    except Exception:
+        apify_service = None
+
+    velocity_checker = get_trend_velocity_checker(apify_service)
+
+    # Enrich trending data with velocity metrics
+    enriched_trending = []
+    for item in trending_data["trending_now"]:
+        velocity_result = await velocity_checker.check_trend_velocity(
+            trend_type=TrendType.HASHTAG,
+            trend_identifier=item["trend"],
+            platform=platform
+        )
+
+        # Add velocity metrics
+        item["velocity_score"] = velocity_result.velocity_score
+        item["momentum_status"] = velocity_result.status.value
+
+        # Override engagement potential based on status if needed
+        if velocity_result.is_stale:
+            item["engagement_potential"] = "bajo (saturado)"
+        elif velocity_result.status.value == "rising":
+             item["engagement_potential"] = "muy alto (rising)"
+
+        enriched_trending.append(item)
+
+    trending_data["trending_now"] = enriched_trending
 
     return trending_data
 
