@@ -288,7 +288,8 @@ export function extractTikTokProfile(): ExtractionResult {
 
       return {
         success: true,
-        data: {
+        pageType: 'profile',
+        profile: {
           platform: 'tiktok',
           username: user.uniqueId || username,
           displayName: user.nickname || null,
@@ -318,16 +319,17 @@ export function extractTikTokProfile(): ExtractionResult {
   if (domData) {
     return {
       success: true,
-      data: domData,
+      pageType: 'profile',
+      profile: domData,
       recentPosts: extractRecentPosts(null)
     };
   }
 
   return {
     success: false,
-    data: null,
+    pageType: 'unknown',
     error: 'No se pudo extraer datos del perfil. Asegúrate de estar en una página de perfil de TikTok.'
-  };
+  } as any;
 }
 
 // Verifica si estamos en una URL de perfil de TikTok

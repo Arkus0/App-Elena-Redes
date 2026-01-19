@@ -176,7 +176,7 @@ function extractData(): ExtractionResult {
       return {
         success: result.success,
         pageType: 'profile',
-        profile: result.data || undefined,
+        profile: result.profile || undefined,
         recentPosts: result.recentPosts,
         error: result.error
       };
@@ -186,7 +186,7 @@ function extractData(): ExtractionResult {
       return {
         success: result.success,
         pageType: 'profile',
-        profile: result.data || undefined,
+        profile: result.profile || undefined,
         recentPosts: result.recentPosts,
         error: result.error
       };
