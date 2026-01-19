@@ -50,6 +50,7 @@ import gc
 import logging
 import pickle
 import time
+import functools
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple, Any
@@ -513,6 +514,7 @@ class EmbeddingExtractor:
     # Core Embedding Methods
     # =========================================================================
 
+    @functools.lru_cache(maxsize=1024)
     def get_raw_embedding(self, text: str) -> np.ndarray:
         """
         Generate raw 384-dimensional embedding for text.

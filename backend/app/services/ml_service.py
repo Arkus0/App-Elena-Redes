@@ -705,6 +705,7 @@ class MLPredictor:
         self.shap_explainer_engagement = None
         self.shap_explainer_format = None
         self.is_trained = False
+        self._models_loaded = False
 
         # Cold start support: base model and niche-specific models
         self.base_model: Optional[xgb.XGBRegressor] = None
@@ -712,17 +713,35 @@ class MLPredictor:
         self.niche_models: Dict[str, xgb.XGBRegressor] = {}
         self.active_model_source: str = "none"  # "trained", "niche", "base", "heuristic"
 
+        # No eager loading here!
+        # Models are loaded lazily on first prediction or training
+        # to prevent memory duplication in multi-worker environments (Gunicorn).
+        pass
+
+    def _ensure_models_loaded(self):
+        """
+        Lazy load models if not already loaded.
+        Uses mmap_mode='r' to share memory pages across workers.
+        """
+        if self._models_loaded:
+            return
+
+        logger.info("Initializing lazy model loading...")
+
         # Try to load existing models
         self._load_models()
         self._load_base_model()
         self._load_niche_models()
+
+        self._models_loaded = True
+        logger.info("Lazy model loading complete")
 
     def _get_model_path(self, name: str) -> Path:
         """Get path for a model file"""
         return MODEL_DIR / f"{name}.joblib"
 
     def _load_models(self):
-        """Load trained models from disk"""
+        """Load trained models from disk using mmap"""
         try:
             engagement_path = self._get_model_path("engagement_model")
             format_path = self._get_model_path("format_model")
@@ -730,18 +749,19 @@ class MLPredictor:
             encoder_path = self._get_model_path("encoders")
 
             if all(p.exists() for p in [engagement_path, format_path, encoder_path]):
-                self.engagement_model = joblib.load(engagement_path)
-                self.format_model = joblib.load(format_path)
+                # USE mmap_mode='r' FOR MEMORY SHARING ACROSS WORKERS
+                self.engagement_model = joblib.load(engagement_path, mmap_mode='r')
+                self.format_model = joblib.load(format_path, mmap_mode='r')
 
                 if trigger_path.exists():
-                    self.trigger_model = joblib.load(trigger_path)
+                    self.trigger_model = joblib.load(trigger_path, mmap_mode='r')
 
-                encoders = joblib.load(encoder_path)
+                encoders = joblib.load(encoder_path, mmap_mode='r')
                 self.business_type_encoder = encoders["business_type"]
                 self.format_encoder = encoders["format"]
 
                 self.is_trained = True
-                logger.info("Loaded trained ML models from disk")
+                logger.info("Loaded trained ML models from disk (mmap_mode='r')")
 
                 # Initialize SHAP explainers
                 self._init_shap_explainers()
@@ -760,18 +780,18 @@ class MLPredictor:
         try:
             # Try primary location
             if BASE_MODEL_PATH.exists():
-                bundle = joblib.load(BASE_MODEL_PATH)
+                bundle = joblib.load(BASE_MODEL_PATH, mmap_mode='r')
                 self.base_model = bundle.get("model")
                 self.base_model_loaded = True
-                logger.info(f"Loaded base model from: {BASE_MODEL_PATH}")
+                logger.info(f"Loaded base model from: {BASE_MODEL_PATH} (mmap_mode='r')")
                 return
 
             # Try alternative location (project root /models)
             if ALT_BASE_MODEL_PATH.exists():
-                bundle = joblib.load(ALT_BASE_MODEL_PATH)
+                bundle = joblib.load(ALT_BASE_MODEL_PATH, mmap_mode='r')
                 self.base_model = bundle.get("model")
                 self.base_model_loaded = True
-                logger.info(f"Loaded base model from: {ALT_BASE_MODEL_PATH}")
+                logger.info(f"Loaded base model from: {ALT_BASE_MODEL_PATH} (mmap_mode='r')")
                 return
 
             logger.info("Base model not found. Run pretrain_base_model.py to create it.")
@@ -791,9 +811,9 @@ class MLPredictor:
             for niche in self.BUSINESS_NICHES:
                 niche_path = MODEL_DIR / f"niche_{niche}.pkl"
                 if niche_path.exists():
-                    bundle = joblib.load(niche_path)
+                    bundle = joblib.load(niche_path, mmap_mode='r')
                     self.niche_models[niche] = bundle.get("model")
-                    logger.info(f"Loaded niche model for: {niche}")
+                    logger.info(f"Loaded niche model for: {niche} (mmap_mode='r')")
 
             if self.niche_models:
                 logger.info(f"Loaded {len(self.niche_models)} niche-specific models")
@@ -937,6 +957,8 @@ class MLPredictor:
         Returns:
             Prediction result with model_source indicating which model was used
         """
+        self._ensure_models_loaded()
+
         features = FeatureExtractor.extract_features(content)
         niche = content.get("business_type", "otros")
 
@@ -1012,7 +1034,15 @@ class MLPredictor:
         Returns:
             Dictionary with model availability and sources
         """
+        # Note: We don't force load here to inspect true status,
+        # but if they are not loaded, we might report false negatives.
+        # However, for status, we probably want to see if they ARE loaded.
+        # If we force load, we defeat the purpose of checking status.
+        # But if the user asks for status, they likely want to know what's available on disk too.
+        # Let's show current memory status.
+
         status = {
+            "models_loaded_in_memory": getattr(self, "_models_loaded", False),
             "main_model_trained": self.is_trained,
             "base_model_loaded": self.base_model_loaded,
             "niche_models_loaded": list(self.niche_models.keys()),
@@ -1100,6 +1130,9 @@ class MLPredictor:
         Train all ML models on provided data
         training_data: List of content dicts with engagement metrics
         """
+        # Ensure we have loaded any existing state before retraining decisions
+        self._ensure_models_loaded()
+
         if self.is_trained and not retrain:
             logger.info("Models already trained. Use retrain=True to force retraining.")
             return
@@ -1252,6 +1285,9 @@ class MLPredictor:
         Returns:
             Dict with score, confidence, explanation, model_source
         """
+        # Ensure models are loaded before prediction
+        self._ensure_models_loaded()
+
         # CRITICAL LOG: User config being used
         logger.info(
             f"Prediction with user config: precision={embedding_precision}, "
@@ -1353,6 +1389,8 @@ class MLPredictor:
         """
         Recommend best content format
         """
+        self._ensure_models_loaded()
+
         if not self.is_trained:
             return self._mock_format_recommendation(content)
 
@@ -1385,6 +1423,9 @@ class MLPredictor:
         """
         Suggest engagement triggers to include
         """
+        # Triggers might rely on trained models or features that use models
+        self._ensure_models_loaded()
+
         features = FeatureExtractor.extract_features(content)
 
         # Analyze current triggers
