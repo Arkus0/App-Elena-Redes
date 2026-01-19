@@ -51,20 +51,27 @@ import xgboost as xgb
 # Import SQL and Config for Database Loading
 from sqlalchemy import create_engine, text
 
-# Add backend to path to allow importing app.core.config
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.append(str(PROJECT_ROOT / "backend"))
+# Setup path to import 'app' modules
+# Assumes script is in backend/ml/ and we need backend/
+# Current file is ml/train.py, parent is ml, parent.parent is backend (repo root usually)
+# Adjusting based on file structure: ml/train.py -> PROJECT_ROOT/ml/train.py
+# If repo root is PROJECT_ROOT, then backend is PROJECT_ROOT/backend
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT / "backend") not in sys.path:
+    sys.path.append(str(PROJECT_ROOT / "backend"))
 
 try:
     from app.core.config import settings
-    # Ensure we use a sync driver for pandas (e.g., sqlite:/// instead of sqlite+aiosqlite:///)
-    DB_URL = settings.DATABASE_URL
-    if "+aiosqlite" in DB_URL:
-        DB_URL = DB_URL.replace("+aiosqlite", "")
-    elif "+asyncpg" in DB_URL:
-        DB_URL = DB_URL.replace("+asyncpg", "")
+    # Use SQLALCHEMY_DATABASE_URI as the source of truth if available, else construct/fallback
+    # Note: settings usually has DATABASE_URL. We will check for SQLALCHEMY_DATABASE_URI or fallback to DATABASE_URL
+    if hasattr(settings, 'SQLALCHEMY_DATABASE_URI'):
+        DB_URI = str(settings.SQLALCHEMY_DATABASE_URI)
+    else:
+        DB_URI = str(settings.DATABASE_URL)
 except ImportError:
-    DB_URL = None
+    # Fallback for when running without full app context or env vars
+    logging.warning("Could not import app settings. Database features will be disabled.")
+    DB_URI = None
 
 # Import embedding feature extractor (now with configurable precision, 0-based indexing)
 try:
@@ -274,20 +281,20 @@ def load_data_from_database(niche: str = None) -> pd.DataFrame:
     """
     logger.info(f"Loading data from database for niche: {niche or 'all'}")
 
-    if not DB_URL:
-        logger.error("Database URL not configured in settings.")
+    if not DB_URI:
+        logger.error("Database URI not configured. Please check .env or settings.")
         return pd.DataFrame()
 
     try:
-        engine = create_engine(DB_URL)
+        # 1. Handle async driver incompatibility with pandas
+        # Convert 'postgresql+asyncpg://...' to 'postgresql://...'
+        sync_db_uri = DB_URI.replace("+asyncpg", "").replace("+aiosqlite", "")
 
-        # Query explanation:
-        # 1. Joins scraped_posts -> competitors -> businesses
-        # 2. Filters by business_type (niche) if provided
-        # 3. Maps metrics (likes_count -> likes) to match train.py expectations
-        # 4. Maps content_format to is_reel/media_type logic
+        engine = create_engine(sync_db_uri)
 
-        query = """
+        # 2. Construct Query
+        # We need posts with their engagement metrics and the associated business type
+        query_str = """
         SELECT
             sp.caption,
             sp.likes_count as likes,
@@ -307,37 +314,39 @@ def load_data_from_database(niche: str = None) -> pd.DataFrame:
 
         params = {}
         if niche:
-            query += " AND b.business_type = :niche"
-            params['niche'] = niche.lower()  # Ensure niche match is case-insensitive if needed
+            query_str += " AND b.business_type = :niche"
+            params['niche'] = niche.lower()
 
-        # Execute query
-        df = pd.read_sql(text(query), engine, params=params)
+        # 3. Execute and load
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query_str), conn, params=params)
 
         if df.empty:
             logger.warning(f"No data found in database for niche: {niche}")
             return df
 
-        # --- Post-processing features for pipeline compatibility ---
+        # 4. Post-processing for Training Pipeline Compatibility
 
-        # 1. Map content_format to is_reel/is_static flags
-        # train.py expects 'is_reel' or 'media_type' for multimodal checks
+        # Map content_format (string/enum) to simple boolean flags required by the pipeline
+        # Assuming content_format values like 'reel', 'image', 'carousel', 'video'
         df['is_reel'] = df['content_format'].astype(str).str.contains('reel|tiktok|video', case=False, regex=True).astype(int)
         df['is_static'] = df['content_format'].astype(str).str.contains('static|image|carousel', case=False, regex=True).astype(int)
 
-        # 2. Ensure caption is string
+        # Fill missing text values
         df['caption'] = df['caption'].fillna("")
 
-        # 3. Handle potential missing engagement_rate (re-calculate if needed)
-        # The script's prepare_features handles this, but good to ensure basic metrics exist
+        # Fill missing metrics with 0 to prevent training errors
         df['likes'] = df['likes'].fillna(0)
         df['comments'] = df['comments'].fillna(0)
+        df['shares'] = df['shares'].fillna(0)
+        df['saves'] = df['saves'].fillna(0)
 
         logger.info(f"Successfully loaded {len(df)} samples from database.")
 
-        # Log distribution
+        # Log distribution for debugging survivor bias
         if 'is_viral' in df.columns:
             viral_count = df['is_viral'].sum()
-            logger.info(f"Distribution: {viral_count} viral posts, {len(df) - viral_count} others")
+            logger.info(f"Distribution: {viral_count} viral posts, {len(df) - viral_count} regular posts")
 
         return df
 
