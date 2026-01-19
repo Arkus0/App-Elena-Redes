@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
+    # ==========================================================================
+    # PRIVACY & SECURITY
+    # ==========================================================================
+    # Blind Identity settings for PII anonymization
+    PRIVACY_MODE_ENABLED: bool = True
+    # Salt for SHA-256 hashing. CHANGE THIS IN PRODUCTION!
+    DYNAMIC_SALT: str = "dev-dynamic-salt-change-in-prod-v1"
+
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./brandpulse.db"
 
