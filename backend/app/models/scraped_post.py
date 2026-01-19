@@ -36,7 +36,8 @@ class ScrapedPost(Base):
     __tablename__ = "scraped_posts"
 
     id = Column(Integer, primary_key=True, index=True)
-    competitor_id = Column(Integer, ForeignKey("competitors.id"), nullable=False)
+    # Bolt Optimization: Added index=True to competitor_id for faster filtering by competitor
+    competitor_id = Column(Integer, ForeignKey("competitors.id"), nullable=False, index=True)
 
     # Post identification
     platform_post_id = Column(String(100), nullable=False)  # Original ID from platform

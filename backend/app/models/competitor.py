@@ -12,7 +12,8 @@ class Competitor(Base):
     __tablename__ = "competitors"
 
     id = Column(Integer, primary_key=True, index=True)
-    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False)
+    # Bolt Optimization: Added index=True to business_id for faster filtering by business
+    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False, index=True)
 
     # Account info
     platform = Column(Enum(Platform), nullable=False)
