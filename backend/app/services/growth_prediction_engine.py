@@ -1092,6 +1092,31 @@ class GrowthPredictionEngine:
 
         return X, y
 
+    def calculate_confidence_weight(self, n_samples: int) -> float:
+        """
+        Calculates the weight (alpha) for the ML model in the Bayesian ensemble.
+
+        Uses a sigmoid function to smooth the transition from heuristic (n<30)
+        to ML-dominated predictions.
+        Formula: alpha = MAX_ALPHA / (1 + exp(-k * (n - midpoint)))
+
+        Args:
+            n_samples: Number of training samples available.
+
+        Returns:
+            Float between 0.0 and 0.95 representing ML model weight.
+        """
+        # If not enough samples for minimal training, force alpha=0
+        if n_samples < MINIMUM_TRAINING_SAMPLES:
+            return 0.0
+
+        k = 0.1
+        midpoint = 50
+        max_alpha = 0.95
+
+        alpha = max_alpha / (1 + np.exp(-k * (n_samples - midpoint)))
+        return float(alpha)
+
     def _cold_start_predict(self, features: Dict[str, Any]) -> ColdStartPredictionResult:
         """
         Heuristic rule-based prediction for Cold Start scenario.
@@ -1283,6 +1308,11 @@ class GrowthPredictionEngine:
         """
         Predice el RPI score para un conjunto de features.
 
+        IMPLEMENTS BAYESIAN ENSEMBLE:
+        Combines Heuristic (Rule-based) and ML (XGBoost) predictions based on
+        training sample count.
+        Final = alpha * Model + (1 - alpha) * Heuristic
+
         Args:
             features: Diccionario con las features del contenido.
             allow_cold_start: If True, use heuristic prediction when model not trained.
@@ -1293,6 +1323,14 @@ class GrowthPredictionEngine:
         Raises:
             RuntimeError: If model not trained and allow_cold_start is False.
         """
+        # Determine sample count and alpha
+        if self.is_trained and self._training_metrics:
+            n_samples = self._training_metrics.training_samples
+            alpha = self.calculate_confidence_weight(n_samples)
+        else:
+            n_samples = 0
+            alpha = 0.0
+
         if not self.is_trained:
             if allow_cold_start:
                 cold_result = self._cold_start_predict(features)
@@ -1302,8 +1340,18 @@ class GrowthPredictionEngine:
                 f"Train with at least {MINIMUM_TRAINING_SAMPLES} samples first."
             )
 
+        # Calculate Heuristic Score (Always run it for blending)
+        cold_result = self._cold_start_predict(features)
+        heuristic_score = cold_result.predicted_rpi_score
+
+        # Calculate ML Score
         X = self._prepare_features(features, fit_scaler=False)
-        return float(self._model.predict(X)[0])
+        model_score = float(self._model.predict(X)[0])
+
+        # Bayesian Blending
+        final_score = (alpha * model_score) + ((1.0 - alpha) * heuristic_score)
+
+        return float(final_score)
 
     def predict_with_explanation(
         self,
@@ -1321,11 +1369,11 @@ class GrowthPredictionEngine:
         Accepts embedding_precision and kpi_weights from user_config to ensure
         frontend configuration changes affect predictions in real-time.
 
-        Esta es la función principal que devuelve no solo la predicción,
-        sino también la contribución de cada variable usando SHAP values.
-
-        When no trained model is available and allow_cold_start is True,
-        returns a heuristic-based prediction converted to PredictionResult format.
+        BAYESIAN ENSEMBLE EXPLANATION:
+        - Blends scores using sigmoid alpha.
+        - Uses "Dominant Source" strategy for explanation text:
+          * alpha < 0.5: Heuristic explanation + suffix
+          * alpha >= 0.5: SHAP explanation + suffix
 
         Args:
             features: Diccionario con las features del contenido.
@@ -1345,6 +1393,15 @@ class GrowthPredictionEngine:
             f"GrowthPredictionEngine: User config loaded: precision={embedding_precision}, "
             f"kpi_weights={'custom' if kpi_weights else 'default'}"
         )
+
+        # Determine sample count and alpha
+        if self.is_trained and self._training_metrics:
+            n_samples = self._training_metrics.training_samples
+            alpha = self.calculate_confidence_weight(n_samples)
+        else:
+            n_samples = 0
+            alpha = 0.0
+
         if not self.is_trained:
             if allow_cold_start:
                 cold_result = self._cold_start_predict(features)
@@ -1354,7 +1411,7 @@ class GrowthPredictionEngine:
                 f"Train with at least {MINIMUM_TRAINING_SAMPLES} samples first."
             )
 
-        # Preparar features
+        # Preparar features para procesamiento
         hour, day_of_week = self._extract_hour_day_from_timestamp(
             features.get("posted_at") or features.get("timestamp")
         )
@@ -1395,12 +1452,20 @@ class GrowthPredictionEngine:
                 processed_features[pca_key] = features.get(pca_key, 0.0)
             logger.debug("Usando formato legacy sem_pca (deprecated)")
 
+        # --- EXECUTE ENSEMBLE ---
+
+        # 1. Heuristic Prediction
+        cold_result = self._cold_start_predict(features)
+        heuristic_score = cold_result.predicted_rpi_score
+
+        # 2. ML Prediction
         X = self._prepare_features(processed_features, fit_scaler=False)
+        model_score = float(self._model.predict(X)[0])
 
-        # Predicción base
-        prediction = float(self._model.predict(X)[0])
+        # 3. Blending
+        final_score = (alpha * model_score) + ((1.0 - alpha) * heuristic_score)
 
-        # Calcular SHAP values
+        # 4. Generate SHAP Values (ML Component)
         positive_contributions = []
         negative_contributions = []
 
@@ -1437,43 +1502,65 @@ class GrowthPredictionEngine:
             except Exception as e:
                 logger.warning(f"SHAP explanation failed: {e}")
 
-        # Generar texto explicativo
-        explanation_parts = []
-
-        if positive_contributions:
-            top_positive = positive_contributions[:3]
-            pos_text = ", ".join([
-                f"{c.feature_name} (+{c.contribution:.2f})"
-                for c in top_positive
-            ])
-            explanation_parts.append(f"factores positivos: {pos_text}")
-
-        if negative_contributions:
-            top_negative = negative_contributions[:2]
-            neg_text = ", ".join([
-                f"{c.feature_name} ({c.contribution:.2f})"
-                for c in top_negative
-            ])
-            explanation_parts.append(f"factores negativos: {neg_text}")
-
-        if explanation_parts:
-            explanation_text = f"El score es {'alto' if prediction > 0.5 else 'moderado' if prediction > 0 else 'bajo'} porque " + " y ".join(explanation_parts)
+        # 5. Determine Explanation Text (Dominant Source Strategy)
+        if alpha < 0.5:
+            # Show Heuristic explanation
+            base_explanation = cold_result.explanation_text
+            suffix = " (Model starting to learn)"
         else:
-            explanation_text = f"Score predicho: {prediction:.3f}"
+            # Show SHAP explanation
+            shap_parts = []
+            if positive_contributions:
+                top_positive = positive_contributions[:3]
+                pos_text = ", ".join([
+                    f"{c.feature_name} (+{c.contribution:.2f})"
+                    for c in top_positive
+                ])
+                shap_parts.append(f"factores positivos: {pos_text}")
+
+            if negative_contributions:
+                top_negative = negative_contributions[:2]
+                neg_text = ", ".join([
+                    f"{c.feature_name} ({c.contribution:.2f})"
+                    for c in top_negative
+                ])
+                shap_parts.append(f"factores negativos: {neg_text}")
+
+            if shap_parts:
+                base_explanation = f"El score es {'alto' if model_score > 0.5 else 'moderado' if model_score > 0 else 'bajo'} porque " + " y ".join(shap_parts)
+            else:
+                base_explanation = f"Score predicho: {model_score:.3f}"
+            suffix = " (Validated by historical patterns)"
+
+        explanation_text = f"{base_explanation}{suffix}"
+
+        # Add UI Tag
+        explanation_text += f"\n[Hybrid Prediction (Confidence: {alpha:.0%})]"
 
         # Calcular intervalo de confianza aproximado (usando std del CV si está disponible)
         if self._training_metrics:
             std = self._training_metrics.cv_rmse_mean
-            confidence_interval = (prediction - 1.96 * std, prediction + 1.96 * std)
+            confidence_interval = (final_score - 1.96 * std, final_score + 1.96 * std)
         else:
-            confidence_interval = (prediction - 0.2, prediction + 0.2)
+            confidence_interval = (final_score - 0.2, final_score + 0.2)
+
+        # For the result contributions, we return the SHAP ones if alpha >= 0.5,
+        # otherwise empty (or we could try to map heuristic factors to FeatureContribution,
+        # but the schema differs slightly). The user said "Show Heuristic explanation" which is text.
+        # But `top_positive_contributions` is used by frontend likely for visualization.
+        # If alpha < 0.5, the heuristic factors are in `cold_result.heuristic_factors`.
+        # I'll populate the contribution lists only if using SHAP explanation to avoid type mismatches or confusion,
+        # as heuristic factors have different structure.
+
+        final_positive_contributions = positive_contributions[:top_k] if alpha >= 0.5 else []
+        final_negative_contributions = negative_contributions[:top_k] if alpha >= 0.5 else []
 
         return PredictionResult(
-            predicted_rpi_score=prediction,
-            predicted_rpi_raw=np.expm1(max(0, prediction)),  # Inversa de log1p
+            predicted_rpi_score=final_score,
+            predicted_rpi_raw=np.expm1(max(0, final_score)),  # Inversa de log1p
             confidence_interval=confidence_interval,
-            top_positive_contributions=positive_contributions[:top_k],
-            top_negative_contributions=negative_contributions[:top_k],
+            top_positive_contributions=final_positive_contributions,
+            top_negative_contributions=final_negative_contributions,
             explanation_text=explanation_text,
             feature_values=processed_features
         )
