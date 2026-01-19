@@ -4,6 +4,7 @@ User registration and login
 """
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -11,7 +12,7 @@ from app.core.database import get_db
 from app.core.security import verify_password, get_password_hash, create_access_token
 from app.core.config import settings
 from app.models.user import User
-from app.schemas.user import UserCreate, UserResponse, Token
+from app.schemas.user import UserCreate, UserResponse, Token, UserLogin
 
 router = APIRouter()
 
@@ -49,8 +50,7 @@ async def register(
 
 @router.post("/login", response_model=Token)
 async def login(
-    email: str,
-    password: str,
+    user_in: UserLogin,
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -58,11 +58,11 @@ async def login(
     """
     # Find user
     result = await db.execute(
-        select(User).where(User.email == email)
+        select(User).where(User.email == user_in.email)
     )
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(password, user.hashed_password):
+    if not user or not verify_password(user_in.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -86,11 +86,12 @@ async def login(
 
 @router.post("/token", response_model=Token)
 async def login_for_token(
-    email: str,
-    password: str,
+    form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db)
 ):
     """
     OAuth2 compatible token endpoint
     """
-    return await login(email, password, db)
+    # Map username to email for UserLogin schema
+    # Note: validation error will occur if username is not a valid email
+    return await login(UserLogin(email=form_data.username, password=form_data.password), db)
