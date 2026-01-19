@@ -1093,6 +1093,7 @@ class GrowthPredictionEngine:
 
         # Identify negative examples (flops)
         # Using configured threshold (e.g., 1.0 on 0-5 log scale)
+        # Threshold 1.0 assumes Log-Scale (0-5). Corresponds to bottom ~20% performance.
         negative_mask = y < self.config.negative_score_threshold
 
         if np.any(negative_mask):
