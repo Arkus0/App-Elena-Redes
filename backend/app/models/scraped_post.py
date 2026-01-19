@@ -65,7 +65,8 @@ class ScrapedPost(Base):
     plays_count = Column(Integer, default=0)  # TikTok specific
 
     # Calculated engagement score (normalized 0-100)
-    engagement_score = Column(Float, default=0.0)
+    # Bolt Optimization: Added index=True to engagement_score for faster sorting of top/bottom posts
+    engagement_score = Column(Float, default=0.0, index=True)
     engagement_rate = Column(Float, default=0.0)  # (likes+comments) / followers * 100
 
     # === SURVIVOR BIAS FIX: New fields for balanced sampling ===
