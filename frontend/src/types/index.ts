@@ -198,6 +198,7 @@ export interface ContentPiece {
   variation_label: string | null
   has_variations: boolean
   ml_prediction_data?: MLPredictionData  // Hybrid ML/LLM prediction data
+  performance_label?: string | null // viral, good, flop
 }
 
 // Content Calendar

@@ -26,6 +26,7 @@ export default function ContentCalendar() {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [isLoading, setIsLoading] = useState(true)
   const [isExporting, setIsExporting] = useState(false)
+  const [feedbackContentId, setFeedbackContentId] = useState<number | null>(null)
 
   useEffect(() => {
     if (!currentBusiness) return
@@ -72,6 +73,25 @@ export default function ContentCalendar() {
       toast.error('Error al exportar')
     } finally {
       setIsExporting(false)
+    }
+  }
+
+  const handleFeedback = async (performance: 'viral' | 'good' | 'flop') => {
+    if (!currentBusiness || !feedbackContentId || !selectedCalendar) return
+
+    try {
+      await contentApi.submitFeedback(currentBusiness.id, feedbackContentId, performance)
+      toast.success('Feedback registrado. ¡Aprendiendo!')
+
+      // Update local state
+      const updatedPieces = selectedCalendar.content_pieces.map((p) =>
+        p.id === feedbackContentId ? { ...p, performance_label: performance } : p
+      )
+      setSelectedCalendar({ ...selectedCalendar, content_pieces: updatedPieces })
+
+      setFeedbackContentId(null)
+    } catch (error) {
+      toast.error('Error al registrar feedback')
     }
   }
 
@@ -216,6 +236,10 @@ export default function ContentCalendar() {
                       key={piece.id}
                       piece={piece}
                       onClick={() => navigate(`/content/${piece.id}`)}
+                      onFeedbackClick={(e) => {
+                        e.stopPropagation()
+                        setFeedbackContentId(piece.id)
+                      }}
                     />
                   ))}
                 </div>
@@ -226,6 +250,10 @@ export default function ContentCalendar() {
                       key={piece.id}
                       piece={piece}
                       onClick={() => navigate(`/content/${piece.id}`)}
+                      onFeedbackClick={(e) => {
+                        e.stopPropagation()
+                        setFeedbackContentId(piece.id)
+                      }}
                     />
                   ))}
                 </div>
@@ -234,13 +262,62 @@ export default function ContentCalendar() {
           )}
         </>
       )}
+
+      {/* Feedback Modal */}
+      {feedbackContentId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 w-full max-w-md shadow-2xl">
+            <h3 className="text-xl font-bold text-white mb-2">¿Cómo funcionó este post?</h3>
+            <p className="text-gray-400 mb-6">Tu feedback entrena al algoritmo para mejorar futuras predicciones.</p>
+
+            <div className="grid grid-cols-3 gap-4 mb-6">
+              <button
+                onClick={() => handleFeedback('viral')}
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 transition-all group"
+              >
+                <span className="text-2xl group-hover:scale-110 transition-transform">🚀</span>
+                <span className="font-medium text-purple-400">Viral</span>
+              </button>
+              <button
+                onClick={() => handleFeedback('good')}
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl bg-green-500/10 hover:bg-green-500/20 border border-green-500/30 transition-all group"
+              >
+                <span className="text-2xl group-hover:scale-110 transition-transform">👍</span>
+                <span className="font-medium text-green-400">Bueno</span>
+              </button>
+              <button
+                onClick={() => handleFeedback('flop')}
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 transition-all group"
+              >
+                <span className="text-2xl group-hover:scale-110 transition-transform">📉</span>
+                <span className="font-medium text-red-400">Flop</span>
+              </button>
+            </div>
+
+            <button
+              onClick={() => setFeedbackContentId(null)}
+              className="w-full py-2 text-gray-400 hover:text-white transition-colors"
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
-function ContentCard({ piece, onClick }: { piece: ContentPiece; onClick: () => void }) {
+function ContentCard({
+  piece,
+  onClick,
+  onFeedbackClick
+}: {
+  piece: ContentPiece;
+  onClick: () => void;
+  onFeedbackClick: (e: React.MouseEvent) => void;
+}) {
   return (
-    <div onClick={onClick} className="card-hover cursor-pointer">
+    <div onClick={onClick} className="card-hover cursor-pointer relative group">
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-2">
           <span className={clsx(
@@ -274,8 +351,23 @@ function ContentCard({ piece, onClick }: { piece: ContentPiece; onClick: () => v
               month: 'short',
             })}
           </span>
-          {piece.optimal_posting_time && (
-            <span className="text-xs text-gray-500">{piece.optimal_posting_time}</span>
+
+          {piece.performance_label ? (
+            <span className={clsx(
+              "text-xs px-2 py-0.5 rounded-full font-medium border",
+              piece.performance_label === 'viral' && "bg-purple-500/10 text-purple-400 border-purple-500/30",
+              piece.performance_label === 'good' && "bg-green-500/10 text-green-400 border-green-500/30",
+              piece.performance_label === 'flop' && "bg-red-500/10 text-red-400 border-red-500/30"
+            )}>
+              {piece.performance_label === 'viral' ? '🚀 Viral' : piece.performance_label === 'good' ? '👍 Bueno' : '📉 Flop'}
+            </span>
+          ) : (
+            <button
+              onClick={onFeedbackClick}
+              className="text-xs text-brand-400 hover:text-brand-300 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+            >
+              Log Results
+            </button>
           )}
         </div>
       )}
@@ -283,11 +375,19 @@ function ContentCard({ piece, onClick }: { piece: ContentPiece; onClick: () => v
   )
 }
 
-function ContentListItem({ piece, onClick }: { piece: ContentPiece; onClick: () => void }) {
+function ContentListItem({
+  piece,
+  onClick,
+  onFeedbackClick
+}: {
+  piece: ContentPiece;
+  onClick: () => void;
+  onFeedbackClick: (e: React.MouseEvent) => void;
+}) {
   return (
     <div
       onClick={onClick}
-      className="card-hover cursor-pointer flex items-center gap-4 p-4"
+      className="card-hover cursor-pointer flex items-center gap-4 p-4 group"
     >
       <EngagementBadge score={piece.engagement_score} />
 
@@ -310,15 +410,30 @@ function ContentListItem({ piece, onClick }: { piece: ContentPiece; onClick: () 
       </div>
 
       {piece.scheduled_date && (
-        <div className="text-right">
+        <div className="text-right flex flex-col items-end gap-1">
           <p className="text-sm text-white">
             {new Date(piece.scheduled_date).toLocaleDateString('es-ES', {
               day: 'numeric',
               month: 'short',
             })}
           </p>
-          {piece.optimal_posting_time && (
-            <p className="text-xs text-gray-500">{piece.optimal_posting_time}</p>
+
+          {piece.performance_label ? (
+            <span className={clsx(
+              "text-xs px-2 py-0.5 rounded-full font-medium border",
+              piece.performance_label === 'viral' && "bg-purple-500/10 text-purple-400 border-purple-500/30",
+              piece.performance_label === 'good' && "bg-green-500/10 text-green-400 border-green-500/30",
+              piece.performance_label === 'flop' && "bg-red-500/10 text-red-400 border-red-500/30"
+            )}>
+              {piece.performance_label === 'viral' ? '🚀 Viral' : piece.performance_label === 'good' ? '👍 Bueno' : '📉 Flop'}
+            </span>
+          ) : (
+            <button
+              onClick={onFeedbackClick}
+              className="text-xs text-brand-400 hover:text-brand-300 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+            >
+              Log Results
+            </button>
           )}
         </div>
       )}

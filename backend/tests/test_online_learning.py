@@ -148,6 +148,42 @@ class TestOnlineUpdateModule:
         # Cleanup
         reset_online_predictor(niche)
 
+    def test_satisfaction_learning(self, check_river_available, synthetic_features):
+        """Test user satisfaction model learning."""
+        from backend.ml.online_update import (
+            OnlineEngagementPredictor,
+            reset_online_predictor
+        )
+
+        niche = "test_satisfaction"
+        reset_online_predictor(niche)
+
+        predictor = OnlineEngagementPredictor(niche=niche)
+        features = {name: np.random.random() for name in synthetic_features}
+
+        # Predict before training (should be default 0.5)
+        pred_initial = predictor.predict_satisfaction(features)
+        assert pred_initial == 0.5
+
+        # Train with Viral (1.0)
+        for _ in range(10):
+            predictor.learn_satisfaction(features, 1.0)
+
+        # Predict after training (should be > 0.5)
+        pred_after = predictor.predict_satisfaction(features)
+        assert pred_after > 0.6
+
+        # Train with Flop (0.1) on new features
+        features_flop = {name: np.random.random() * -1 for name in synthetic_features}
+        for _ in range(10):
+            predictor.learn_satisfaction(features_flop, 0.1)
+
+        pred_flop = predictor.predict_satisfaction(features_flop)
+        assert pred_flop < 0.5
+
+        # Cleanup
+        reset_online_predictor(niche)
+
     def test_partial_fit_single(self, check_river_available, synthetic_features):
         """Test partial_fit with a single sample."""
         from backend.ml.online_update import (

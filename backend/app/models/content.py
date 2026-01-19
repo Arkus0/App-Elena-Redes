@@ -127,6 +127,10 @@ class GeneratedContent(Base):
     # Notes from analysis (why this sample is valuable for training)
     feedback_notes = Column(Text, nullable=True)
 
+    # Manual Human Feedback
+    performance_label = Column(String(50), nullable=True)  # viral, good, flop
+    feedback_submitted_at = Column(DateTime, nullable=True)
+
     # Patterns used
     patterns_used = Column(JSON, default=[])  # IDs of ExtractedPattern used
     framework_used = Column(String(100), nullable=True)  # AIDA, PAS, Hook-Value-CTA
