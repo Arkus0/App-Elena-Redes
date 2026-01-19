@@ -93,17 +93,17 @@ class EmbeddingPrecision(str, Enum):
     Recommended for typical SMB (100-2000 posts): "low" (128 dims) for safety.
 
     Levels:
-    - ultra_low (64 dims): Ultra rapido para PC modesto/sobremesa Almeria
-    - low (128 dims): Recomendado sobremesa normal
-    - medium (256 dims): Balance precision/velocidad
-    - high (384 dims): Full precision con reduccion
-    - max (None): Full raw 384 dims sin reduccion
+    - ultra_low (16 dims): For extreme noise contexts/scraping
+    - low (32 dims): Recommended for Auxiliary/SMB contexts
+    - medium (64 dims): Balanced
+    - high (128 dims): High precision
+    - max (None): Full raw 384 dims (Raw BERT/MiniLM output)
     """
-    ULTRA_LOW = "ultra_low"  # 64 dims - ultra rapido, PC modesto
-    LOW = "low"              # 128 dims - recomendado sobremesa normal
-    MEDIUM = "medium"        # 256 dims - balance
-    HIGH = "high"            # 384 dims - full precision con TruncatedSVD
-    MAX = "max"              # None = full raw 384 dims sin reduccion
+    ULTRA_LOW = "ultra_low"  # 16 dims
+    LOW = "low"              # 32 dims
+    MEDIUM = "medium"        # 64 dims
+    HIGH = "high"            # 128 dims
+    MAX = "max"              # None = full raw 384 dims
 
     @property
     def dimensions(self) -> int:
@@ -122,11 +122,11 @@ class EmbeddingPrecision(str, Enum):
 # Precision to dimensions mapping
 # IMPORTANT: max=None means full raw 384 dims (no reduction applied)
 PRECISION_TO_DIMS: Dict[str, Optional[int]] = {
-    "ultra_low": 64,   # ~30-64 realista rapido sobremesa
-    "low": 128,        # Recomendado sobremesa normal Almeria
-    "medium": 256,     # Balance precision/velocidad
-    "high": 384,       # Full dims con TruncatedSVD (preserva varianza)
-    "max": None,       # Full raw 384 dims - sin reduccion
+    "ultra_low": 16,   # Extreme noise context
+    "low": 32,         # Recommended for auxiliary signals (Transcript/OCR)
+    "medium": 64,      # Balanced for SMB
+    "high": 128,       # High precision
+    "max": None,       # Full raw 384 dims - no reduction
 }
 
 # REMOVED: No default precision - must be explicitly passed
@@ -390,7 +390,7 @@ class EmbeddingExtractor:
         if precision is None:
             raise ValueError(
                 "precision es REQUERIDO. Opciones: 'ultra_low', 'low', 'medium', 'high', 'max'. "
-                "Recomendado para sobremesa normal: 'low' (128 dims)."
+                "Recomendado para sobremesa normal: 'low' (32 dims)."
             )
 
         # Parse precision
@@ -402,7 +402,7 @@ class EmbeddingExtractor:
             else:
                 raise ValueError(
                     f"Precision '{precision}' no valida. Opciones: {valid_precisions}. "
-                    f"Recomendado para sobremesa normal: 'low' (128 dims)."
+                    f"Recomendado para sobremesa normal: 'low' (32 dims)."
                 )
         else:
             self._precision = precision
@@ -1043,8 +1043,8 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 70)
     print("Semantic Embeddings Feature Extractor - BrandPulse AI")
-    print("PRECISION LEVELS: ultra_low=64 / low=128 / medium=256 / high=384 / max=384 raw")
-    print("RECOMENDADO SOBREMESA NORMAL: 'low' (128 dims)")
+    print("PRECISION LEVELS: ultra_low=16 / low=32 / medium=64 / high=128 / max=384 raw")
+    print("RECOMENDADO SOBREMESA NORMAL: 'low' (32 dims)")
     print("=" * 70 + "\n")
 
     # Test texts (Spanish captions typical for local SMBs)
@@ -1106,5 +1106,5 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("Test Complete!")
     print("IMPORTANTE: precision es REQUERIDO - no hay default")
-    print("Recomendado sobremesa normal Almeria: 'low' (128 dims)")
+    print("Recomendado sobremesa normal Almeria: 'low' (32 dims)")
     print("=" * 70 + "\n")

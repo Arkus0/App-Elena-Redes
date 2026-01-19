@@ -1139,6 +1139,14 @@ class MLPredictor:
         # Features for training
         X = self._prepare_features(df)
 
+        # Check dimensionality (Anti-Overfitting Warning)
+        if X.shape[1] > 200:
+            logger.warning(
+                f"⚠️ High dimensionality detected ({X.shape[1]} features). "
+                f"Risk of overfitting for small datasets (SMB context). "
+                f"Consider using 'low' or 'medium' embedding precision."
+            )
+
         # === Train Engagement Model (XGBoost Regression) ===
         y_engagement = df["engagement_score_normalized"]
 
@@ -1270,6 +1278,13 @@ class MLPredictor:
 
         # Make prediction
         try:
+            # Check dimensionality (Anti-Overfitting Warning)
+            if X.shape[1] > 200:
+                logger.warning(
+                    f"⚠️ High dimensionality detected ({X.shape[1]} features) during prediction. "
+                    f"Ensure model matches configuration."
+                )
+
             score = float(model.predict(X)[0])
             score = max(0, min(100, score))  # Clip to 0-100
 
@@ -1306,7 +1321,18 @@ class MLPredictor:
             }
 
         except Exception as e:
-            logger.error(f"Prediction error with {model_source} model: {e}")
+            # Catch shape mismatch errors explicitly
+            error_str = str(e)
+            if "feature_names mismatch" in error_str or "feature mismatch" in error_str or "shape mismatch" in error_str:
+                logger.error(
+                    f"🛑 Model signature mismatch (likely due to dimensionality reduction changes). "
+                    f"The model expects different features than provided. "
+                    f"ACTION REQUIRED: Retrain the model using the training script. "
+                    f"Error details: {e}"
+                )
+            else:
+                logger.error(f"Prediction error with {model_source} model: {e}")
+
             return self._mock_engagement_prediction(content)
 
     def _generate_model_source_explanation(self, model_source: str, niche: str) -> str:

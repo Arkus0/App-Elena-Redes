@@ -5,13 +5,13 @@
  * Allows users to configure embedding precision for ML predictions.
  *
  * Precision Levels:
- * - Ultra Baja (64 dims): Ultra rapido para PC modesto
- * - Baja (128 dims): Recomendado sobremesa normal Almeria (NEW DEFAULT)
- * - Media (256 dims): Balance precision/velocidad
- * - Alta (384 dims): Full dims con TruncatedSVD
+ * - Ultra Baja (16 dims): Ultra rapido para PC modesto
+ * - Baja (32 dims): Recomendado sobremesa normal Almeria (NEW DEFAULT)
+ * - Media (64 dims): Balance precision/velocidad
+ * - Alta (128 dims): Full dims con TruncatedSVD
  * - Maxima (full raw): Sin reduccion - mejor matices creativos/slang
  *
- * Default changed to "low" (128 dims) - safe for typical sobremesa:
+ * Default changed to "low" (32 dims) - safe for typical sobremesa:
  * - 100-2000 posts typical
  * - Training < 30 seconds
  * - RAM < 1GB on normal desktop
@@ -126,37 +126,37 @@ export const EmbeddingConfiguration: React.FC<EmbeddingConfigurationProps> = ({
         setOptions([
           {
             value: 'ultra_low',
-            label: 'Ultra Baja (64 dims - ultra rapido)',
-            dimensions: 64,
+            label: 'Ultra Baja (16 dims - ultra rapido)',
+            dimensions: 16,
             description: 'Ultra rapido para PC modesto/sobremesa Almeria',
-            performance: 'Muy rapido, minimo RAM (~0.3GB)',
+            performance: 'Muy rapido, minimo RAM (~0.2GB)',
             use_case: 'PC modesto, volumen muy alto',
             is_recommended: false,
           },
           {
             value: 'low',
-            label: 'Baja (128 dims - Recomendada)',
-            dimensions: 128,
+            label: 'Baja (32 dims - Recomendada)',
+            dimensions: 32,
             description: 'Recomendado para sobremesa normal Almeria',
-            performance: 'Rapido, bajo RAM (~0.5GB). Train <30s',
+            performance: 'Rapido, bajo RAM (~0.3GB). Train <30s',
             use_case: 'Sobremesa normal',
             is_recommended: true,
           },
           {
             value: 'medium',
-            label: 'Media (256 dims)',
-            dimensions: 256,
+            label: 'Media (64 dims)',
+            dimensions: 64,
             description: 'Balance entre precision y velocidad',
-            performance: 'Buen balance, RAM moderado (~1GB)',
+            performance: 'Buen balance, RAM moderado (~0.5GB)',
             use_case: 'Balance',
             is_recommended: false,
           },
           {
             value: 'high',
-            label: 'Alta (384 dims)',
-            dimensions: 384,
-            description: 'Precision completa con TruncatedSVD',
-            performance: 'Full dims con reduccion. Train <1min',
+            label: 'Alta (128 dims)',
+            dimensions: 128,
+            description: 'Alta precision con TruncatedSVD',
+            performance: 'Alta dims con reduccion. Train <1min',
             use_case: 'Precision maxima con reduccion',
             is_recommended: false,
           },
@@ -245,8 +245,8 @@ export const EmbeddingConfiguration: React.FC<EmbeddingConfigurationProps> = ({
               <div className="absolute right-0 z-10 w-72 p-3 mt-2 text-sm bg-gray-900 text-white rounded-lg shadow-lg">
                 <p className="font-medium mb-1">Elige segun tu PC - Baja recomendado sobremesa normal Almeria</p>
                 <p className="text-gray-300">
-                  Ultra Baja (64 dims): PC modesto muy rapido.
-                  Baja (128 dims): Recomendado sobremesa normal.
+                  Ultra Baja (16 dims): PC modesto muy rapido.
+                  Baja (32 dims): Recomendado sobremesa normal.
                   Maxima (full raw): Solo si tienes buen hardware, mejor matices creativos/slang.
                 </p>
               </div>

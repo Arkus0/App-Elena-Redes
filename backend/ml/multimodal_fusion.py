@@ -72,14 +72,15 @@ logger = logging.getLogger(__name__)
 
 # Default: Full 384 dims for all modalities (recommended for SMB volumes)
 CAPTION_DEFAULT_DIM = 384    # Caption embeddings (primary text)
-TRANSCRIPT_DEFAULT_DIM = 384  # Whisper transcription embeddings
-OCR_DEFAULT_DIM = 384        # EasyOCR text overlay embeddings
+TRANSCRIPT_DEFAULT_DIM = 32  # SMB-Safe Default (Low)
+OCR_DEFAULT_DIM = 32         # SMB-Safe Default (Low)
 
 # Precision level mappings
 PRECISION_TO_DIMS = {
-    "low": 128,
-    "medium": 256,
-    "high": 384,
+    "ultra_low": 16,
+    "low": 32,
+    "medium": 64,
+    "high": 128,
     "max": 384,
 }
 
@@ -211,10 +212,25 @@ class MultimodalEmbeddingExtractor:
         """
         self._precision = precision.lower()
 
-        # Get dimensions from precision or overrides
+        # Get base dimensions from precision
         base_dims = get_dims_for_precision(self._precision)
-        self.transcript_dims = transcript_dims if transcript_dims else base_dims
-        self.ocr_dims = ocr_dims if ocr_dims else base_dims
+
+        # === ANTI-OVERFITTING STRATEGY ===
+        # We strictly enforce dimensionality reduction for auxiliary signals (Transcript/OCR)
+        # unless explicitly overridden. This prevents "Curse of Dimensionality" in SMB datasets.
+        # Even in "max" mode, auxiliary signals should default to a compressed representation (max 64).
+
+        if transcript_dims is not None:
+            self.transcript_dims = transcript_dims
+        else:
+            # If base_dims is high (>64), clamp auxiliary to 64 (Medium)
+            # If base_dims is low (<=64), keep it (e.g., 32 or 16)
+            self.transcript_dims = min(base_dims, 64)
+
+        if ocr_dims is not None:
+            self.ocr_dims = ocr_dims
+        else:
+            self.ocr_dims = min(base_dims, 64)
 
         # Check if reduction is needed
         self._uses_reduction = (self.transcript_dims < EMBEDDING_DIM or
