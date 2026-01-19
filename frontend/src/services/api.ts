@@ -68,8 +68,7 @@ export const authApi = {
   login: async (email: string, password: string) => {
     const { data } = await api.post<{ access_token: string; token_type: string }>(
       '/auth/login',
-      null,
-      { params: { email, password } }
+      { email, password }
     )
     return data
   },
