@@ -39,7 +39,7 @@ class ExtractedPattern(Base):
 
     # Effectiveness metrics
     avg_engagement_score = Column(Float, default=0.0)
-    usage_count = Column(Integer, default=0)  # How many top posts use this
+    usage_count = Column(Integer, default=1)  # How many top posts use this
     success_rate = Column(Float, default=0.0)  # % of posts using this that performed well
 
     # Specifics by pattern type

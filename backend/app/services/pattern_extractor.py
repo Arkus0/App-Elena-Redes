@@ -3,18 +3,11 @@ Pattern Extractor Service
 Extracts winning patterns from scraped competitor posts
 """
 import logging
-import sys
-from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update
-
-# Add project root to path for ml module imports
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.models.pattern import ExtractedPattern, PatternType
 from app.models.scraped_post import ScrapedPost
@@ -28,9 +21,10 @@ logger = logging.getLogger(__name__)
 try:
     from ml.features_embeddings import get_embedding_extractor
     EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    logger.warning("ML module not found. Semantic deduplication will be disabled.")
+except ImportError as e:
+    logger.critical(f"CRITICAL: ML module not found or failed to load ({e}). Semantic Deduplication is DISABLED. This may lead to database pollution.")
     EMBEDDINGS_AVAILABLE = False
+    get_embedding_extractor = None
 
 
 class PatternExtractor:

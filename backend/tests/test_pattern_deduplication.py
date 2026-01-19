@@ -68,7 +68,8 @@ def mock_embedding_extractor():
     mock_extractor.uses_reduction = True
 
     with patch("app.services.pattern_extractor.get_embedding_extractor", return_value=mock_extractor):
-        yield mock_extractor
+        with patch("app.services.pattern_extractor.EMBEDDINGS_AVAILABLE", True):
+            yield mock_extractor
 
 class TestPatternDeduplication:
 
