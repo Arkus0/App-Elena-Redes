@@ -11,11 +11,14 @@ import {
   Trash2,
   Instagram,
   ExternalLink,
+  Search,
+  ArrowLeft,
+  ShieldCheck,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { competitorsApi } from '../services/api'
 import { useBusinessStore } from '../stores/businessStore'
-import type { Competitor } from '../types'
+import type { Competitor, CompetitorPreviewResponse } from '../types'
 import clsx from 'clsx'
 
 export default function Competitors() {
@@ -31,6 +34,11 @@ export default function Competitors() {
   const [newPlatform, setNewPlatform] = useState('instagram')
   const [newHandle, setNewHandle] = useState('')
   const [isAdding, setIsAdding] = useState(false)
+
+  // Search & Verify State
+  const [searchStep, setSearchStep] = useState<'search' | 'preview'>('search')
+  const [previewData, setPreviewData] = useState<CompetitorPreviewResponse | null>(null)
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false)
 
   useEffect(() => {
     if (!currentBusiness) return
@@ -49,7 +57,31 @@ export default function Competitors() {
     loadCompetitors()
   }, [currentBusiness, setCompetitors])
 
-  const handleAddCompetitor = async () => {
+  // Reset modal state
+  useEffect(() => {
+    if (!showAddModal) {
+      setSearchStep('search')
+      setPreviewData(null)
+      setNewHandle('')
+      setNewPlatform('instagram')
+    }
+  }, [showAddModal])
+
+  const handleSearch = async () => {
+    if (!newHandle) return
+    setIsPreviewLoading(true)
+    try {
+      const data = await competitorsApi.previewCompetitor(newPlatform, newHandle.replace('@', ''))
+      setPreviewData(data)
+      setSearchStep('preview')
+    } catch (error: any) {
+      toast.error(error.response?.data?.detail || 'Usuario no encontrado o privado')
+    } finally {
+      setIsPreviewLoading(false)
+    }
+  }
+
+  const handleConfirmAdd = async () => {
     if (!currentBusiness || !newHandle) return
 
     setIsAdding(true)
@@ -61,7 +93,6 @@ export default function Competitors() {
       )
       addCompetitor(competitor)
       setShowAddModal(false)
-      setNewHandle('')
       toast.success('Competidor añadido. Analizando...')
     } catch (error: any) {
       toast.error(error.response?.data?.detail || 'Error añadiendo competidor')
@@ -158,53 +189,155 @@ export default function Competitors() {
       {showAddModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="card max-w-md w-full">
-            <h3 className="text-lg font-semibold text-white mb-4">Añadir competidor</h3>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Plataforma</label>
-                <select
-                  value={newPlatform}
-                  onChange={(e) => setNewPlatform(e.target.value)}
-                  className="input-field"
+            {/* Header */}
+            <div className="flex items-center gap-2 mb-6">
+              {searchStep === 'preview' && (
+                <button
+                  onClick={() => setSearchStep('search')}
+                  className="p-1 -ml-2 text-gray-400 hover:text-white"
                 >
-                  <option value="instagram">Instagram</option>
-                  <option value="tiktok">TikTok</option>
-                  <option value="linkedin">LinkedIn</option>
-                </select>
-              </div>
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+              )}
+              <h3 className="text-lg font-semibold text-white">
+                {searchStep === 'search' ? 'Buscar Competidor' : 'Verificar Perfil'}
+              </h3>
+            </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Handle</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">@</span>
-                  <input
-                    type="text"
-                    value={newHandle}
-                    onChange={(e) => setNewHandle(e.target.value)}
-                    className="input-field pl-8"
-                    placeholder="competidor_ejemplo"
-                  />
+            {searchStep === 'search' ? (
+              // Step 1: Search Form
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Plataforma</label>
+                  <select
+                    value={newPlatform}
+                    onChange={(e) => setNewPlatform(e.target.value)}
+                    className="input-field"
+                  >
+                    <option value="instagram">Instagram</option>
+                    <option value="tiktok">TikTok</option>
+                    <option value="linkedin">LinkedIn</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Usuario (Handle)</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">@</span>
+                    <input
+                      type="text"
+                      value={newHandle}
+                      onChange={(e) => setNewHandle(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                      className="input-field pl-8"
+                      placeholder={newPlatform === 'linkedin' ? 'company-name' : 'usuario'}
+                      autoFocus
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-3 mt-6 pt-2">
+                  <button onClick={() => setShowAddModal(false)} className="btn-secondary">
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleSearch}
+                    disabled={!newHandle || isPreviewLoading}
+                    className="btn-primary flex items-center gap-2"
+                  >
+                    {isPreviewLoading ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <>
+                        <Search className="w-4 h-4" />
+                        Buscar
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
-            </div>
+            ) : (
+              // Step 2: Preview Card
+              <div className="space-y-6">
+                {previewData && (
+                  <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                    <div className="flex items-start gap-4">
+                      {/* Avatar */}
+                      <div className="relative">
+                        <img
+                          src={previewData.profile_pic_url || `https://ui-avatars.com/api/?name=${previewData.handle}`}
+                          alt={previewData.handle}
+                          className="w-16 h-16 rounded-full object-cover border-2 border-brand-500"
+                        />
+                        <div className={clsx(
+                          "absolute -bottom-1 -right-1 p-1 rounded-full",
+                          previewData.platform === 'instagram' ? 'bg-pink-500' :
+                          previewData.platform === 'tiktok' ? 'bg-black' : 'bg-blue-600'
+                        )}>
+                          {previewData.platform === 'instagram' ? <Instagram className="w-3 h-3 text-white" /> :
+                           <span className="text-[10px] font-bold text-white px-0.5">T</span>}
+                        </div>
+                      </div>
 
-            <div className="flex justify-end gap-3 mt-6">
-              <button onClick={() => setShowAddModal(false)} className="btn-secondary">
-                Cancelar
-              </button>
-              <button
-                onClick={handleAddCompetitor}
-                disabled={!newHandle || isAdding}
-                className="btn-primary"
-              >
-                {isAdding ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                ) : (
-                  'Añadir'
+                      {/* Info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-bold text-white text-lg truncate">{previewData.handle}</h4>
+                          {previewData.verified && (
+                            <ShieldCheck className="w-4 h-4 text-blue-400" />
+                          )}
+                        </div>
+                        <p className="text-gray-400 text-sm truncate">{previewData.full_name}</p>
+
+                        <div className="flex items-center gap-4 mt-2">
+                          <div>
+                            <span className="font-bold text-white">{previewData.followers_count.toLocaleString()}</span>
+                            <span className="text-gray-500 text-xs ml-1">seguidores</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Bio */}
+                    {previewData.biography && (
+                      <div className="mt-4 p-3 bg-gray-900/50 rounded text-sm text-gray-300 border-l-2 border-brand-500 italic">
+                        "{previewData.biography.length > 100
+                          ? previewData.biography.substring(0, 100) + '...'
+                          : previewData.biography}"
+                      </div>
+                    )}
+
+                    {/* Warnings */}
+                    {previewData.is_private && (
+                      <div className="mt-3 flex items-center gap-2 text-yellow-400 text-sm bg-yellow-400/10 p-2 rounded">
+                        <AlertCircle className="w-4 h-4" />
+                        <span>Cuenta privada. El análisis será limitado.</span>
+                      </div>
+                    )}
+                  </div>
                 )}
-              </button>
-            </div>
+
+                <div className="flex justify-end gap-3 mt-6">
+                  <button onClick={() => setSearchStep('search')} className="btn-secondary">
+                    Atrás
+                  </button>
+                  <button
+                    onClick={handleConfirmAdd}
+                    disabled={isAdding}
+                    className="btn-primary flex items-center gap-2"
+                  >
+                    {isAdding ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <>
+                        <CheckCircle className="w-4 h-4" />
+                        Confirmar y Analizar
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

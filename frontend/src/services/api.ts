@@ -5,6 +5,7 @@ import type {
   BusinessStatus,
   Competitor,
   CompetitorAnalysis,
+  CompetitorPreviewResponse,
   ContentCalendar,
   ContentPiece,
   EngagementPrediction,
@@ -151,6 +152,14 @@ export const competitorsApi = {
 
   addCompetitor: async (businessId: number, platform: string, handle: string) => {
     const { data } = await api.post<Competitor>(`/competitors/${businessId}/add`, {
+      platform,
+      handle,
+    })
+    return data
+  },
+
+  previewCompetitor: async (platform: string, handle: string) => {
+    const { data } = await api.post<CompetitorPreviewResponse>('/competitors/preview', {
       platform,
       handle,
     })
