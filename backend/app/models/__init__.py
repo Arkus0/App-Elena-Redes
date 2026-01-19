@@ -7,7 +7,7 @@ from app.models.scraped_post import ScrapedPost
 from app.models.pattern import ExtractedPattern
 from app.models.content import GeneratedContent, ContentCalendar
 from app.models.user import User
-from app.models.abtest import ABTestLog, PredictionLog
+from app.models.abtest import ABTestLog, PredictionLog, ABTestExperiment, ABTestVariant
 from app.models.kpi_weights import UserKPIWeights, MultiOutputModelMetrics
 from app.models.user_config import (
     UserConfig,
@@ -27,6 +27,8 @@ __all__ = [
     "User",
     "ABTestLog",
     "PredictionLog",
+    "ABTestExperiment",
+    "ABTestVariant",
     "UserKPIWeights",
     "MultiOutputModelMetrics",
     # Unified User Config

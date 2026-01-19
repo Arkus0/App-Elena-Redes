@@ -216,3 +216,36 @@ class PredictionLog(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "model_version": self.model_version,
         }
+
+
+class ABTestExperiment(Base):
+    """
+    A/B Test Experiment - Parent container for bandit tests.
+    """
+    __tablename__ = "ab_test_experiments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False, index=True)
+    test_name = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    variants = relationship("ABTestVariant", back_populates="experiment", cascade="all, delete-orphan")
+
+
+class ABTestVariant(Base):
+    """
+    A/B Test Variant - Specific option in the bandit (e.g. 'reel', 'carousel').
+    Stores Alpha/Beta parameters for Thompson Sampling.
+    """
+    __tablename__ = "ab_test_variants"
+
+    id = Column(Integer, primary_key=True, index=True)
+    experiment_id = Column(Integer, ForeignKey("ab_test_experiments.id"), nullable=False, index=True)
+    variant_name = Column(String(50), nullable=False)
+    alpha_param = Column(Integer, default=1)  # Success count
+    beta_param = Column(Integer, default=1)   # Failure count
+
+    # Relationships
+    experiment = relationship("ABTestExperiment", back_populates="variants")
