@@ -185,34 +185,34 @@ const KPI_TEMPLATES: KPITemplate[] = [
 const PRECISION_OPTIONS: PrecisionOption[] = [
   {
     value: 'ultra_low',
-    label: 'Ultra Baja (64 dims)',
-    dimensions: 64,
+    label: 'Ultra Baja (16 dims)',
+    dimensions: 16,
     description: 'Ultra rapido para PC modesto',
-    performance: '~0.3GB RAM, train <15s',
+    performance: '~0.2GB RAM, train <15s',
     is_recommended: false,
   },
   {
     value: 'low',
-    label: 'Baja (128 dims)',
-    dimensions: 128,
+    label: 'Baja (32 dims)',
+    dimensions: 32,
     description: 'Recomendado para sobremesa normal',
-    performance: '~0.5GB RAM, train <30s',
+    performance: '~0.3GB RAM, train <30s',
     is_recommended: true,
   },
   {
     value: 'medium',
-    label: 'Media (256 dims)',
-    dimensions: 256,
+    label: 'Media (64 dims)',
+    dimensions: 64,
     description: 'Balance precision/velocidad',
-    performance: '~1GB RAM, train <1min',
+    performance: '~0.5GB RAM, train <1min',
     is_recommended: false,
   },
   {
     value: 'high',
-    label: 'Alta (384 dims)',
-    dimensions: 384,
-    description: 'Full precision con reduccion',
-    performance: '~1.5GB RAM, train <2min',
+    label: 'Alta (128 dims)',
+    dimensions: 128,
+    description: 'Alta precision con reduccion',
+    performance: '~1.0GB RAM, train <2min',
     is_recommended: false,
   },
   {
@@ -471,7 +471,7 @@ export const UnifiedConfiguration: React.FC<UnifiedConfigurationProps> = ({
             <Zap className="w-5 h-5 text-yellow-600" />
             <span className="font-medium">Precision de Embeddings</span>
             <span className="text-sm text-gray-500">
-              ({PRECISION_OPTIONS.find(p => p.value === config.embedding_precision)?.dimensions || 128} dims)
+              ({PRECISION_OPTIONS.find(p => p.value === config.embedding_precision)?.dimensions || 32} dims)
             </span>
           </div>
           {expandedSections.embedding ? <ChevronUp /> : <ChevronDown />}
