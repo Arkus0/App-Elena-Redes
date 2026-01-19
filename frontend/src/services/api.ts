@@ -5,8 +5,10 @@ import type {
   BusinessStatus,
   Competitor,
   CompetitorAnalysis,
+  CompetitorDiscoveryRequest,
   CompetitorPreviewResponse,
   ContentCalendar,
+  DiscoveredCompetitor,
   ContentPiece,
   EngagementPrediction,
   EngagementWeights,
@@ -155,6 +157,11 @@ export const competitorsApi = {
       platform,
       handle,
     })
+    return data
+  },
+
+  discoverCompetitors: async (request: CompetitorDiscoveryRequest) => {
+    const { data } = await api.post<DiscoveredCompetitor[]>('/competitors/discover', request)
     return data
   },
 

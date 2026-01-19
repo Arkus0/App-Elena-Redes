@@ -23,6 +23,32 @@ class CompetitorPreviewResponse(BaseModel):
     verified: bool = False
 
 
+class CompetitorDiscoveryRequest(BaseModel):
+    hashtags: List[str]
+    location_keywords: Optional[List[str]] = []
+    niche_keywords: Optional[List[str]] = []
+
+    # Size Filters
+    min_followers: int = 100
+    max_followers: int = 100000
+
+    # Activity Filters (New)
+    require_active: bool = True           # If True, applies the filters below
+    max_days_since_last_post: int = 30    # Ignore accounts inactive for > 30 days
+    min_posts_last_month: int = 1         # Ignore accounts with 0 posts recently
+
+
+class DiscoveredCompetitor(BaseModel):
+    handle: str
+    platform: str
+    followers: int
+    relevance_score: int
+    activity_status: str  # "Active", "Inactive", "Unknown"
+    last_post_date: Optional[str] = None
+    match_reasons: List[str]
+    profile_pic_url: Optional[str] = None
+
+
 class ScrapedPostSummary(BaseModel):
     """Summary of a scraped post"""
     id: int

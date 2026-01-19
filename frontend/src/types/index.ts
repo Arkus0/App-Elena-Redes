@@ -86,6 +86,28 @@ export interface CompetitorPreviewResponse {
   verified: boolean
 }
 
+export interface CompetitorDiscoveryRequest {
+  hashtags: string[]
+  location_keywords: string[]
+  niche_keywords: string[]
+  min_followers: number
+  max_followers: number
+  require_active: boolean
+  max_days_since_last_post: number
+  min_posts_last_month: number
+}
+
+export interface DiscoveredCompetitor {
+  handle: string
+  platform: string
+  followers: number
+  relevance_score: number
+  activity_status: string
+  last_post_date: string | null
+  match_reasons: string[]
+  profile_pic_url: string | null
+}
+
 // Scraped Post
 export interface ScrapedPost {
   id: number

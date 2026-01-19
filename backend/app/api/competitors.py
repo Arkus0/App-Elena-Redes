@@ -22,9 +22,26 @@ from app.schemas.competitor import (
     PatternInsight,
     ScrapedPostSummary,
     CompetitorPreviewResponse,
+    CompetitorDiscoveryRequest,
+    DiscoveredCompetitor,
 )
 
 router = APIRouter()
+
+
+@router.post("/discover", response_model=List[DiscoveredCompetitor])
+async def discover_competitors(
+    request: CompetitorDiscoveryRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Discover competitors based on hashtags, location, and niche.
+    Includes activity filtering.
+    """
+    from app.services.discovery_service import DiscoveryService
+    service = DiscoveryService()
+
+    return await service.discover_competitors(request)
 
 
 @router.post("/preview", response_model=CompetitorPreviewResponse)
