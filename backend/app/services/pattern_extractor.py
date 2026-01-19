@@ -3,10 +3,18 @@ Pattern Extractor Service
 Extracts winning patterns from scraped competitor posts
 """
 import logging
+import sys
+from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
+import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
+
+# Add project root to path for ml module imports
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.models.pattern import ExtractedPattern, PatternType
 from app.models.scraped_post import ScrapedPost
@@ -15,6 +23,14 @@ from app.models.business import Business
 from app.services.ai_service import AIService
 
 logger = logging.getLogger(__name__)
+
+# Import embedding extractor
+try:
+    from ml.features_embeddings import get_embedding_extractor
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    logger.warning("ML module not found. Semantic deduplication will be disabled.")
+    EMBEDDINGS_AVAILABLE = False
 
 
 class PatternExtractor:
@@ -25,6 +41,90 @@ class PatternExtractor:
 
     def __init__(self):
         self.ai_service = AIService()
+
+    def _compute_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """Compute cosine similarity between two vectors"""
+        if not vec1 or not vec2:
+            return 0.0
+
+        try:
+            v1 = np.array(vec1)
+            v2 = np.array(vec2)
+
+            norm1 = np.linalg.norm(v1)
+            norm2 = np.linalg.norm(v2)
+
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+
+            return float(np.dot(v1, v2) / (norm1 * norm2))
+        except Exception as e:
+            logger.error(f"Error computing similarity: {e}")
+            return 0.0
+
+    def _deduplicate_batch(self, patterns: List[ExtractedPattern]) -> List[ExtractedPattern]:
+        """
+        Deduplicate patterns within the current batch before DB check.
+        Uses greedy clustering: first pattern is kept, subsequent similar ones are merged/dropped.
+        """
+        if not EMBEDDINGS_AVAILABLE or not patterns:
+            return patterns
+
+        unique_patterns = []
+        try:
+            # Use "low" precision (32 dims) for efficiency as requested/recommended
+            extractor = get_embedding_extractor(precision="low")
+
+            # 1. Pre-compute embeddings for the batch
+            for p in patterns:
+                if not p.description:
+                    continue
+
+                # Generate embedding
+                # get_raw_embedding returns full 384 dims
+                raw = extractor.get_raw_embedding(p.description)
+
+                # Transform to target dims (32 if precision="low")
+                if extractor.uses_reduction:
+                    emb = extractor.transform(raw)
+                else:
+                    emb = raw
+
+                p.embedding = emb.tolist()
+
+            # 2. Greedy Deduplication
+            for p in patterns:
+                if not p.embedding:
+                    unique_patterns.append(p)
+                    continue
+
+                is_duplicate = False
+                for existing in unique_patterns:
+                    if not existing.embedding:
+                        continue
+
+                    sim = self._compute_similarity(p.embedding, existing.embedding)
+
+                    # Threshold 0.90 for batch dedup too
+                    if sim > 0.90:
+                        is_duplicate = True
+                        # Merge examples into the 'canonical' one
+                        if p.examples:
+                            existing.examples = (existing.examples or []) + (p.examples or [])
+                            # We don't cap at 10 here yet, will do at DB merge
+
+                        # Merge usage count logic (if it was >1 in extraction)
+                        existing.usage_count = (existing.usage_count or 1) + (p.usage_count or 1)
+                        break
+
+                if not is_duplicate:
+                    unique_patterns.append(p)
+
+            return unique_patterns
+
+        except Exception as e:
+            logger.error(f"Error in batch deduplication: {e}")
+            return patterns
 
     async def extract_patterns_from_competitor(
         self,
@@ -232,13 +332,110 @@ class PatternExtractor:
             )
             patterns.append(pattern)
 
-        # Save all patterns
-        for pattern in patterns:
-            db.add(pattern)
+        # === Semantic Deduplication & Storage ===
+
+        # 1. Intra-Batch Deduplication
+        patterns = self._deduplicate_batch(patterns)
+
+        # 2. Fetch Existing Patterns for this Business
+        # We need to compare against the client's existing knowledge base
+        existing_patterns_result = await db.execute(
+            select(ExtractedPattern)
+            .where(ExtractedPattern.business_id == business_id)
+        )
+        existing_patterns = existing_patterns_result.scalars().all()
+
+        # Pre-load embeddings for comparison (optimize logic)
+        existing_vectors = []
+        for ep in existing_patterns:
+             # Ensure embedding exists and is valid
+             if ep.embedding and isinstance(ep.embedding, list):
+                 existing_vectors.append((ep, ep.embedding))
+
+        # 3. Check-Merge-Insert Flow
+        patterns_to_add = []
+        updated_patterns = []
+
+        for new_pattern in patterns:
+            # Ensure embedding exists (might have been skipped if batch dedup failed or empty desc)
+            if not new_pattern.embedding and EMBEDDINGS_AVAILABLE and new_pattern.description:
+                try:
+                    extractor = get_embedding_extractor(precision="low")
+                    raw = extractor.get_raw_embedding(new_pattern.description)
+                    if extractor.uses_reduction:
+                        emb = extractor.transform(raw)
+                    else:
+                        emb = raw
+                    new_pattern.embedding = emb.tolist()
+                except Exception as e:
+                    logger.warning(f"Failed to generate embedding for pattern: {e}")
+
+            match_found = False
+            best_match_pattern = None
+            best_match_score = 0.0
+
+            # Vector comparison against DB patterns
+            if new_pattern.embedding and existing_vectors:
+                for existing_p, existing_vec in existing_vectors:
+                    sim = self._compute_similarity(new_pattern.embedding, existing_vec)
+                    if sim > 0.90 and sim > best_match_score:
+                        best_match_score = sim
+                        best_match_pattern = existing_p
+
+            if best_match_pattern:
+                # UPDATE Existing (The "Freshness" Logic)
+                match_found = True
+
+                # Update Timestamps
+                best_match_pattern.last_active_at = datetime.utcnow()
+
+                # Increment Count
+                best_match_pattern.usage_count = (best_match_pattern.usage_count or 0) + 1
+
+                # Weighted Score Update (EMA)
+                # Formula: New Score = (Old * 0.3) + (New * 0.7)
+                old_score = best_match_pattern.avg_engagement_score or 0.0
+                new_score = new_pattern.avg_engagement_score or 0.0
+                best_match_pattern.avg_engagement_score = (old_score * 0.3) + (new_score * 0.7)
+
+                # Merge Examples (Append and Keep Last 10)
+                current_examples = list(best_match_pattern.examples) if best_match_pattern.examples else []
+                new_examples = new_pattern.examples or []
+
+                # Simple append
+                merged_examples = current_examples + new_examples
+
+                # Dedup examples by string representation to be clean (optional but good)
+                # (Simple string set dedup)
+                unique_examples = []
+                seen_examples = set()
+                for ex in merged_examples:
+                    ex_str = str(ex)
+                    if ex_str not in seen_examples:
+                        seen_examples.add(ex_str)
+                        unique_examples.append(ex)
+
+                # Keep last 10
+                best_match_pattern.examples = unique_examples[-10:]
+
+                updated_patterns.append(best_match_pattern)
+
+            else:
+                # INSERT New
+                # new_pattern.created_at is default
+                new_pattern.last_active_at = datetime.utcnow()
+                new_pattern.usage_count = 1
+                patterns_to_add.append(new_pattern)
+
+        # Bulk save new patterns
+        for p in patterns_to_add:
+            db.add(p)
+
+        # Existing patterns are attached to session so they will update on commit
 
         await db.commit()
 
-        return patterns
+        return patterns_to_add + updated_patterns
 
     async def extract_anti_patterns(
         self,

@@ -62,7 +62,11 @@ class ExtractedPattern(Base):
     source_post_ids = Column(JSON, default=[])  # IDs of posts this was extracted from
     extracted_at = Column(DateTime, default=datetime.utcnow)
 
+    # Vector embedding for semantic deduplication
+    embedding = Column(JSON, nullable=True)
+
     # Timestamps
+    last_active_at = Column(DateTime, default=datetime.utcnow)  # Last time this pattern was identified
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
