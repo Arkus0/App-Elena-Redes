@@ -1,5 +1,7 @@
 # BrandPulse AI - Backend Dependencies
 
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 # --- Core Framework ---
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
