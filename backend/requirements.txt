@@ -13,7 +13,7 @@ aiosqlite==0.19.0
 # --- Authentication ---
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-bcrypt==4.0.1  # CRÍTICO: Versión específica para evitar error de hash/72 bytes
+bcrypt==4.0.1  # CRITICAL: Specific version to avoid hash/72 bytes error
 
 # --- AI & Scraping ---
 openai>=1.0.0
@@ -28,7 +28,7 @@ tenacity==8.2.3
 email-validator>=2.1.0
 
 # --- Data Processing ---
-pandas>=2.1.4  # CRÍTICO: Flexibilizado para compatibilidad con Python 3.12
+pandas>=2.1.4  # CRITICAL: Relaxed for Python 3.12 compatibility
 numpy==1.26.3
 
 # --- Machine Learning ---
