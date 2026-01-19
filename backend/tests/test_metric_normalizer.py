@@ -40,24 +40,24 @@ class TestWeightedEngagement:
     """Tests for weighted engagement calculation"""
 
     def test_basic_weighted_engagement(self):
-        """Verify weighted engagement formula: likes*1 + comments*3 + saves*5 + shares*4"""
+        """Verify weighted engagement formula: likes*1 + comments*2 + saves*5 + shares*10"""
         # Using module-level imports
 
         normalizer = MetricNormalizer()
 
         post = {
             "likes_count": 100,      # 100 * 1 = 100
-            "comments_count": 10,    # 10 * 3 = 30
+            "comments_count": 10,    # 10 * 2 = 20
             "saves_count": 5,        # 5 * 5 = 25
-            "shares_count": 2,       # 2 * 4 = 8
+            "shares_count": 2,       # 2 * 10 = 20
         }
-        # Total: 100 + 30 + 25 + 8 = 163
+        # Total: 100 + 20 + 25 + 20 = 165
 
         engagement = normalizer.calculate_weighted_engagement(post)
-        assert engagement == 163.0, f"Expected 163, got {engagement}"
+        assert engagement == 165.0, f"Expected 165, got {engagement}"
 
     def test_weighted_engagement_with_views(self):
-        """Verify views have low weight (0.1)"""
+        """Verify views have low weight (0.01)"""
         # Using module-level imports
 
         normalizer = MetricNormalizer()
@@ -67,11 +67,11 @@ class TestWeightedEngagement:
             "comments": 0,
             "saves": 0,
             "shares": 0,
-            "views": 10000,  # 10000 * 0.1 = 1000
+            "views": 10000,  # 10000 * 0.01 = 100
         }
 
         engagement = normalizer.calculate_weighted_engagement(post)
-        assert engagement == 1000.0, f"Expected 1000, got {engagement}"
+        assert engagement == 100.0, f"Expected 100, got {engagement}"
 
     def test_weighted_engagement_alternative_field_names(self):
         """Verify support for alternative field names (likeCount, etc.)"""
@@ -81,11 +81,11 @@ class TestWeightedEngagement:
 
         post = {
             "likeCount": 500,     # likes * 1 = 500
-            "commentCount": 50,   # comments * 3 = 150
+            "commentCount": 50,   # comments * 2 = 100
         }
 
         engagement = normalizer.calculate_weighted_engagement(post)
-        assert engagement == 650.0, f"Expected 650, got {engagement}"
+        assert engagement == 600.0, f"Expected 600, got {engagement}"
 
     def test_weighted_engagement_with_none_values(self):
         """Verify None values are treated as 0"""
@@ -556,10 +556,10 @@ class TestUtilityFunctions:
             apply_log=False
         )
 
-        # Weighted: 1000 + 300 + 250 + 100 = 1650
-        # RPI = 1650 / 1000 = 1.65
+        # Weighted: 1000 + 200 + 250 + 250 = 1700
+        # RPI = 1700 / 1000 = 1.7
 
-        assert abs(rpi - 1.65) < 0.01, f"Expected RPI=1.65, got {rpi}"
+        assert abs(rpi - 1.7) < 0.01, f"Expected RPI=1.7, got {rpi}"
 
 
 class TestMultipleAuthors:

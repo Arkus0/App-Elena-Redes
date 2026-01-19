@@ -154,6 +154,7 @@ MULTIMODAL_FEATURE_COLUMNS = get_multimodal_feature_names()
 # Legacy compatibility (reduced dims)
 TRANSCRIPT_PCA_DIM = TRANSCRIPT_DEFAULT_DIM  # Now full by default
 OCR_PCA_DIM = OCR_DEFAULT_DIM  # Now full by default
+CAPTION_PCA_DIM = CAPTION_DEFAULT_DIM  # Alias for backward compatibility
 
 
 # =============================================================================

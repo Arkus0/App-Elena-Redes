@@ -303,7 +303,7 @@ class TestIncrementalLearning:
                 logger.info(
                     f"Batch {i+1}/{n_batches}: "
                     f"total_samples={result.total_samples}, "
-                    f"MAE={current_mae:.4f if current_mae else 'N/A'}, "
+                    f"MAE={f'{current_mae:.4f}' if current_mae is not None else 'N/A'}, "
                     f"time={result.update_time_ms:.1f}ms"
                 )
 
@@ -316,8 +316,10 @@ class TestIncrementalLearning:
         logger.info(f"\n{'='*60}")
         logger.info(f"Test Complete!")
         logger.info(f"Total samples processed: {final_status['samples_seen']}")
-        logger.info(f"Final MAE: {final_status['current_mae']:.4f if final_status['current_mae'] else 'N/A'}")
-        logger.info(f"Best MAE: {final_status['best_mae']:.4f if final_status['best_mae'] else 'N/A'}")
+        mae_str = f"{final_status['current_mae']:.4f}" if final_status['current_mae'] is not None else "N/A"
+        best_mae_str = f"{final_status['best_mae']:.4f}" if final_status['best_mae'] is not None else "N/A"
+        logger.info(f"Final MAE: {mae_str}")
+        logger.info(f"Best MAE: {best_mae_str}")
         logger.info(f"Total time: {total_time:.2f}s")
         logger.info(f"Avg time per batch: {total_time/n_batches*1000:.1f}ms")
         logger.info(f"{'='*60}\n")
@@ -389,8 +391,8 @@ class TestDriftDetection:
 
         drift_detected, magnitude = detect_drift(niche, predictions, actuals)
 
-        assert drift_detected is False
-        assert magnitude < 0.3
+        assert drift_detected == False
+        assert magnitude <= 0.3
 
     def test_detect_drift_with_drift(self, check_river_available):
         """Test drift detection with significant drift."""
@@ -402,7 +404,7 @@ class TestDriftDetection:
 
         drift_detected, magnitude = detect_drift(niche, predictions, actuals)
 
-        assert drift_detected is True
+        assert drift_detected == True
         assert magnitude > 0.3
 
 
