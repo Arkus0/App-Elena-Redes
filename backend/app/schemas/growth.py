@@ -444,3 +444,20 @@ class FeatureImportanceResponse(BaseModel):
         ...,
         description="Top 5 features más importantes"
     )
+
+
+class GrowthProjectionPoint(BaseModel):
+    """Punto individual en la proyección de crecimiento."""
+    date: str = Field(..., description="Fecha de la proyección (YYYY-MM-DD)")
+    followers: int = Field(..., description="Número de seguidores proyectado")
+    daily_gain: int = Field(..., description="Ganancia diaria proyectada")
+    scenario: str = Field(..., description="Escenario de crecimiento (organic, high_performance, viral_spike)")
+
+
+class GrowthProjectionResponse(BaseModel):
+    """Response de la proyección de crecimiento de seguidores."""
+    current_followers: int = Field(..., description="Seguidores actuales")
+    growth_rate_base: float = Field(..., description="Tasa de crecimiento base diaria")
+    projected_gain_from_content: int = Field(..., description="Ganancia adicional proyectada por contenido")
+    projected_total_gain: int = Field(..., description="Ganancia total proyectada")
+    projection: List[GrowthProjectionPoint] = Field(..., description="Serie temporal de proyección (30 días)")

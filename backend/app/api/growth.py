@@ -11,13 +11,21 @@ Endpoints para el motor de predicción de crecimiento (GrowthPredictionEngine):
 - GET /features/importance: Importancia de features
 """
 import logging
+from datetime import datetime, timedelta
 from typing import List
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_db
+from app.models.business import Business
+from app.models.competitor import Competitor
+from app.models.content import GeneratedContent
 from app.schemas.growth import (
     GrowthPredictionRequest,
     GrowthPredictionResponse,
+    GrowthProjectionResponse,
     BatchPredictionRequest,
     BatchPredictionResponse,
     GrowthTrainingRequest,
@@ -411,6 +419,96 @@ async def get_feature_importance() -> FeatureImportanceResponse:
         importance=importance,
         top_features=top_features
     )
+
+
+@router.get(
+    "/{business_id}/prediction",
+    response_model=GrowthProjectionResponse,
+    summary="Get Follower Growth Projection",
+    description="Proyecta el crecimiento de seguidores a 30 días basado en histórico y contenido programado."
+)
+async def get_growth_prediction(
+    business_id: int,
+    db: AsyncSession = Depends(get_db)
+) -> GrowthProjectionResponse:
+    """Obtiene proyección de crecimiento de seguidores."""
+    # 1. Obtener Business
+    result = await db.execute(select(Business).where(Business.id == business_id))
+    business = result.scalar_one_or_none()
+    if not business:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Business not found"
+        )
+
+    # 2. Obtener Current Followers desde Competitor (Own Profile)
+    # Buscar competidor que coincida con el handle propio
+    handle = business.own_instagram_username or business.instagram_handle
+    current_followers = 0
+    base_growth_rate = 0.0005  # Default 0.05% diario
+
+    if handle:
+        # Limpiar handle de @ si existe
+        handle = handle.lstrip("@")
+        stmt = select(Competitor).where(
+            Competitor.business_id == business_id,
+            Competitor.handle == handle
+        )
+        result = await db.execute(stmt)
+        competitor = result.scalar_one_or_none()
+
+        if competitor:
+            current_followers = competitor.followers_count
+            # TODO: Calcular tasa real basada en histórico si existe
+            # Por ahora usamos heurística o default
+            if competitor.followers_count > 0:
+                # Si tuviéramos histórico: (actual - hace_30_dias) / 30 / hace_30_dias
+                pass
+
+    # Fallback si no hay datos de competidor
+    if current_followers == 0:
+        # Intentar obtener de AccountHealth si existe?
+        # Por simplicidad, si es 0, la proyección será plana + viral spikes
+        pass
+
+    # 3. Obtener Contenido Programado (Next 30 days)
+    start_date = datetime.now().date()
+    end_date = start_date + timedelta(days=30)
+
+    stmt = select(GeneratedContent).where(
+        GeneratedContent.business_id == business_id,
+        GeneratedContent.scheduled_date >= start_date,
+        GeneratedContent.scheduled_date <= end_date
+    )
+    result = await db.execute(stmt)
+    contents = result.scalars().all()
+
+    scheduled_impacts = []
+    for c in contents:
+        rpi = 1.0
+        # Intentar obtener RPI raw de la predicción ML completa
+        if c.ml_prediction_data and isinstance(c.ml_prediction_data, dict):
+            rpi = c.ml_prediction_data.get('predicted_rpi_raw', 1.0)
+        # Fallback a engagement_score (0-100)
+        elif c.engagement_score:
+            # 50 = RPI 1.0 (Average)
+            rpi = c.engagement_score / 50.0
+
+        if c.scheduled_date:
+            scheduled_impacts.append({
+                "date": c.scheduled_date.strftime("%Y-%m-%d"),
+                "rpi": float(rpi)
+            })
+
+    # 4. Simular Crecimiento
+    engine = _get_engine()
+    projection_data = engine.simulate_growth(
+        current_followers=current_followers,
+        base_daily_rate=base_growth_rate,
+        scheduled_content_impacts=scheduled_impacts
+    )
+
+    return GrowthProjectionResponse(**projection_data)
 
 
 # =============================================================================

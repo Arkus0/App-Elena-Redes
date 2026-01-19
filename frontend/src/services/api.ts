@@ -371,6 +371,21 @@ export interface MLFullPrediction {
   ml_summary: string
 }
 
+export interface GrowthProjectionPoint {
+  date: string
+  followers: number
+  daily_gain: number
+  scenario: string
+}
+
+export interface GrowthProjectionResponse {
+  current_followers: number
+  growth_rate_base: number
+  projected_gain_from_content: number
+  projected_total_gain: number
+  projection: GrowthProjectionPoint[]
+}
+
 // Model Health Types
 export interface ModelHealthAlert {
   niche: string
@@ -499,6 +514,11 @@ export const mlApi = {
         ready_to_publish: boolean
       }
     >('/ml/analyze-draft', content)
+    return data
+  },
+
+  getGrowthPrediction: async (businessId: number) => {
+    const { data } = await api.get<GrowthProjectionResponse>(`/growth/${businessId}/prediction`)
     return data
   },
 }
