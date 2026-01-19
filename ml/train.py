@@ -40,6 +40,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
+# --- Environment Setup (Critical: Must run before importing 'app') ---
+# Add backend root to sys.path to allow importing 'app' modules
+# Assumes this script is located at: backend/ml/train.py
+CURRENT_FILE = Path(__file__).resolve()
+BACKEND_ROOT = CURRENT_FILE.parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+# --- Third Party Imports ---
 import numpy as np
 import pandas as pd
 import joblib
@@ -47,6 +56,20 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import xgboost as xgb
+from sqlalchemy import create_engine, text
+
+# --- App Imports ---
+try:
+    from app.core.config import settings
+    # We strictly use SQLALCHEMY_DATABASE_URI as requested
+    DB_URI = str(settings.SQLALCHEMY_DATABASE_URI)
+except ImportError:
+    logging.warning("Could not import app settings. Database features will be disabled.")
+    DB_URI = None
+except AttributeError:
+    # Fallback if SQLALCHEMY_DATABASE_URI is missing, try generic DATABASE_URL
+    from app.core.config import settings
+    DB_URI = str(getattr(settings, "DATABASE_URL", ""))
 
 # Import embedding feature extractor (now with configurable precision, 0-based indexing)
 try:
@@ -246,20 +269,86 @@ def load_data_from_csv(file_path: str, niche: str = None) -> pd.DataFrame:
 
 def load_data_from_database(niche: str = None) -> pd.DataFrame:
     """
-    Load training data from database.
+    Load training data from database joining ScrapedPost -> Competitor -> Business.
 
     Args:
-        niche: Optional niche to filter by
+        niche: Optional niche (business_type) to filter by.
 
     Returns:
-        DataFrame with training data
+        DataFrame with training data (captions, metrics, metadata).
     """
     logger.info(f"Loading data from database for niche: {niche or 'all'}")
 
-    # TODO: Implement actual database loading
-    # For now, return empty DataFrame as placeholder
-    logger.warning("Database connection not configured. Please provide CSV data.")
-    return pd.DataFrame()
+    if not DB_URI:
+        logger.error("Database URI not configured in settings.")
+        return pd.DataFrame()
+
+    try:
+        # 1. Handle async driver incompatibility with pandas
+        # Convert 'postgresql+asyncpg://...' to 'postgresql://...' for sync connection
+        sync_db_uri = DB_URI.replace("+asyncpg", "").replace("+aiosqlite", "")
+
+        engine = create_engine(sync_db_uri)
+
+        # 2. Construct Query
+        # Join scraped_posts -> competitors -> businesses to allow filtering by niche
+        query_str = """
+        SELECT
+            sp.caption,
+            sp.likes_count as likes,
+            sp.comments_count as comments,
+            sp.shares_count as shares,
+            sp.saves_count as saves,
+            sp.engagement_rate,
+            sp.content_format,
+            sp.is_viral,
+            sp.video_duration_seconds as video_duration,
+            b.business_type
+        FROM scraped_posts sp
+        JOIN competitors c ON sp.competitor_id = c.id
+        JOIN businesses b ON c.business_id = b.id
+        WHERE 1=1
+        """
+
+        params = {}
+        if niche:
+            query_str += " AND b.business_type = :niche"
+            params['niche'] = niche.lower()
+
+        # 3. Execute and Load
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query_str), conn, params=params)
+
+        if df.empty:
+            logger.warning(f"No data found in database for niche: {niche}")
+            return df
+
+        # 4. Post-processing for Pipeline Compatibility
+
+        # Map content_format (string) to boolean flags required by training
+        # Assumes content_format values like 'reel', 'image', 'carousel', 'video'
+        df['is_reel'] = df['content_format'].astype(str).str.contains('reel|tiktok|video', case=False, regex=True).astype(int)
+        df['is_static'] = df['content_format'].astype(str).str.contains('static|image|carousel', case=False, regex=True).astype(int)
+
+        # Fill missing text/metrics to prevent training crashes
+        df['caption'] = df['caption'].fillna("")
+        df['likes'] = df['likes'].fillna(0)
+        df['comments'] = df['comments'].fillna(0)
+        df['shares'] = df['shares'].fillna(0)
+        df['saves'] = df['saves'].fillna(0)
+
+        logger.info(f"Successfully loaded {len(df)} samples from database.")
+
+        # Log distribution (helpful for debugging bias)
+        if 'is_viral' in df.columns:
+            viral_count = df['is_viral'].sum()
+            logger.info(f"Distribution: {viral_count} viral posts, {len(df) - viral_count} regular posts")
+
+        return df
+
+    except Exception as e:
+        logger.exception(f"Database loading failed: {e}")
+        return pd.DataFrame()
 
 
 def add_embedding_features(
