@@ -14,9 +14,10 @@ import {
   Save,
   RefreshCw,
   CheckCircle,
+  Beaker,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { contentApi } from '../services/api'
+import { contentApi, abTestApi, type ABTestExperiment } from '../services/api'
 import { useBusinessStore } from '../stores/businessStore'
 import type { ContentPiece, EngagementPrediction } from '../types'
 import clsx from 'clsx'
@@ -31,6 +32,8 @@ export default function ContentDetail() {
   const [isLoading, setIsLoading] = useState(true)
   const [isGeneratingVariations, setIsGeneratingVariations] = useState(false)
   const [activeTab, setActiveTab] = useState<'content' | 'script' | 'filming'>('content')
+  const [activeExperiment, setActiveExperiment] = useState<ABTestExperiment | null>(null)
+  const [isCreatingTest, setIsCreatingTest] = useState(false)
 
   useEffect(() => {
     if (!currentBusiness || !contentId) return
@@ -71,6 +74,34 @@ export default function ContentDetail() {
       toast.error('Error generando variaciones')
     } finally {
       setIsGeneratingVariations(false)
+    }
+  }
+
+  const handleCreateTest = async () => {
+    if (!content || variations.length === 0) return
+    setIsCreatingTest(true)
+    try {
+      const experiment = await abTestApi.createTest({
+        test_name: `Experiment: ${content.title}`,
+        original_content_id: content.id,
+        variants: [
+          {
+            variant_name: 'A',
+            content_structure: { hook: content.hook_text, caption: content.caption }
+          },
+          ...variations.map(v => ({
+            variant_name: v.variation_label || 'B',
+            content_structure: { hook: v.hook_text, caption: v.caption }
+          }))
+        ]
+      })
+      setActiveExperiment(experiment)
+      toast.success('A/B Test launched successfully!')
+    } catch (error) {
+      console.error(error)
+      toast.error('Failed to create test')
+    } finally {
+      setIsCreatingTest(false)
     }
   }
 
@@ -408,7 +439,43 @@ export default function ContentDetail() {
           {/* Variations */}
           {variations.length > 0 && (
             <div className="card">
-              <h3 className="font-medium text-white mb-4">Variaciones A/B</h3>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-medium text-white">Variaciones A/B</h3>
+                {variations.length > 0 && !activeExperiment && (
+                   <button
+                    onClick={handleCreateTest}
+                    disabled={isCreatingTest}
+                    className="btn-primary text-xs flex items-center gap-1"
+                   >
+                     {isCreatingTest ? (
+                       <RefreshCw className="w-3 h-3 animate-spin" />
+                     ) : (
+                       <Beaker className="w-3 h-3" />
+                     )}
+                     Lanzar Test A/B
+                   </button>
+                )}
+              </div>
+
+              {activeExperiment && (
+                <div className="mb-4 p-3 bg-brand-500/20 border border-brand-500/30 rounded-lg">
+                  <div className="flex items-center gap-2 text-brand-400 mb-2">
+                    <Beaker className="w-4 h-4" />
+                    <span className="font-bold text-sm">Experimento Activo</span>
+                  </div>
+                  <p className="text-xs text-gray-300">
+                    El sistema alternará automáticamente entre las variantes para encontrar la ganadora.
+                  </p>
+                  <div className="mt-2 flex gap-2">
+                     {activeExperiment.variants.map(v => (
+                       <div key={v.id} className="text-xs bg-gray-800 px-2 py-1 rounded">
+                         <span className="text-gray-400">{v.variant_name}:</span> {v.alpha_param + v.beta_param} impresiones
+                       </div>
+                     ))}
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-3">
                 {variations.map((v) => (
                   <div

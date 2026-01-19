@@ -36,9 +36,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.abtest import ABTestLog, PredictionLog, ABTestExperiment, ABTestVariant
 from app.models.content import GeneratedContent
+from app.models.business import Business
 from app.models.user import User
 from app.api.deps import get_current_user
 from app.services.abtest_service import perform_thompson_sampling
+from app.schemas.abtest import ABTestExperimentCreate, ABTestExperimentResponse, ABTestVariantResponse
 
 # Online learning integration
 try:
@@ -164,12 +166,52 @@ async def update_bandit_params(
     business_id: int,
     variant_name: str,
     is_success: bool,
-    test_name: str = "Format Optimization"
+    test_name: str = "Format Optimization",
+    content_id: Optional[int] = None
 ):
     """
     Update Alpha/Beta parameters for the bandit.
+    Handles both global format optimization and content-specific experiments.
     """
-    # Find active experiment
+    # 1. Update Content-Specific Experiment (if content_id provided)
+    if content_id:
+        # Check if content is part of an experiment
+        # Either it's the original content or a variation
+        content_result = await db.execute(
+            select(GeneratedContent).where(GeneratedContent.id == content_id)
+        )
+        content = content_result.scalar_one_or_none()
+
+        if content:
+            original_id = content.variation_of if content.variation_of else content.id
+            variant_label = content.variation_label if content.variation_label else "A" # Default to A if not labeled
+
+            # Find experiment linked to this content
+            exp_result = await db.execute(
+                select(ABTestExperiment)
+                .options(selectinload(ABTestExperiment.variants))
+                .where(ABTestExperiment.original_content_id == original_id)
+                .where(ABTestExperiment.is_active == True)
+            )
+            specific_experiment = exp_result.scalar_one_or_none()
+
+            if specific_experiment:
+                target_variant = None
+                for v in specific_experiment.variants:
+                    if v.variant_name == variant_label:
+                        target_variant = v
+                        break
+
+                if target_variant:
+                    if is_success:
+                        target_variant.alpha_param += 1
+                    else:
+                        target_variant.beta_param += 1
+                    db.add(target_variant)
+                    logger.info(f"Updated specific experiment {specific_experiment.id} variant {variant_label}")
+
+    # 2. Update Global Format Optimization (Fallback/Parallel)
+    # Find active global experiment
     result = await db.execute(
         select(ABTestExperiment)
         .options(selectinload(ABTestExperiment.variants))
@@ -288,6 +330,112 @@ async def _perform_online_update(
 # =============================================================================
 # Endpoints
 # =============================================================================
+
+@router.post("/create", response_model=ABTestExperimentResponse)
+async def create_ab_test(
+    experiment_data: ABTestExperimentCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a new A/B test experiment.
+    """
+    # Verify business access (assuming business_id is inferred or passed.
+    # For now, we'll use the user's business. In a real app, we might need business_id in request)
+    # Get user's business
+    result = await db.execute(
+        select(Business).where(Business.user_id == current_user.id)
+    )
+    business = result.scalar_one_or_none()
+
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found for user")
+
+    # Create Experiment
+    experiment = ABTestExperiment(
+        business_id=business.id,
+        test_name=experiment_data.test_name,
+        original_content_id=experiment_data.original_content_id,
+        is_active=True
+    )
+    db.add(experiment)
+    await db.flush() # Get ID
+
+    # Create Variants
+    for v_data in experiment_data.variants:
+        variant = ABTestVariant(
+            experiment_id=experiment.id,
+            variant_name=v_data.variant_name,
+            content_structure=v_data.content_structure,
+            alpha_param=1,
+            beta_param=1
+        )
+        db.add(variant)
+
+    await db.commit()
+    await db.refresh(experiment)
+    # Eager load variants for response
+    result = await db.execute(
+        select(ABTestExperiment)
+        .options(selectinload(ABTestExperiment.variants))
+        .where(ABTestExperiment.id == experiment.id)
+    )
+    experiment = result.scalar_one()
+
+    return experiment
+
+
+@router.get("/{experiment_id}", response_model=ABTestExperimentResponse)
+async def get_experiment(
+    experiment_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get details of a specific experiment.
+    """
+    result = await db.execute(
+        select(ABTestExperiment)
+        .options(selectinload(ABTestExperiment.variants))
+        .where(ABTestExperiment.id == experiment_id)
+    )
+    experiment = result.scalar_one_or_none()
+
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    return experiment
+
+
+@router.post("/{experiment_id}/winner")
+async def set_experiment_winner(
+    experiment_id: int,
+    variant_name: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Manually set a winner and stop the experiment.
+    """
+    result = await db.execute(
+        select(ABTestExperiment)
+        .where(ABTestExperiment.id == experiment_id)
+    )
+    experiment = result.scalar_one_or_none()
+
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    # Stop experiment
+    experiment.is_active = False
+
+    # We could log the manual winner somewhere, but for now just stopping is enough
+    # as the stats (alpha/beta) tell the history.
+
+    await db.commit()
+
+    return {"status": "success", "message": f"Experiment stopped. Winner: {variant_name}"}
+
 
 @router.get("/{experiment_id}/recommend", response_model=RecommendationResponse)
 async def recommend_variant_endpoint(
@@ -411,7 +559,13 @@ async def log_abtest_result(
     # === UPDATE BANDIT PARAMS ===
     # Success threshold: Normalized engagement >= 50 (approx 5% engagement rate)
     is_success = actual_engagement_normalized >= 50.0
-    await update_bandit_params(db, content.business_id, content.content_format, is_success)
+    await update_bandit_params(
+        db,
+        content.business_id,
+        content.content_format,
+        is_success,
+        content_id=content.id
+    )
 
     await db.commit()
     await db.refresh(ab_log)
@@ -648,7 +802,13 @@ async def submit_online_feedback(
     # === UPDATE BANDIT PARAMS ===
     # Success threshold: Normalized engagement >= 50
     is_success = actual_engagement_normalized >= 50.0
-    await update_bandit_params(db, content.business_id, content.content_format, is_success)
+    await update_bandit_params(
+        db,
+        content.business_id,
+        content.content_format,
+        is_success,
+        content_id=content.id
+    )
 
     await db.commit()
 

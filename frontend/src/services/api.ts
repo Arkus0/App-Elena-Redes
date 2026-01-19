@@ -730,6 +730,57 @@ export const multiOutputApi = {
   },
 }
 
+// ============ A/B TESTING ============
+
+export interface ABTestVariantCreate {
+  variant_name: string
+  content_structure?: Record<string, any>
+}
+
+export interface ABTestExperimentCreate {
+  test_name: string
+  original_content_id?: number
+  variants: ABTestVariantCreate[]
+}
+
+export interface ABTestVariant {
+  id: number
+  variant_name: string
+  alpha_param: number
+  beta_param: number
+  content_structure?: Record<string, any>
+}
+
+export interface ABTestExperiment {
+  id: number
+  business_id: number
+  test_name: string
+  original_content_id?: number
+  is_active: boolean
+  variants: ABTestVariant[]
+}
+
+export const abTestApi = {
+  createTest: async (data: ABTestExperimentCreate) => {
+    const { data: response } = await api.post<ABTestExperiment>('/abtest/create', data)
+    return response
+  },
+
+  getResults: async (experimentId: number) => {
+    const { data } = await api.get<ABTestExperiment>(`/abtest/${experimentId}`)
+    return data
+  },
+
+  setWinner: async (experimentId: number, variantName: string) => {
+    const { data } = await api.post<{ status: string; message: string }>(
+      `/abtest/${experimentId}/winner`,
+      null,
+      { params: { variant_name: variantName } }
+    )
+    return data
+  },
+}
+
 // ============ EXTENSION API (API Keys for sync) ============
 
 export const extensionApi = {

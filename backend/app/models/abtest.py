@@ -226,6 +226,10 @@ class ABTestExperiment(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False, index=True)
+
+    # Optional link to specific content for content-level A/B tests
+    original_content_id = Column(Integer, ForeignKey("generated_content.id"), nullable=True, index=True)
+
     test_name = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -246,6 +250,9 @@ class ABTestVariant(Base):
     variant_name = Column(String(50), nullable=False)
     alpha_param = Column(Integer, default=1)  # Success count
     beta_param = Column(Integer, default=1)   # Failure count
+
+    # Content structure for specific variation (e.g. {"hook": "Hook B", "caption": "..."})
+    content_structure = Column(JSON, nullable=True)
 
     # Relationships
     experiment = relationship("ABTestExperiment", back_populates="variants")
