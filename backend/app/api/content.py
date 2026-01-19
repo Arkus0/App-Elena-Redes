@@ -63,6 +63,8 @@ async def generate_content_calendar(
         platforms=request.platforms,
         content_mix=request.content_mix,
         refresh_data=request.refresh_competitor_data,
+        effort_level=request.effort_level,
+        current_mood=request.current_mood,
     )
 
     # Get content pieces

@@ -12,6 +12,12 @@ import {
   AlertTriangle,
   Info,
   Zap,
+  Video,
+  VideoOff,
+  Camera,
+  Timer,
+  Film,
+  Smartphone
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { contentApi, mlApi, type MLFullPrediction } from '../services/api'
@@ -55,6 +61,8 @@ export default function ContentGenerator() {
     platforms: ['instagram', 'tiktok'],
     content_mix: CONTENT_MIX_PRESETS.balanced.mix,
     refresh_competitor_data: true,
+    effort_level: 'medium', // low, medium, pro
+    current_mood: 'on_camera', // camera_shy, on_camera
   })
 
   const updateFormData = (updates: Partial<typeof formData>) => {
@@ -328,6 +336,118 @@ export default function ContentGenerator() {
                 className="h-full bg-green-500 rounded-full"
                 style={{ width: `${formData.content_mix.static}%` }}
               />
+            </div>
+          </div>
+        </div>
+
+        {/* Production Constraints */}
+        <div className="border-t border-gray-700 pt-6">
+          <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+            <Film className="w-5 h-5 text-brand-400" />
+            Restricciones de Producción
+          </h3>
+
+          <div className="space-y-6">
+            {/* Effort Level */}
+            <div>
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mb-3">
+                <Timer className="w-4 h-4" />
+                Nivel de Esfuerzo (Tiempo disponible)
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <button
+                  onClick={() => updateFormData({ effort_level: 'low' })}
+                  className={clsx(
+                    'p-3 rounded-lg border text-left transition-all',
+                    formData.effort_level === 'low'
+                      ? 'border-green-500 bg-green-500/10'
+                      : 'border-gray-700 hover:border-gray-600'
+                  )}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <Smartphone className="w-4 h-4 text-green-400" />
+                    <span className="text-green-400 font-medium">Bajo (5 min)</span>
+                  </div>
+                  <p className="text-xs text-gray-400">Solo móvil. Una toma. Sin edición compleja.</p>
+                </button>
+
+                <button
+                  onClick={() => updateFormData({ effort_level: 'medium' })}
+                  className={clsx(
+                    'p-3 rounded-lg border text-left transition-all',
+                    formData.effort_level === 'medium'
+                      ? 'border-yellow-500 bg-yellow-500/10'
+                      : 'border-gray-700 hover:border-gray-600'
+                  )}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <Video className="w-4 h-4 text-yellow-400" />
+                    <span className="text-yellow-400 font-medium">Medio (15 min)</span>
+                  </div>
+                  <p className="text-xs text-gray-400">Edición básica, textos y cortes simples.</p>
+                </button>
+
+                <button
+                  onClick={() => updateFormData({ effort_level: 'pro' })}
+                  className={clsx(
+                    'p-3 rounded-lg border text-left transition-all',
+                    formData.effort_level === 'pro'
+                      ? 'border-red-500 bg-red-500/10'
+                      : 'border-gray-700 hover:border-gray-600'
+                  )}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <Film className="w-4 h-4 text-red-400" />
+                    <span className="text-red-400 font-medium">Pro (45+ min)</span>
+                  </div>
+                  <p className="text-xs text-gray-400">Transiciones, B-Roll, voz en off, audio sync.</p>
+                </button>
+              </div>
+            </div>
+
+            {/* Current Mood */}
+            <div>
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mb-3">
+                <Camera className="w-4 h-4" />
+                Mood Actual
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => updateFormData({ current_mood: 'camera_shy' })}
+                  className={clsx(
+                    'p-3 rounded-lg border text-left transition-all flex items-center gap-3',
+                    formData.current_mood === 'camera_shy'
+                      ? 'border-brand-500 bg-brand-500/10'
+                      : 'border-gray-700 hover:border-gray-600'
+                  )}
+                >
+                  <div className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center">
+                    <VideoOff className="w-5 h-5 text-gray-400" />
+                  </div>
+                  <div>
+                    <p className="text-white font-medium">Camera Shy</p>
+                    <p className="text-xs text-gray-400">Voz en off, B-roll, producto</p>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => updateFormData({ current_mood: 'on_camera' })}
+                  className={clsx(
+                    'p-3 rounded-lg border text-left transition-all flex items-center gap-3',
+                    formData.current_mood === 'on_camera'
+                      ? 'border-brand-500 bg-brand-500/10'
+                      : 'border-gray-700 hover:border-gray-600'
+                  )}
+                >
+                  <div className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center">
+                    <Camera className="w-5 h-5 text-brand-400" />
+                  </div>
+                  <div>
+                    <p className="text-white font-medium">On Camera</p>
+                    <p className="text-xs text-gray-400">Talking head, personal</p>
+                  </div>
+                </button>
+              </div>
             </div>
           </div>
         </div>

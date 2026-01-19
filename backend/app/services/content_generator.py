@@ -45,7 +45,9 @@ class ContentGenerator:
         primary_goal: str = "engagement",
         platforms: List[str] = None,
         content_mix: Dict[str, int] = None,
-        refresh_data: bool = True
+        refresh_data: bool = True,
+        effort_level: str = "medium",
+        current_mood: str = "on_camera"
     ) -> ContentCalendar:
         """
         Generate a full content calendar for a month
@@ -188,7 +190,9 @@ class ContentGenerator:
                 content_format=content_format,
                 goal=goal,
                 similar_top_posts=relevant_posts,
-                ml_recommendations=ml_recommendations  # Inject ML insights
+                ml_recommendations=ml_recommendations,  # Inject ML insights
+                effort_level=effort_level,
+                current_mood=current_mood
             )
 
             # Create content record
