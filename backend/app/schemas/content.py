@@ -4,6 +4,17 @@ Content Schemas - Content generation and calendar
 from datetime import datetime, date
 from typing import Optional, List
 from pydantic import BaseModel, Field
+from enum import Enum
+
+
+class PerformanceLabel(str, Enum):
+    VIRAL = "viral"
+    GOOD = "good"
+    FLOP = "flop"
+
+
+class ContentFeedbackRequest(BaseModel):
+    performance: PerformanceLabel
 
 
 class ContentGenerationRequest(BaseModel):

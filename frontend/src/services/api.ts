@@ -290,6 +290,14 @@ export const contentApi = {
     )
     return data
   },
+
+  submitFeedback: async (businessId: number, contentId: number, performance: 'viral' | 'good' | 'flop') => {
+    const { data } = await api.post<{ status: string; performance_label: string }>(
+      `/content/${businessId}/content/${contentId}/feedback`,
+      { performance }
+    )
+    return data
+  },
 }
 
 // ============ ML PREDICTIONS ============

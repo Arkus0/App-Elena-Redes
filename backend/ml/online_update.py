@@ -197,6 +197,7 @@ class OnlineEngagementPredictor:
         """
         self.niche = niche
         self._models: Dict[str, Any] = {}  # target -> River model
+        self._satisfaction_model: Any = None  # Single target model (0.0 - 1.0)
         self._scalers: Dict[str, Any] = {}  # target -> River scaler
         self._metrics: OnlineModelMetrics = OnlineModelMetrics()
         self._feature_names: List[str] = []
@@ -204,6 +205,7 @@ class OnlineEngagementPredictor:
 
         # River metrics for tracking
         self._river_metrics: Dict[str, Any] = {}
+        self._satisfaction_metric: Any = None
 
         # Try to load existing model
         self._load_model()
@@ -214,7 +216,7 @@ class OnlineEngagementPredictor:
 
     def _create_model(self) -> Any:
         """
-        Create a new River online model.
+        Create a new River online model (ARF).
 
         Uses AdaptiveRandomForestRegressor which:
         - Handles concept drift automatically
@@ -240,6 +242,27 @@ class OnlineEngagementPredictor:
 
         return model
 
+    def _create_satisfaction_model(self) -> Any:
+        """
+        Create a lightweight secondary model for user satisfaction scores.
+        Uses HoeffdingAdaptiveTreeRegressor (single tree) for minimal footprint.
+        Target: 0.0 to 1.0
+        """
+        if not RIVER_AVAILABLE:
+            return None
+
+        # Very lightweight single tree for satisfaction score
+        model = compose.Pipeline(
+            ("scale", preprocessing.StandardScaler()),
+            ("model", tree.HoeffdingAdaptiveTreeRegressor(
+                grace_period=20,
+                leaf_prediction='adaptive',
+                model_selector_decay=0.9,
+                seed=42
+            ))
+        )
+        return model
+
     def _initialize_models(self, feature_names: List[str]):
         """Initialize models for all targets."""
         if not RIVER_AVAILABLE:
@@ -254,6 +277,10 @@ class OnlineEngagementPredictor:
                 "mae": metrics.MAE(),
                 "r2": metrics.R2()
             }
+
+        # Initialize satisfaction model
+        self._satisfaction_model = self._create_satisfaction_model()
+        self._satisfaction_metric = metrics.MAE()
 
         self._is_initialized = True
         logger.info(f"Initialized online models for niche={self.niche}, targets={TARGET_NAMES}")
@@ -271,10 +298,16 @@ class OnlineEngagementPredictor:
                 data = pickle.load(f)
 
             self._models = data.get("models", {})
+            self._satisfaction_model = data.get("satisfaction_model", None)
             self._metrics = data.get("metrics", OnlineModelMetrics())
             self._feature_names = data.get("feature_names", [])
             self._river_metrics = data.get("river_metrics", {})
+            self._satisfaction_metric = data.get("satisfaction_metric", None)
             self._is_initialized = bool(self._models)
+
+            # Initialize satisfaction metric if missing from old model file
+            if RIVER_AVAILABLE and self._satisfaction_metric is None:
+                 self._satisfaction_metric = metrics.MAE()
 
             logger.info(
                 f"Loaded online model for niche={self.niche}, "
@@ -293,9 +326,11 @@ class OnlineEngagementPredictor:
         try:
             data = {
                 "models": self._models,
+                "satisfaction_model": self._satisfaction_model,
                 "metrics": self._metrics,
                 "feature_names": self._feature_names,
                 "river_metrics": self._river_metrics,
+                "satisfaction_metric": self._satisfaction_metric,
                 "version": self.MODEL_VERSION,
                 "niche": self.niche,
                 "saved_at": datetime.utcnow().isoformat(),
@@ -360,6 +395,36 @@ class OnlineEngagementPredictor:
         self._metrics.samples_seen += 1
         self._metrics.updated_at = datetime.utcnow().isoformat()
 
+    def learn_satisfaction(self, features: Dict[str, float], score: float) -> None:
+        """
+        Update the user satisfaction model with a new label.
+
+        Args:
+            features: Feature dictionary
+            score: Target score (0.0=Flop, 0.7=Good, 1.0=Viral)
+        """
+        if not RIVER_AVAILABLE:
+            return
+
+        if not self._is_initialized:
+            self._initialize_models(list(features.keys()))
+
+        if self._satisfaction_model is None:
+            self._satisfaction_model = self._create_satisfaction_model()
+
+        try:
+            # Update metric first
+            y_pred = self._satisfaction_model.predict_one(features)
+            if self._satisfaction_metric is None:
+                 self._satisfaction_metric = metrics.MAE()
+            self._satisfaction_metric.update(score, y_pred)
+
+            # Learn
+            self._satisfaction_model.learn_one(features, score)
+            self._save_model()  # Persist immediately for feedback loop
+        except Exception as e:
+            logger.error(f"Error updating satisfaction model: {e}")
+
     def partial_fit_batch(
         self,
         features_df: pd.DataFrame,
@@ -420,6 +485,29 @@ class OnlineEngagementPredictor:
                 predictions[target_name] = 0.0
 
         return predictions
+
+    def predict_satisfaction(self, features: Dict[str, float]) -> float:
+        """
+        Predict user satisfaction score (0.0 - 1.0).
+
+        Args:
+            features: Feature dictionary
+
+        Returns:
+            Predicted satisfaction score
+        """
+        if not RIVER_AVAILABLE:
+            return 0.5
+
+        if self._satisfaction_model is None:
+            return 0.5  # Neutral fallback
+
+        try:
+            pred = self._satisfaction_model.predict_one(features)
+            return float(np.clip(pred, 0.0, 1.0))
+        except Exception as e:
+            logger.debug(f"Satisfaction prediction failed: {e}")
+            return 0.5
 
     def predict_batch(self, features_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -497,6 +585,13 @@ class OnlineEngagementPredictor:
         """Get status of the online model."""
         current = self.get_current_metrics()
 
+        satisfaction_mae = None
+        if self._satisfaction_metric is not None:
+            try:
+                satisfaction_mae = self._satisfaction_metric.get()
+            except:
+                pass
+
         return {
             "niche": self.niche,
             "is_initialized": self._is_initialized,
@@ -505,6 +600,7 @@ class OnlineEngagementPredictor:
             "targets": TARGET_NAMES,
             "current_mae": current["mae"],
             "current_r2": current["r2"],
+            "satisfaction_mae": satisfaction_mae,
             "best_mae": self._metrics.best_mae,
             "best_r2": self._metrics.best_r2,
             "created_at": self._metrics.created_at,

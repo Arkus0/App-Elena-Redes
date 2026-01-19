@@ -10,6 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.api.deps import get_current_user
@@ -24,8 +25,11 @@ from app.schemas.content import (
     ContentExport,
     EngagementPrediction,
     FilmingGuide,
+    ContentFeedbackRequest,
 )
 from app.services.content_generator import ContentGenerator
+from app.services.ml_service import FeatureExtractor
+from backend.ml.online_update import get_online_predictor
 
 router = APIRouter()
 content_generator = ContentGenerator()
@@ -391,6 +395,89 @@ async def get_engagement_prediction(
             "saves_estimate": "200-500",
         }
     )
+
+
+@router.post("/{business_id}/content/{content_id}/feedback")
+async def submit_content_feedback(
+    business_id: int,
+    content_id: int,
+    feedback: ContentFeedbackRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Log human feedback for content performance (Viral/Good/Flop).
+    Trains the online learning model.
+    """
+    # Verify access
+    biz_result = await db.execute(
+        select(Business)
+        .where(Business.id == business_id)
+        .where(Business.user_id == current_user.id)
+    )
+    if not biz_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    # Get content
+    content_result = await db.execute(
+        select(GeneratedContent)
+        .options(selectinload(GeneratedContent.business))
+        .where(GeneratedContent.id == content_id)
+        .where(GeneratedContent.business_id == business_id)
+    )
+    content = content_result.scalar_one_or_none()
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+
+    # Update DB
+    content.performance_label = feedback.performance
+    content.feedback_submitted_at = datetime.utcnow()
+    await db.commit()
+
+    # Map label to score
+    score_map = {
+        "viral": 1.0,
+        "good": 0.7,
+        "flop": 0.1
+    }
+    score = score_map.get(feedback.performance, 0.5)
+
+    # Extract features (Hybrid approach)
+    # 1. Try to get original features if saved (requires storing them, which we don't do fully yet)
+    # 2. Fallback: Re-extract static features
+
+    # Construct content dict for extraction
+    content_dict = {
+        "caption": content.caption,
+        "hashtags": content.hashtags,
+        "content_format": content.content_format,
+        "business_type": content.business.business_type.value if content.business else "otros",
+        "video_duration_seconds": 30 if content.content_format in ["reel", "tiktok_video"] else 0,
+        # Static/Safe features only
+        "posted_at": content.scheduled_date.isoformat() if content.scheduled_date else None,
+    }
+
+    try:
+        # Re-compute features (safe static extraction)
+        features = FeatureExtractor.extract_features(content_dict)
+
+        # Zero out time-sensitive leakages if any (FeatureExtractor is mostly static, but safe-guard)
+        # For example, is_trending_audio checks current trends.
+        # We can't know if it was trending back then unless we saved it.
+        # Strict instruction: pass default/neutral value.
+        if "is_trending_audio" in features:
+            features["is_trending_audio"] = 0.0
+
+        # Train online model
+        niche = content.business.business_type.value if content.business else "otros"
+        predictor = get_online_predictor(niche)
+        predictor.learn_satisfaction(features, score)
+
+    except Exception as e:
+        # Log error but don't fail the request (feedback was saved to DB)
+        print(f"Online learning update failed: {e}")
+
+    return {"status": "success", "performance_label": content.performance_label}
 
 
 @router.post("/{business_id}/export")
