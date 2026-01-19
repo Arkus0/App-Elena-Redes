@@ -25,23 +25,14 @@ from app.schemas.content import (
     ContentExport,
     EngagementPrediction,
     FilmingGuide,
+    ContentFeedbackRequest,
 )
 from app.services.content_generator import ContentGenerator
 from app.services.ml_service import FeatureExtractor
 from backend.ml.online_update import get_online_predictor
-from pydantic import BaseModel
-from enum import Enum
 
 router = APIRouter()
 content_generator = ContentGenerator()
-
-class PerformanceLabel(str, Enum):
-    VIRAL = "viral"
-    GOOD = "good"
-    FLOP = "flop"
-
-class ContentFeedbackRequest(BaseModel):
-    performance: PerformanceLabel
 
 
 @router.post("/{business_id}/generate-calendar", response_model=CalendarResponse)

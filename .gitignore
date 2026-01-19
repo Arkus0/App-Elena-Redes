@@ -49,6 +49,7 @@ logs/
 # ML Models (large files)
 ml_models/*.joblib
 ml_models/*.pkl
+models/*.pkl
 
 # OS
 .DS_Store
