@@ -48,6 +48,24 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import xgboost as xgb
 
+# Import SQL and Config for Database Loading
+from sqlalchemy import create_engine, text
+
+# Add backend to path to allow importing app.core.config
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.append(str(PROJECT_ROOT / "backend"))
+
+try:
+    from app.core.config import settings
+    # Ensure we use a sync driver for pandas (e.g., sqlite:/// instead of sqlite+aiosqlite:///)
+    DB_URL = settings.DATABASE_URL
+    if "+aiosqlite" in DB_URL:
+        DB_URL = DB_URL.replace("+aiosqlite", "")
+    elif "+asyncpg" in DB_URL:
+        DB_URL = DB_URL.replace("+asyncpg", "")
+except ImportError:
+    DB_URL = None
+
 # Import embedding feature extractor (now with configurable precision, 0-based indexing)
 try:
     from ml.features_embeddings import (
@@ -246,20 +264,86 @@ def load_data_from_csv(file_path: str, niche: str = None) -> pd.DataFrame:
 
 def load_data_from_database(niche: str = None) -> pd.DataFrame:
     """
-    Load training data from database.
+    Load training data from database joining ScrapedPost -> Competitor -> Business.
 
     Args:
-        niche: Optional niche to filter by
+        niche: Optional niche (business_type) to filter by.
 
     Returns:
-        DataFrame with training data
+        DataFrame with training data (captions, metrics, metadata).
     """
     logger.info(f"Loading data from database for niche: {niche or 'all'}")
 
-    # TODO: Implement actual database loading
-    # For now, return empty DataFrame as placeholder
-    logger.warning("Database connection not configured. Please provide CSV data.")
-    return pd.DataFrame()
+    if not DB_URL:
+        logger.error("Database URL not configured in settings.")
+        return pd.DataFrame()
+
+    try:
+        engine = create_engine(DB_URL)
+
+        # Query explanation:
+        # 1. Joins scraped_posts -> competitors -> businesses
+        # 2. Filters by business_type (niche) if provided
+        # 3. Maps metrics (likes_count -> likes) to match train.py expectations
+        # 4. Maps content_format to is_reel/media_type logic
+
+        query = """
+        SELECT
+            sp.caption,
+            sp.likes_count as likes,
+            sp.comments_count as comments,
+            sp.shares_count as shares,
+            sp.saves_count as saves,
+            sp.engagement_rate,
+            sp.content_format,
+            sp.is_viral,
+            sp.video_duration_seconds as video_duration,
+            b.business_type
+        FROM scraped_posts sp
+        JOIN competitors c ON sp.competitor_id = c.id
+        JOIN businesses b ON c.business_id = b.id
+        WHERE 1=1
+        """
+
+        params = {}
+        if niche:
+            query += " AND b.business_type = :niche"
+            params['niche'] = niche.lower()  # Ensure niche match is case-insensitive if needed
+
+        # Execute query
+        df = pd.read_sql(text(query), engine, params=params)
+
+        if df.empty:
+            logger.warning(f"No data found in database for niche: {niche}")
+            return df
+
+        # --- Post-processing features for pipeline compatibility ---
+
+        # 1. Map content_format to is_reel/is_static flags
+        # train.py expects 'is_reel' or 'media_type' for multimodal checks
+        df['is_reel'] = df['content_format'].astype(str).str.contains('reel|tiktok|video', case=False, regex=True).astype(int)
+        df['is_static'] = df['content_format'].astype(str).str.contains('static|image|carousel', case=False, regex=True).astype(int)
+
+        # 2. Ensure caption is string
+        df['caption'] = df['caption'].fillna("")
+
+        # 3. Handle potential missing engagement_rate (re-calculate if needed)
+        # The script's prepare_features handles this, but good to ensure basic metrics exist
+        df['likes'] = df['likes'].fillna(0)
+        df['comments'] = df['comments'].fillna(0)
+
+        logger.info(f"Successfully loaded {len(df)} samples from database.")
+
+        # Log distribution
+        if 'is_viral' in df.columns:
+            viral_count = df['is_viral'].sum()
+            logger.info(f"Distribution: {viral_count} viral posts, {len(df) - viral_count} others")
+
+        return df
+
+    except Exception as e:
+        logger.exception(f"Database loading failed: {e}")
+        return pd.DataFrame()
 
 
 def add_embedding_features(
