@@ -1,4 +1,5 @@
 import type { ProfileData, ProfileStats, ExtractionResult, ExtractedPost } from '../types';
+import { DomLayoutChangedError } from './errors';
 
 /**
  * Instagram Profile Extractor
@@ -33,6 +34,11 @@ interface InstagramHydratedData {
       }>;
     };
   };
+}
+
+interface LocationLike {
+  href: string;
+  pathname: string;
 }
 
 // Intenta obtener datos hidratados de Instagram (window._sharedData o __additionalDataLoaded)
@@ -104,11 +110,97 @@ function parseFormattedNumber(text: string | null | undefined): number | null {
   return isNaN(num) ? null : num;
 }
 
+/**
+ * Encuentra un elemento cuyo contenido de texto coincida con alguno de los patrones.
+ * Devuelve el elemento más profundo que contiene el texto.
+ */
+function findByTextContent(root: Element, patterns: (string | RegExp)[], tag?: string): Element | null {
+  const candidates: Element[] = [];
+
+  function traverse(el: Element) {
+    if (tag && el.tagName.toLowerCase() !== tag.toLowerCase()) {
+      // Continue but don't match this element if tag mismatch (unless we only want to match children?)
+      // Actually, standard traversal: check current, then children.
+    }
+
+    // Check if current element matches
+    let matches = false;
+    const text = el.textContent || '';
+
+    // Optimization: if text is empty, skip
+    if (!text.trim()) return;
+
+    // Check patterns
+    for (const pattern of patterns) {
+        if (typeof pattern === 'string') {
+            if (text.toLowerCase().includes(pattern.toLowerCase())) {
+                matches = true;
+                break;
+            }
+        } else {
+            if (pattern.test(text)) {
+                matches = true;
+                break;
+            }
+        }
+    }
+
+    // If matches, checks if any children match. If NO children match, this is the deepest match.
+    // Or we can collect all matches and sort by depth/length.
+    if (matches && (!tag || el.tagName.toLowerCase() === tag.toLowerCase())) {
+        candidates.push(el);
+    }
+
+    for (const child of Array.from(el.children)) {
+      traverse(child);
+    }
+  }
+
+  traverse(root);
+
+  // Return the candidate with shortest text content (likely the most specific element)
+  if (candidates.length === 0) return null;
+  return candidates.reduce((prev, curr) =>
+    (prev.textContent?.length || Infinity) < (curr.textContent?.length || Infinity) ? prev : curr
+  );
+}
+
+/**
+ * Busca una métrica numérica asociada a un label semántico (ej: "Followers").
+ * Busca en el padre o hermanos del elemento que contiene el label.
+ */
+function findMetricByLabel(root: Element, labels: string[]): number | null {
+  const labelEl = findByTextContent(root, labels);
+  if (!labelEl) return null;
+
+  // 1. Check parent text
+  const parent = labelEl.parentElement;
+  if (parent) {
+      // Try to extract number from parent text (excluding the label text if possible, but parseFormattedNumber handles it)
+      const num = parseFormattedNumber(parent.textContent);
+      if (num !== null) return num;
+  }
+
+  // 2. Check previous sibling
+  const prev = labelEl.previousElementSibling;
+  if (prev) {
+      const num = parseFormattedNumber(prev.textContent);
+      if (num !== null) return num;
+  }
+
+  // 3. Check inside the label element itself (maybe number is a child or prefix)
+  const numSelf = parseFormattedNumber(labelEl.textContent);
+  if (numSelf !== null) return numSelf;
+
+  return null;
+}
+
+
 // Extrae datos del DOM cuando no hay datos hidratados
-function extractFromDOM(): ProfileData | null {
+function extractFromDOM(location: LocationLike = window.location): ProfileData | null {
   try {
     // Detectar si estamos en una página de perfil
-    const pathMatch = window.location.pathname.match(/^\/([^/]+)\/?$/);
+    const pathMatch = location.pathname.match(/^\/([^/]+)\/?$/);
     if (!pathMatch) return null;
 
     const username = pathMatch[1];
@@ -117,66 +209,109 @@ function extractFromDOM(): ProfileData | null {
     const excludedPaths = ['explore', 'reels', 'direct', 'accounts', 'stories', 'p', 'tv'];
     if (excludedPaths.includes(username)) return null;
 
-    // Selectores actualizados para Instagram (pueden cambiar con updates de IG)
-    const headerSection = document.querySelector('header section');
+    // Scoped Semantic Traversal
+    const header = document.querySelector('header');
 
-    // Display name (puede estar en h2 o en meta tags)
+    if (!header) {
+        // If no header, maybe layout changed drastically or not fully loaded
+        // But we can try legacy global selectors as last resort?
+        // For now, if no header, likely not profile page or error.
+        // Let's assume we need header for semantic search.
+        throw new DomLayoutChangedError("Header element not found");
+    }
+
+    // Display name
     let displayName = document.querySelector('header h2')?.textContent?.trim() ||
                       document.querySelector('meta[property="og:title"]')?.getAttribute('content')?.split('(')[0]?.trim() ||
                       null;
 
-    // Bio
-    const bioElement = document.querySelector('header section > div:last-child > span') ||
-                       document.querySelector('[data-testid="user-biography"]') ||
-                       document.querySelector('header section div > span > span');
-    const bio = bioElement?.textContent?.trim() || null;
-
-    // Verificado
-    const isVerified = !!document.querySelector('header [aria-label="Verified"]') ||
-                       !!document.querySelector('header svg[aria-label*="erified"]');
-
-    // Privado
-    const isPrivate = !!document.querySelector('[data-testid="private-account-indicator"]') ||
-                      document.body.innerText.includes('This Account is Private') ||
-                      document.body.innerText.includes('Esta cuenta es privada');
-
-    // Foto de perfil
-    const profilePic = document.querySelector('header img[alt*="profile"]') as HTMLImageElement ||
-                       document.querySelector('header img') as HTMLImageElement;
-    const profilePicUrl = profilePic?.src || null;
-
-    // Estadísticas (followers, following, posts)
-    const statsElements = headerSection?.querySelectorAll('ul li') || [];
+    // --- Stats (Semantic) ---
     const stats: ProfileStats = {
       posts: null,
       followers: null,
       following: null
     };
 
-    statsElements.forEach((el, index) => {
-      const text = el.textContent || '';
-      const num = parseFormattedNumber(text);
+    // Dictionary
+    const labels = {
+        posts: ['posts', 'publicaciones', 'publicações'],
+        followers: ['followers', 'seguidores'], // 'seguidores' is same for ES/PT
+        following: ['following', 'seguidos', 'seguindo', 'a seguir']
+    };
 
-      if (index === 0 || text.toLowerCase().includes('post')) {
-        stats.posts = num;
-      } else if (index === 1 || text.toLowerCase().includes('follower')) {
-        stats.followers = num;
-      } else if (index === 2 || text.toLowerCase().includes('following')) {
-        stats.following = num;
-      }
-    });
+    stats.posts = findMetricByLabel(header, labels.posts);
+    stats.followers = findMetricByLabel(header, labels.followers);
+    stats.following = findMetricByLabel(header, labels.following);
 
-    // Alternativa: buscar por aria-labels específicos
-    if (!stats.followers) {
-      const followersEl = document.querySelector('[href$="/followers/"] span') ||
-                          document.querySelector('a[href*="followers"] span');
-      stats.followers = parseFormattedNumber(followersEl?.textContent);
+    // --- Bio (Semantic/Heuristic) ---
+    // Heuristic: Longest text in header NOT username or buttons
+    let bio: string | null = null;
+
+    // Explicit selector (Primary)
+    const bioExplicit = header.querySelector('[data-testid="user-biography"]');
+    if (bioExplicit) {
+        bio = bioExplicit.textContent?.trim() || null;
+    } else {
+        // Fallback Heuristic
+        const candidates = Array.from(header.querySelectorAll('*'))
+            .filter(el => {
+                // Must be a leaf node or close to it (text node container)
+                // Filter out buttons, links (unless it's the bio link container? no, bio text usually is span/div)
+                if (el.closest('button') || el.closest('a')) return false;
+
+                // Exclude stats
+                const text = el.textContent || '';
+                if (labels.posts.some(l => text.toLowerCase().includes(l))) return false;
+                if (labels.followers.some(l => text.toLowerCase().includes(l))) return false;
+                if (labels.following.some(l => text.toLowerCase().includes(l))) return false;
+
+                // Exclude username
+                if (text.includes(username)) return false;
+
+                return true;
+            });
+
+        // Sort by length desc
+        candidates.sort((a, b) => (b.textContent?.length || 0) - (a.textContent?.length || 0));
+
+        if (candidates.length > 0) {
+            bio = candidates[0].textContent?.trim() || null;
+        }
     }
 
-    if (!stats.following) {
-      const followingEl = document.querySelector('[href$="/following/"] span') ||
-                          document.querySelector('a[href*="following"] span');
-      stats.following = parseFormattedNumber(followingEl?.textContent);
+    // --- Verified (Semantic) ---
+    const isVerified = !!header.querySelector('[aria-label="Verified"]') ||
+                       !!header.querySelector('svg[aria-label*="erified"]');
+
+    // --- Profile Pic ---
+    const profilePic = header.querySelector('img[alt*="profile"]') as HTMLImageElement ||
+                       header.querySelector('img') as HTMLImageElement;
+    const profilePicUrl = profilePic?.src || null;
+
+    // --- Private ---
+    const isPrivate = !!document.querySelector('[data-testid="private-account-indicator"]') ||
+                      (document.body.textContent || '').includes('This Account is Private') ||
+                      (document.body.textContent || '').includes('Esta cuenta es privada');
+
+
+    // --- Fallback Protection ---
+    // If stats are missing, try rigid selectors
+    if (stats.followers === null || stats.posts === null) {
+         console.warn('[Elena Bridge] Semantic extraction failed for stats, trying rigid selectors');
+
+         const statsElements = header.querySelectorAll('ul li');
+         statsElements.forEach((el, index) => {
+            const text = el.textContent || '';
+            const num = parseFormattedNumber(text);
+            if (index === 0) stats.posts = num;
+            if (index === 1) stats.followers = num;
+            if (index === 2) stats.following = num;
+         });
+    }
+
+    // Final Check
+    if (stats.followers === null && stats.posts === null && !bio) {
+        throw new DomLayoutChangedError("Failed to extract essential profile data (stats/bio)");
     }
 
     return {
@@ -189,10 +324,11 @@ function extractFromDOM(): ProfileData | null {
       isPrivate,
       stats,
       extractedAt: new Date().toISOString(),
-      sourceUrl: window.location.href,
+      sourceUrl: location.href,
       extractionMethod: 'dom_scraping'
     };
   } catch (error) {
+    if (error instanceof DomLayoutChangedError) throw error;
     console.error('[Elena Bridge] Error extracting from DOM:', error);
     return null;
   }
@@ -243,92 +379,100 @@ function extractRecentPosts(): ExtractedPost[] {
 }
 
 // Función principal de extracción para Instagram
-export function extractInstagramProfile(): ExtractionResult {
+export function extractInstagramProfile(location: LocationLike = window.location): ExtractionResult {
   console.log('[Elena Bridge] Starting Instagram extraction...');
 
-  // Intentar datos hidratados primero
-  const hydratedData = getHydratedData();
+  try {
+    // Intentar datos hidratados primero
+    const hydratedData = getHydratedData();
 
-  if (hydratedData?.user) {
-    const user = hydratedData.user;
-    console.log('[Elena Bridge] Using hydrated data for:', user.username);
+    if (hydratedData?.user) {
+      const user = hydratedData.user;
+      console.log('[Elena Bridge] Using hydrated data for:', user.username);
 
-    const posts: ExtractedPost[] = [];
+      const posts: ExtractedPost[] = [];
 
-    // Extraer posts de datos hidratados
-    user.edge_owner_to_timeline_media?.edges?.forEach((edge, index) => {
-      if (index >= 12) return;
+      // Extraer posts de datos hidratados
+      user.edge_owner_to_timeline_media?.edges?.forEach((edge, index) => {
+        if (index >= 12) return;
 
-      const node = edge.node;
-      let type: ExtractedPost['type'] = 'image';
+        const node = edge.node;
+        let type: ExtractedPost['type'] = 'image';
 
-      if (node.__typename === 'GraphVideo') type = 'video';
-      else if (node.__typename === 'GraphSidecar') type = 'carousel';
+        if (node.__typename === 'GraphVideo') type = 'video';
+        else if (node.__typename === 'GraphSidecar') type = 'carousel';
 
-      posts.push({
-        id: node.id,
-        type,
-        thumbnailUrl: node.display_url,
-        caption: node.edge_media_to_caption?.edges?.[0]?.node?.text || null,
-        likes: node.edge_liked_by?.count || null,
-        comments: node.edge_media_to_comment?.count || null,
-        views: node.video_view_count || null,
-        timestamp: node.taken_at_timestamp
-          ? new Date(node.taken_at_timestamp * 1000).toISOString()
-          : null
+        posts.push({
+          id: node.id,
+          type,
+          thumbnailUrl: node.display_url,
+          caption: node.edge_media_to_caption?.edges?.[0]?.node?.text || null,
+          likes: node.edge_liked_by?.count || null,
+          comments: node.edge_media_to_comment?.count || null,
+          views: node.video_view_count || null,
+          timestamp: node.taken_at_timestamp
+            ? new Date(node.taken_at_timestamp * 1000).toISOString()
+            : null
+        });
       });
-    });
 
-    return {
-      success: true,
-      data: {
-        platform: 'instagram',
-        username: user.username || '',
-        displayName: user.full_name || null,
-        bio: user.biography || null,
-        profilePicUrl: user.profile_pic_url_hd || user.profile_pic_url || null,
-        isVerified: user.is_verified || false,
-        isPrivate: user.is_private || false,
-        stats: {
-          followers: user.edge_followed_by?.count || null,
-          following: user.edge_follow?.count || null,
-          posts: user.edge_owner_to_timeline_media?.count || null
+      return {
+        success: true,
+        pageType: 'profile',
+        profile: {
+          platform: 'instagram',
+          username: user.username || '',
+          displayName: user.full_name || null,
+          bio: user.biography || null,
+          profilePicUrl: user.profile_pic_url_hd || user.profile_pic_url || null,
+          isVerified: user.is_verified || false,
+          isPrivate: user.is_private || false,
+          stats: {
+            followers: user.edge_followed_by?.count || null,
+            following: user.edge_follow?.count || null,
+            posts: user.edge_owner_to_timeline_media?.count || null
+          },
+          extractedAt: new Date().toISOString(),
+          sourceUrl: location.href,
+          extractionMethod: 'hydrated_data'
         },
-        extractedAt: new Date().toISOString(),
-        sourceUrl: window.location.href,
-        extractionMethod: 'hydrated_data'
-      },
-      recentPosts: posts
-    };
-  }
+        recentPosts: posts
+      };
+    }
 
-  // Fallback a scraping de DOM
-  console.log('[Elena Bridge] Falling back to DOM scraping');
-  const domData = extractFromDOM();
+    // Fallback a scraping de DOM
+    console.log('[Elena Bridge] Falling back to DOM scraping');
+    const domData = extractFromDOM(location);
 
-  if (domData) {
-    return {
-      success: true,
-      data: domData,
-      recentPosts: extractRecentPosts()
-    };
+    if (domData) {
+      return {
+        success: true,
+        pageType: 'profile',
+        profile: domData,
+        recentPosts: extractRecentPosts()
+      };
+    }
+  } catch (error) {
+     if (error instanceof DomLayoutChangedError) throw error;
+     // Other errors?
   }
 
   return {
     success: false,
+    pageType: 'unknown',
     data: null,
     error: 'No se pudo extraer datos del perfil. Asegúrate de estar en una página de perfil de Instagram.'
-  };
+  } as any;
 }
 
 // Verifica si estamos en una URL de perfil de Instagram
-export function isInstagramProfilePage(): boolean {
-  const url = window.location.href;
+export function isInstagramProfilePage(location: LocationLike = window.location): boolean {
+  const url = location.href;
 
   if (!url.includes('instagram.com')) return false;
 
   // Patrón: instagram.com/username (sin paths adicionales)
-  const pathMatch = window.location.pathname.match(/^\/([^/]+)\/?$/);
+  const pathMatch = location.pathname.match(/^\/([^/]+)\/?$/);
   if (!pathMatch) return false;
 
   const username = pathMatch[1];
