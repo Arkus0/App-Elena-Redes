@@ -1759,6 +1759,96 @@ class GrowthPredictionEngine:
             account_health.health_status.value
         )
 
+    def simulate_growth(
+        self,
+        current_followers: int,
+        base_daily_rate: float,
+        scheduled_content_impacts: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Simulate follower growth over the next 30 days.
+
+        Hybrid Model:
+        - Base organic growth (historical rate)
+        - Viral spikes from scheduled content (based on predicted RPI)
+
+        Args:
+            current_followers: Current follower count
+            base_daily_rate: Daily growth rate (e.g. 0.001 for 0.1%)
+            scheduled_content_impacts: List of scheduled posts with date and predicted_rpi
+                                       [{'date': '2024-03-20', 'rpi': 1.5}, ...]
+
+        Returns:
+            Dict with projection data and summary stats.
+        """
+        from datetime import datetime, timedelta
+
+        projection = []
+        current_count = float(current_followers)
+        total_gain_from_content = 0.0
+
+        # Organize content by date string (YYYY-MM-DD)
+        content_by_date = {}
+        for item in scheduled_content_impacts:
+            date_str = item['date']
+            if date_str not in content_by_date:
+                content_by_date[date_str] = []
+            content_by_date[date_str].append(item.get('rpi', 1.0))
+
+        today = datetime.now()
+
+        for i in range(30):
+            target_date = today + timedelta(days=i + 1)
+            date_str = target_date.strftime("%Y-%m-%d")
+
+            # 1. Apply Base Organic Growth
+            daily_organic_gain = current_count * base_daily_rate
+
+            # 2. Apply Content Impact
+            content_gain = 0.0
+            daily_scenario = "organic"
+
+            if date_str in content_by_date:
+                rpis = content_by_date[date_str]
+                max_rpi = max(rpis)
+
+                # Heuristic: Viral post brings new followers
+                # RPI 1.0 = Average performance
+                # RPI > 1.2 = Good performance
+                # RPI > 1.5 = Viral
+
+                if max_rpi > 1.5:
+                    # Viral hit: Significant boost
+                    # Formula: (RPI - 1.0) * 0.5% of current followers
+                    viral_potential = (max_rpi - 1.0) * 0.005
+                    content_gain = current_count * viral_potential
+                    daily_scenario = "viral_spike"
+                elif max_rpi > 1.1:
+                    # Good performance
+                    # Formula: (RPI - 1.0) * 0.1% of current followers
+                    viral_potential = (max_rpi - 1.0) * 0.001
+                    content_gain = current_count * viral_potential
+                    daily_scenario = "high_performance"
+
+            total_daily_gain = daily_organic_gain + content_gain
+            current_count += total_daily_gain
+            total_gain_from_content += content_gain
+
+            projection.append({
+                "date": date_str,
+                "followers": int(current_count),
+                "daily_gain": int(total_daily_gain),
+                "scenario": daily_scenario
+            })
+
+        return {
+            "current_followers": current_followers,
+            "growth_rate_base": base_daily_rate,
+            "projected_gain_from_content": int(total_gain_from_content),
+            "projected_total_gain": int(current_count - current_followers),
+            "projection": projection
+        }
+
 
 # Singleton instance para uso en la aplicación
 _growth_engine_instance: Optional[GrowthPredictionEngine] = None

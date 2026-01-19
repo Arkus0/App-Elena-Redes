@@ -17,8 +17,26 @@ import {
   AlertTriangle,
   Shield,
 } from 'lucide-react'
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from 'recharts'
 import { useBusinessStore } from '../stores/businessStore'
-import { businessApi, competitorsApi, contentApi, mlApi, lightModeApi, type ModelHealthSummary, type LightModeConfig } from '../services/api'
+import {
+  businessApi,
+  competitorsApi,
+  contentApi,
+  mlApi,
+  lightModeApi,
+  type ModelHealthSummary,
+  type LightModeConfig,
+  type GrowthProjectionResponse,
+} from '../services/api'
 import { LightModeConfiguration } from '../components/LightModeConfiguration'
 import clsx from 'clsx'
 
@@ -39,6 +57,7 @@ export default function Dashboard() {
   } | null>(null)
   const [modelHealth, setModelHealth] = useState<ModelHealthSummary | null>(null)
   const [lightModeConfig, setLightModeConfig] = useState<LightModeConfig | null>(null)
+  const [growthProjection, setGrowthProjection] = useState<GrowthProjectionResponse | null>(null)
 
   useEffect(() => {
     if (!currentBusiness) {
@@ -49,13 +68,22 @@ export default function Dashboard() {
     const loadData = async () => {
       setIsLoading(true)
       try {
-        const [statusData, competitorsData, calendarsData, mlStatusData, healthData, lightModeData] = await Promise.all([
+        const [
+          statusData,
+          competitorsData,
+          calendarsData,
+          mlStatusData,
+          healthData,
+          lightModeData,
+          growthData,
+        ] = await Promise.all([
           businessApi.getStatus(currentBusiness.id),
           competitorsApi.getCompetitors(currentBusiness.id),
           contentApi.getCalendars(currentBusiness.id),
           mlApi.getModelStatus().catch(() => null),
           mlApi.getModelHealthSummary().catch(() => null),
           lightModeApi.getConfig(currentBusiness.id).catch(() => null),
+          mlApi.getGrowthPrediction(currentBusiness.id).catch(() => null),
         ])
         setStatus(statusData)
         setCompetitors(competitorsData)
@@ -63,6 +91,7 @@ export default function Dashboard() {
         setMlStatus(mlStatusData)
         setModelHealth(healthData)
         setLightModeConfig(lightModeData)
+        setGrowthProjection(growthData)
       } catch (error) {
         console.error('Error loading dashboard data:', error)
       } finally {
@@ -145,6 +174,73 @@ export default function Dashboard() {
           color="orange"
         />
       </div>
+
+      {/* Growth Projection Chart */}
+      {growthProjection && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                <TrendingUp className="w-5 h-5 text-brand-400" />
+                Proyección de Crecimiento
+              </h2>
+              <p className="text-gray-400 text-sm mt-1">
+                Estimación a 30 días basada en tu calendario de contenido
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-2xl font-bold text-white">
+                +{growthProjection.projected_total_gain.toLocaleString()}
+              </p>
+              <p className="text-sm text-green-400">nuevos seguidores estimados</p>
+            </div>
+          </div>
+
+          <div className="h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={growthProjection.projection}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#374151" vertical={false} />
+                <XAxis
+                  dataKey="date"
+                  stroke="#9CA3AF"
+                  tickFormatter={(val) =>
+                    new Date(val).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+                  }
+                  tick={{ fontSize: 12 }}
+                  axisLine={false}
+                  tickLine={false}
+                />
+                <YAxis
+                  stroke="#9CA3AF"
+                  tick={{ fontSize: 12 }}
+                  axisLine={false}
+                  tickLine={false}
+                  domain={['auto', 'auto']}
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#1F2937',
+                    borderColor: '#374151',
+                    color: '#F3F4F6',
+                  }}
+                  itemStyle={{ color: '#F3F4F6' }}
+                  labelStyle={{ color: '#9CA3AF' }}
+                  labelFormatter={(val) => new Date(val).toLocaleDateString()}
+                  formatter={(value: number) => [value.toLocaleString(), 'Seguidores']}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="followers"
+                  stroke="#8B5CF6"
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 6, fill: '#8B5CF6' }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
 
       {/* ML Model Status Banner */}
       {mlStatus && (
