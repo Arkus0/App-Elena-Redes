@@ -14,6 +14,26 @@ import { viralApi } from '../services/api'
 import { useBusinessStore } from '../stores/businessStore'
 import clsx from 'clsx'
 
+const MomentumBadge = ({ status }: { status?: string }) => {
+  if (!status) return null
+
+  const config: Record<string, { label: string, className: string }> = {
+    rising: { label: 'Creciendo rápido', className: 'text-emerald-400 bg-emerald-500/20 border-emerald-500/30' },
+    trending: { label: 'Tendencia activa', className: 'text-brand-400 bg-brand-500/20 border-brand-500/30' },
+    stable: { label: 'Estable', className: 'text-slate-400 bg-slate-500/20 border-slate-500/30' },
+    stale: { label: 'Perdiendo fuerza', className: 'text-orange-400 bg-orange-500/20 border-orange-500/30' },
+  }
+
+  const style = config[status] || config.stable
+
+  return (
+    <span className={clsx('text-xs px-2 py-0.5 rounded border flex items-center gap-1', style.className)}>
+      <TrendingUp className="w-3 h-3" />
+      {style.label}
+    </span>
+  )
+}
+
 const QUICK_IDEAS = [
   { type: 'pov', label: 'POV', emoji: '👀' },
   { type: 'transformation', label: 'Before/After', emoji: '✨' },
@@ -225,13 +245,18 @@ export default function ViralScanner() {
                 <div key={i} className="p-4 bg-gray-700/50 rounded-lg">
                   <div className="flex items-center justify-between mb-2">
                     <h4 className="font-medium text-white">{trend.trend}</h4>
-                    <span className={clsx(
-                      'text-xs px-2 py-0.5 rounded',
-                      trend.engagement_potential === 'muy alto' && 'bg-green-500/20 text-green-400',
-                      trend.engagement_potential === 'alto' && 'bg-yellow-500/20 text-yellow-400'
-                    )}>
-                      {trend.engagement_potential}
-                    </span>
+                    {trend.momentum_status ? (
+                      <MomentumBadge status={trend.momentum_status} />
+                    ) : (
+                      <span className={clsx(
+                        'text-xs px-2 py-0.5 rounded',
+                        trend.engagement_potential?.includes('muy alto') && 'bg-green-500/20 text-green-400',
+                        trend.engagement_potential?.includes('alto') && 'bg-yellow-500/20 text-yellow-400',
+                        trend.engagement_potential?.includes('bajo') && 'bg-orange-500/20 text-orange-400'
+                      )}>
+                        {trend.engagement_potential}
+                      </span>
+                    )}
                   </div>
                   <p className="text-sm text-gray-400 mb-2">{trend.description}</p>
                   <p className="text-sm text-brand-400">"{trend.example_hook}"</p>
@@ -294,7 +319,7 @@ export default function ViralScanner() {
                       <h3 className="font-medium text-white">{opp.trend_name}</h3>
                       <p className="text-sm text-gray-400">{opp.description}</p>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right flex flex-col items-end gap-1">
                       <span className={clsx(
                         'text-sm font-medium',
                         opp.relevance_score >= 80 && 'text-green-400',
@@ -303,7 +328,8 @@ export default function ViralScanner() {
                       )}>
                         {Math.round(opp.relevance_score)}% relevante
                       </span>
-                      {opp.time_sensitive && (
+                      {opp.momentum_status && <MomentumBadge status={opp.momentum_status} />}
+                      {opp.time_sensitive && !opp.momentum_status && (
                         <p className="text-xs text-orange-400 flex items-center gap-1 justify-end mt-1">
                           <Clock className="w-3 h-3" />
                           Urgente
