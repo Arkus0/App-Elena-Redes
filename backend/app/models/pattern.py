@@ -39,7 +39,7 @@ class ExtractedPattern(Base):
 
     # Effectiveness metrics
     avg_engagement_score = Column(Float, default=0.0)
-    usage_count = Column(Integer, default=0)  # How many top posts use this
+    usage_count = Column(Integer, default=1)  # How many top posts use this
     success_rate = Column(Float, default=0.0)  # % of posts using this that performed well
 
     # Specifics by pattern type
@@ -62,7 +62,11 @@ class ExtractedPattern(Base):
     source_post_ids = Column(JSON, default=[])  # IDs of posts this was extracted from
     extracted_at = Column(DateTime, default=datetime.utcnow)
 
+    # Vector embedding for semantic deduplication
+    embedding = Column(JSON, nullable=True)
+
     # Timestamps
+    last_active_at = Column(DateTime, default=datetime.utcnow)  # Last time this pattern was identified
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
