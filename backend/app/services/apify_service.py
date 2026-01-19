@@ -324,6 +324,49 @@ class ApifyService:
             logger.error(f"Error searching trending {platform} content for '{keyword}': {e}")
             return self._get_mock_trending_data(keyword, platform)
 
+    async def search_hashtag_posts_raw(
+        self,
+        hashtag: str,
+        limit: int = 50,
+        platform: str = "instagram"
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for posts by hashtag and return raw data.
+        Used by DiscoveryService for filtering.
+        """
+        if not self.is_available():
+            return self._get_mock_hashtag_posts_raw(hashtag, limit, platform)
+
+        try:
+            if platform == "instagram":
+                # Ensure we get post type results for hashtag search
+                run_input = {
+                    "search": hashtag,
+                    "searchType": "hashtag",
+                    "resultsLimit": limit,
+                    "resultsType": "posts",
+                }
+                actor = settings.APIFY_INSTAGRAM_ACTOR
+            else:
+                # TikTok fallback
+                run_input = {
+                    "searchQueries": [hashtag],
+                    "resultsPerPage": limit,
+                }
+                actor = settings.APIFY_TIKTOK_ACTOR
+
+            run = await self.client.actor(actor).call(run_input=run_input)
+
+            items = []
+            async for item in self.client.dataset(run["defaultDatasetId"]).iterate_items():
+                items.append(item)
+
+            return items
+
+        except Exception as e:
+            logger.error(f"Error searching hashtag {hashtag}: {e}")
+            return self._get_mock_hashtag_posts_raw(hashtag, limit, platform)
+
     def _process_instagram_data(
         self,
         items: List[Dict],
@@ -744,6 +787,43 @@ class ApifyService:
             for i in range(10)
         ]
         return trending_items
+
+    def _get_mock_hashtag_posts_raw(self, hashtag: str, limit: int, platform: str) -> List[Dict[str, Any]]:
+        """Generate mock raw posts for discovery"""
+        import random
+        mock_posts = []
+        for i in range(limit):
+            is_recent = random.random() > 0.3  # 70% recent posts
+            days_ago = random.randint(0, 5) if is_recent else random.randint(31, 60)
+
+            username = f"competitor_{hashtag}_{i}"
+
+            if platform == "instagram":
+                mock_posts.append({
+                    "id": f"post_{i}",
+                    "ownerUsername": username,
+                    "ownerFullName": f"Competitor {i}",
+                    "ownerFollowerCount": random.randint(50, 20000),
+                    "caption": f"Post about #{hashtag} in {platform}. Visit us in Madrid!",
+                    "timestamp": (datetime.utcnow() - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "displayUrl": f"https://ui-avatars.com/api/?name={username}",
+                    "url": f"https://instagram.com/p/{i}",
+                    "likesCount": random.randint(10, 500),
+                })
+            else:
+                 mock_posts.append({
+                    "id": f"post_{i}",
+                    "authorMeta": {
+                        "name": username,
+                        "nickName": f"Competitor {i}",
+                        "fans": random.randint(50, 20000),
+                    },
+                    "text": f"Video about #{hashtag} #fyp",
+                    "createTime": int((datetime.utcnow() - timedelta(days=days_ago)).timestamp()),
+                    "webVideoUrl": f"https://tiktok.com/@{username}/video/{i}",
+                    "diggCount": random.randint(10, 500),
+                 })
+        return mock_posts
 
     def _generate_mock_instagram_posts(self, username: str) -> List[Dict[str, Any]]:
         """Generate realistic Instagram posts for floristeria demo"""
