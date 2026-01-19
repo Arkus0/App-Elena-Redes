@@ -665,9 +665,6 @@ class MLPredictor:
         "semantic_hook_score",     # Primary hook score (0-1 continuous, SHAP-friendly)
         "semantic_hook_max_sim",   # Max cosine similarity to any base hook
         "semantic_hook_top3_avg",  # Average similarity to top 3 hooks
-        # SEMANTIC HOOK INTERACTIONS (cross-feature synergies)
-        "interaction_semantic_hook_x_vader",      # Hook * |sentiment| synergy
-        "interaction_semantic_hook_x_cta_strong", # Hook * strong CTA synergy
         # CTA features
         "cta_comment", "cta_save", "cta_share", "cta_follow", "cta_dm", "cta_link",
         "cta_count",
