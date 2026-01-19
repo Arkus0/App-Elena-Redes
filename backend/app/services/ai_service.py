@@ -97,6 +97,45 @@ class AIService:
             logger.error(f"Error analyzing posts: {e}")
             return self._get_mock_pattern_analysis(business_type, platform)
 
+    async def analyze_anti_patterns(
+        self,
+        posts: List[Dict[str, Any]],
+        business_type: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Analyze failed posts to extract Anti-Patterns (Negative Signals)
+        Returns specific structural or thematic flaws to avoid
+        """
+        if not self.is_available():
+            return self._get_mock_anti_pattern_analysis(business_type)
+
+        system_prompt = self._get_anti_pattern_system_prompt()
+        user_prompt = self._build_anti_pattern_prompt(posts, business_type)
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=2000
+            )
+
+            response_text = response.choices[0].message.content
+            if "```json" in response_text:
+                json_str = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                json_str = response_text.split("```")[1].split("```")[0]
+            else:
+                json_str = response_text
+
+            return json.loads(json_str.strip())
+
+        except Exception as e:
+            logger.error(f"Error analyzing anti-patterns: {e}")
+            return self._get_mock_anti_pattern_analysis(business_type)
+
     async def generate_content_piece(
         self,
         business_info: Dict[str, Any],
@@ -298,6 +337,19 @@ IMPORTANTE:
 
 Responde SOLO en JSON valido con el formato especificado."""
 
+    def _get_anti_pattern_system_prompt(self) -> str:
+        return """Eres un auditor de contenido experto en detectar por qué fallan los posts en redes sociales.
+Tu misión es identificar ANTI-PATRONES: errores estructurales, temáticos o de formato que causan bajo engagement.
+NO critiques la calidad visual básica (como "foto borrosa"), busca patrones de contenido más profundos.
+
+Ejemplos de Anti-Patrones:
+- "Hook Lento": Introducción que tarda más de 3 segundos en aportar valor.
+- "Venta Agresiva": Intentar vender sin aportar valor previo.
+- "Texto Denso": Captions sin espacios ni emojis que cansan la vista.
+- "Audio Desconectado": Música que no encaja con el mood del video.
+
+Responde SOLO en JSON válido."""
+
     def _get_content_generation_system_prompt(self, platform: str) -> str:
         platform_specifics = {
             "instagram": """Para Instagram:
@@ -350,7 +402,7 @@ Responde SOLO en JSON valido."""
         posts_summary = []
         for p in posts[:15]:  # Analyze top 15
             posts_summary.append({
-                "caption": p.get("caption", "")[:500],
+                "caption": (p.get("caption") or "")[:500],
                 "type": p.get("type"),
                 "likes": p.get("likes", 0),
                 "comments": p.get("comments", 0),
@@ -424,6 +476,38 @@ Extrae patrones y responde en JSON:
         "insight 3"
     ]
 }}"""
+
+    def _build_anti_pattern_prompt(
+        self,
+        posts: List[Dict[str, Any]],
+        business_type: str
+    ) -> str:
+        # Prepare posts summary (lighter version)
+        posts_summary = []
+        for p in posts[:20]:
+            posts_summary.append({
+                "caption": (p.get("caption") or "")[:300],  # Truncate heavily
+                "type": p.get("type"),
+                "engagement_score": p.get("engagement_score", 0),
+                "hashtags": p.get("hashtags", [])[:5],
+            })
+
+        return f"""Analiza estos 20 posts FALLIDOS (engagement más bajo) del nicho "{business_type}".
+Identifica 3 fallos estructurales o temáticos comunes (Anti-Patrones) compartidos por ellos.
+
+POSTS FALLIDOS:
+{json.dumps(posts_summary, ensure_ascii=False, indent=2)}
+
+Responde en JSON (lista de 3 objetos):
+[
+    {{
+        "pattern_name": "Nombre corto del Anti-Patrón (ej: Hook Débil)",
+        "description": "Descripción detallada del error",
+        "examples": ["Ejemplo específico tomado de los posts"],
+        "avoid_strategy": "Consejo accionable para evitarlo"
+    }},
+    ...
+]"""
 
     def _build_content_generation_prompt(
         self,
@@ -501,6 +585,29 @@ Genera contenido en JSON:
 }}"""
 
     # ============ MOCK RESPONSES ============
+
+    def _get_mock_anti_pattern_analysis(self, business_type: str) -> List[Dict[str, Any]]:
+        """Generate mock anti-pattern analysis"""
+        return [
+            {
+                "pattern_name": "Hook Genérico",
+                "description": "Los posts empiezan con saludos genéricos ('Hola a todos') o logos estáticos que no captan la atención en el primer segundo.",
+                "examples": ["Post empezando con 'Buenos días seguidores'", "Video de 5 segundos del logo de la empresa"],
+                "avoid_strategy": "Empezar directamente con el valor, una pregunta o una acción visual. Eliminar saludos."
+            },
+            {
+                "pattern_name": "Venta Directa Sin Contexto",
+                "description": "Intentar vender un producto/servicio sin haber creado deseo o explicado el problema que resuelve.",
+                "examples": ["Foto de producto con caption 'Cómpralo ya'", "Flyer digital lleno de precios"],
+                "avoid_strategy": "Usar la regla 80/20: 80% valor/entretenimiento, 20% venta. Contextualizar el producto en uso."
+            },
+            {
+                "pattern_name": "Muro de Texto",
+                "description": "Captions o imágenes con demasiado texto sin formato, difícil de leer en móvil.",
+                "examples": ["Imagen con 10 líneas de texto pequeño", "Caption de 3 párrafos sin espacios ni emojis"],
+                "avoid_strategy": "Usar ganchos visuales. En captions, usar saltos de línea cada 1-2 frases y emojis para guiar la lectura."
+            }
+        ]
 
     def _get_mock_pattern_analysis(self, business_type: str, platform: str) -> Dict[str, Any]:
         """Generate realistic mock pattern analysis"""
