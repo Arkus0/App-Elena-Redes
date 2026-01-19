@@ -238,6 +238,8 @@ class GrowthPredictionConfig:
     random_state: int = 42
     early_stopping_rounds: int = 20
     shap_max_display: int = 10
+    loss_penalty_factor: float = 2.5
+    negative_score_threshold: float = 1.0
 
 
 @dataclass
@@ -1016,8 +1018,12 @@ class GrowthPredictionEngine:
         logger.info(f"CV RMSE: {cv_rmse_scores.mean():.4f} (+/- {cv_rmse_scores.std():.4f})")
 
         # Entrenar modelo final con early stopping
+        # SURVIVOR BIAS FIX: Apply weighted loss for negative examples
+        sample_weights = self._calculate_sample_weights(y_train)
+
         self._model.fit(
             X_train, y_train,
+            sample_weight=sample_weights,
             eval_set=[(X_test, y_test)],
             verbose=False
         )
@@ -1072,6 +1078,35 @@ class GrowthPredictionEngine:
         logger.info(f"Training completed. Test RMSE: {test_rmse:.4f}, Test R2: {test_r2:.4f}")
 
         return self._training_metrics
+
+    def _calculate_sample_weights(self, y: np.ndarray) -> np.ndarray:
+        """
+        Calculate sample weights to penalize errors on negative examples (flops).
+
+        Logic:
+            weight = 1 + (penalty_factor * is_negative)
+            where is_negative = 1 if y < threshold else 0
+
+        This forces the model to pay extra attention to NOT recommending "bad" features.
+        """
+        weights = np.ones_like(y, dtype=np.float32)
+
+        # Identify negative examples (flops)
+        # Using configured threshold (e.g., 1.0 on 0-5 log scale)
+        # Threshold 1.0 assumes Log-Scale (0-5). Corresponds to bottom ~20% performance.
+        negative_mask = y < self.config.negative_score_threshold
+
+        if np.any(negative_mask):
+            # Apply penalty factor (e.g., +2.5 = 3.5 total weight)
+            # The user requested: weights = 1 + (is_negative_example * penalty_factor)
+            weights[negative_mask] = 1.0 + self.config.loss_penalty_factor
+
+            logger.info(
+                f"Applied weighted loss: {np.sum(negative_mask)} negative samples "
+                f"boosted by {self.config.loss_penalty_factor}x"
+            )
+
+        return weights
 
     def _prepare_features_from_dataframe(
         self,

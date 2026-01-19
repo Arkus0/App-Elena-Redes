@@ -6,11 +6,12 @@ import logging
 from typing import List, Dict, Any
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.models.pattern import ExtractedPattern, PatternType
 from app.models.scraped_post import ScrapedPost
 from app.models.competitor import Competitor
+from app.models.business import Business
 from app.services.ai_service import AIService
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,87 @@ class PatternExtractor:
         await db.commit()
 
         return patterns
+
+    async def extract_anti_patterns(
+        self,
+        db: AsyncSession,
+        business_id: int,
+        business_type: str
+    ) -> List[ExtractedPattern]:
+        """
+        Extract Anti-Patterns (flaws) from failed posts in the niche.
+        Noise Filter: Only runs if niche has > 50 posts.
+        """
+        # 1. Noise Filter: Check total posts in niche
+        count_query = (
+            select(func.count(ScrapedPost.id))
+            .join(Competitor, ScrapedPost.competitor_id == Competitor.id)
+            .join(Business, Competitor.business_id == Business.id)
+            .where(Business.business_type == business_type)
+        )
+        count_result = await db.execute(count_query)
+        total_posts_in_niche = count_result.scalar() or 0
+
+        if total_posts_in_niche <= 50:
+            logger.info(f"Skipping anti-pattern extraction: Only {total_posts_in_niche} posts in niche {business_type} (needs > 50)")
+            return []
+
+        # 2. Extract Bottom 20 Posts (Failed examples)
+        query = (
+            select(ScrapedPost)
+            .join(Competitor, ScrapedPost.competitor_id == Competitor.id)
+            .join(Business, Competitor.business_id == Business.id)
+            .where(Business.business_type == business_type)
+            .order_by(ScrapedPost.engagement_score.asc())  # Bottom performance
+            .limit(20)
+        )
+        result = await db.execute(query)
+        failed_posts = result.scalars().all()
+
+        if not failed_posts:
+            return []
+
+        # 3. Prepare data for AI
+        posts_data = [
+            {
+                "caption": p.caption,
+                "type": p.content_format.value if p.content_format else "unknown",
+                "engagement_score": p.engagement_score,
+                "hashtags": p.hashtags or []
+            }
+            for p in failed_posts
+        ]
+
+        # 4. Get AI Analysis (Anti-Patterns)
+        anti_patterns_data = await self.ai_service.analyze_anti_patterns(
+            posts_data,
+            business_type
+        )
+
+        # 5. Save Patterns
+        saved_patterns = []
+        for ap in anti_patterns_data:
+            pattern = ExtractedPattern(
+                business_id=business_id,  # Save for the requesting business
+                pattern_type=PatternType.NEGATIVE_SIGNAL,
+                pattern_name=ap.get("pattern_name", "Unknown Anti-Pattern"),
+                description=ap.get("description", ""),
+                examples=ap.get("examples", []),
+                platform=None,  # Universal anti-pattern
+                pattern_data={
+                    "avoid_strategy": ap.get("avoid_strategy", ""),
+                    "source": "niche_analysis"
+                },
+                business_types=[business_type],
+                confidence_score=90.0,  # High confidence derived from failure data
+                source_post_ids=[p.id for p in failed_posts[:5]]
+            )
+            db.add(pattern)
+            saved_patterns.append(pattern)
+
+        await db.commit()
+        logger.info(f"Extracted {len(saved_patterns)} anti-patterns for {business_type}")
+        return saved_patterns
 
     async def extract_all_patterns(
         self,

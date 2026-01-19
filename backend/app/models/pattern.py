@@ -19,6 +19,7 @@ class PatternType(str, enum.Enum):
     FORMAT = "format"
     EMOTIONAL_TRIGGER = "emotional_trigger"
     HASHTAG_STRATEGY = "hashtag_strategy"
+    NEGATIVE_SIGNAL = "negative_signal"
 
 
 class ExtractedPattern(Base):
