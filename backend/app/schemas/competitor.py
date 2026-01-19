@@ -11,6 +11,18 @@ class CompetitorCreate(BaseModel):
     handle: str
 
 
+class CompetitorPreviewResponse(BaseModel):
+    """Lightweight profile preview"""
+    platform: str
+    handle: str
+    profile_pic_url: Optional[str]
+    full_name: Optional[str]
+    biography: Optional[str]
+    followers_count: int
+    is_private: bool
+    verified: bool = False
+
+
 class ScrapedPostSummary(BaseModel):
     """Summary of a scraped post"""
     id: int

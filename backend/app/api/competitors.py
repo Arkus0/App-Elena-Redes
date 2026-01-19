@@ -21,9 +21,37 @@ from app.schemas.competitor import (
     TopPost,
     PatternInsight,
     ScrapedPostSummary,
+    CompetitorPreviewResponse,
 )
 
 router = APIRouter()
+
+
+@router.post("/preview", response_model=CompetitorPreviewResponse)
+async def preview_competitor(
+    request: CompetitorCreate,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Preview a competitor profile before adding it.
+    This is a lightweight fetch (profile only, no posts) to verify the handle.
+    """
+    from app.services.apify_service import ApifyService
+    # Initialize service (strategy doesn't matter for profile fetch)
+    apify_service = ApifyService()
+
+    data = await apify_service.get_profile_metadata(
+        handle=request.handle.lstrip("@"),
+        platform=request.platform
+    )
+
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"User @{request.handle} not found on {request.platform} or is private/inaccessible."
+        )
+
+    return data
 
 
 @router.get("/{business_id}", response_model=List[CompetitorResponse])

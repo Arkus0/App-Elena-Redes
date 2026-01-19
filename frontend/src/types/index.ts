@@ -75,6 +75,17 @@ export interface Competitor {
   common_hashtags: string[]
 }
 
+export interface CompetitorPreviewResponse {
+  platform: Platform
+  handle: string
+  profile_pic_url: string | null
+  full_name: string | null
+  biography: string | null
+  followers_count: number
+  is_private: boolean
+  verified: boolean
+}
+
 // Scraped Post
 export interface ScrapedPost {
   id: number
