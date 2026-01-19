@@ -38,6 +38,7 @@ from app.models.abtest import ABTestLog, PredictionLog, ABTestExperiment, ABTest
 from app.models.content import GeneratedContent
 from app.models.user import User
 from app.api.deps import get_current_user
+from app.services.abtest_service import perform_thompson_sampling
 
 # Online learning integration
 try:
@@ -61,8 +62,6 @@ except ImportError:
     FEATURE_EXTRACTOR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/abtest", tags=["A/B Testing"])
 
 
 # =============================================================================
@@ -125,31 +124,40 @@ class RecommendationResponse(BaseModel):
     variants_status: dict  # {variant_name: {alpha: int, beta: int}}
 
 
+class OnlineFeedbackRequest(BaseModel):
+    """Request schema for online learning feedback."""
+    post_id: int = Field(..., description="ID of the GeneratedContent record")
+    actual_likes: int = Field(0, ge=0)
+    actual_comments: int = Field(0, ge=0)
+    actual_saves: Optional[int] = Field(None, ge=0)
+    actual_shares: Optional[int] = Field(None, ge=0)
+    actual_views: Optional[int] = Field(None, ge=0)
+    niche: Optional[str] = Field(None, description="Business niche override")
+
+
+class OnlineFeedbackResponse(BaseModel):
+    """Response schema for online learning feedback."""
+    post_id: int
+    online_learning_enabled: bool
+    samples_processed: int
+    total_samples: int
+    current_mae: Optional[float]
+    improvement_detected: bool
+    trigger_full_retrain: bool
+    update_time_ms: float
+    message: str
+
+
+# =============================================================================
+# Router Initialization
+# =============================================================================
+
+router = APIRouter(prefix="/abtest", tags=["A/B Testing"])
+
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
-
-def perform_thompson_sampling(experiment: ABTestExperiment) -> str:
-    """
-    Thompson Sampling: Sample from Beta(alpha, beta) for each variant.
-    Return the variant name with the highest sample.
-    """
-    best_variant = None
-    max_sample = -1.0
-
-    if not experiment.variants:
-        return "reel"  # Default fallback
-
-    for variant in experiment.variants:
-        # Sample from Beta distribution
-        # alpha and beta must be > 0. We default to 1 in model, so it's safe.
-        sample = random.betavariate(variant.alpha_param, variant.beta_param)
-        if sample > max_sample:
-            max_sample = sample
-            best_variant = variant.variant_name
-
-    return best_variant
-
 
 async def update_bandit_params(
     db: AsyncSession,
@@ -191,6 +199,90 @@ async def update_bandit_params(
             db.add(target_variant)
             # Experiment updated implicitly via session commit in caller
             logger.info(f"Updated bandit for {variant_name}: +{'Success' if is_success else 'Fail'}")
+
+
+# =============================================================================
+# Online Learning Helper
+# =============================================================================
+
+async def _perform_online_update(
+    content: GeneratedContent,
+    actual_metrics: dict,
+    niche: str
+) -> Optional[dict]:
+    """
+    Perform online learning update in background.
+
+    Extracts features from content and targets from actual metrics,
+    then calls the online_update function.
+
+    Args:
+        content: The original GeneratedContent record
+        actual_metrics: Dict with likes, comments, shares, saves, views
+        niche: Business niche for model selection
+
+    Returns:
+        OnlineUpdateResult dict or None if failed
+    """
+    if not ONLINE_LEARNING_AVAILABLE or not RIVER_AVAILABLE:
+        logger.debug("Online learning not available")
+        return None
+
+    if not FEATURE_EXTRACTOR_AVAILABLE:
+        logger.warning("FeatureExtractor not available for online learning")
+        return None
+
+    try:
+        # Build content dict for feature extraction
+        content_dict = {
+            "caption": content.caption or "",
+            "content_format": content.content_format or "reel",
+            "business_type": niche,
+            "hashtags": content.hashtags or [],
+            "posted_at": content.created_at.isoformat() if content.created_at else None,
+            # Add any additional fields from content
+            "whisper_transcript": getattr(content, "whisper_transcript", "") or "",
+            "easyocr_text": getattr(content, "easyocr_text", "") or "",
+        }
+
+        # Extract features
+        features = FeatureExtractor.extract_features(content_dict)
+
+        # Remove non-numeric features
+        numeric_features = {
+            k: float(v) if isinstance(v, (int, float, np.number)) else 0.0
+            for k, v in features.items()
+            if k != "business_type"
+        }
+
+        # Prepare targets (log-transformed)
+        targets = {
+            "log_likes": float(np.log1p(actual_metrics.get("likes", 0))),
+            "log_comments": float(np.log1p(actual_metrics.get("comments", 0))),
+            "log_shares": float(np.log1p(actual_metrics.get("shares", 0))),
+            "log_saves": float(np.log1p(actual_metrics.get("saves", 0))),
+            "log_views": float(np.log1p(actual_metrics.get("views", 0))),
+        }
+
+        # Perform online update
+        result = online_update_single(
+            niche=niche,
+            features=numeric_features,
+            targets=targets,
+            save_model=True  # Persist after each update
+        )
+
+        logger.info(
+            f"Online update completed: niche={niche}, "
+            f"total_samples={result.total_samples}, "
+            f"MAE={result.current_mae:.4f if result.current_mae else 'N/A'}"
+        )
+
+        return result.to_dict()
+
+    except Exception as e:
+        logger.error(f"Online learning update failed: {e}", exc_info=True)
+        return None
 
 
 # =============================================================================
@@ -458,90 +550,6 @@ async def get_high_priority_samples(
         )
         for log in logs
     ]
-
-
-# =============================================================================
-# Online Learning Integration
-# =============================================================================
-
-async def _perform_online_update(
-    content: GeneratedContent,
-    actual_metrics: dict,
-    niche: str
-) -> Optional[dict]:
-    """
-    Perform online learning update in background.
-
-    Extracts features from content and targets from actual metrics,
-    then calls the online_update function.
-
-    Args:
-        content: The original GeneratedContent record
-        actual_metrics: Dict with likes, comments, shares, saves, views
-        niche: Business niche for model selection
-
-    Returns:
-        OnlineUpdateResult dict or None if failed
-    """
-    if not ONLINE_LEARNING_AVAILABLE or not RIVER_AVAILABLE:
-        logger.debug("Online learning not available")
-        return None
-
-    if not FEATURE_EXTRACTOR_AVAILABLE:
-        logger.warning("FeatureExtractor not available for online learning")
-        return None
-
-    try:
-        # Build content dict for feature extraction
-        content_dict = {
-            "caption": content.caption or "",
-            "content_format": content.content_format or "reel",
-            "business_type": niche,
-            "hashtags": content.hashtags or [],
-            "posted_at": content.created_at.isoformat() if content.created_at else None,
-            # Add any additional fields from content
-            "whisper_transcript": getattr(content, "whisper_transcript", "") or "",
-            "easyocr_text": getattr(content, "easyocr_text", "") or "",
-        }
-
-        # Extract features
-        features = FeatureExtractor.extract_features(content_dict)
-
-        # Remove non-numeric features
-        numeric_features = {
-            k: float(v) if isinstance(v, (int, float, np.number)) else 0.0
-            for k, v in features.items()
-            if k != "business_type"
-        }
-
-        # Prepare targets (log-transformed)
-        targets = {
-            "log_likes": float(np.log1p(actual_metrics.get("likes", 0))),
-            "log_comments": float(np.log1p(actual_metrics.get("comments", 0))),
-            "log_shares": float(np.log1p(actual_metrics.get("shares", 0))),
-            "log_saves": float(np.log1p(actual_metrics.get("saves", 0))),
-            "log_views": float(np.log1p(actual_metrics.get("views", 0))),
-        }
-
-        # Perform online update
-        result = online_update_single(
-            niche=niche,
-            features=numeric_features,
-            targets=targets,
-            save_model=True  # Persist after each update
-        )
-
-        logger.info(
-            f"Online update completed: niche={niche}, "
-            f"total_samples={result.total_samples}, "
-            f"MAE={result.current_mae:.4f if result.current_mae else 'N/A'}"
-        )
-
-        return result.to_dict()
-
-    except Exception as e:
-        logger.error(f"Online learning update failed: {e}", exc_info=True)
-        return None
 
 
 @router.post("/feedback", response_model=OnlineFeedbackResponse)
