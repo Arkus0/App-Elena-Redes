@@ -2,9 +2,14 @@
 Viral Scanner API Routes
 Scan trending content and generate reactive ideas
 """
+import shutil
+import tempfile
+import os
+import logging
+from pathlib import Path
 from typing import List
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -18,9 +23,48 @@ from app.schemas.content import (
     ViralScanResponse,
 )
 from app.services.content_generator import ContentGenerator
+from app.services.analytics_engine import AnalyticsEngine
 
 router = APIRouter()
 content_generator = ContentGenerator()
+
+
+@router.post("/analyze/instant")
+async def analyze_instant_video(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Instant viral analysis for a video file.
+    Uses async offloading to prevent blocking the event loop.
+    Returns hook score, engagement prediction, and optimization tips.
+    """
+    # Create temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+
+    try:
+        # Initialize engine
+        # Note: We enable text intelligence for full analysis
+        engine = AnalyticsEngine(enable_text_intelligence=True)
+
+        # Define progress callback (simple logging for now)
+        def log_progress(progress: float):
+            logging.info(f"Analysis progress for {file.filename}: {progress:.1f}%")
+
+        # Run analysis asynchronously
+        features = await engine.extract_complete_features_async(
+            media_path=tmp_path,
+            on_progress=log_progress
+        )
+
+        return features
+
+    finally:
+        # Cleanup
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 @router.post("/{business_id}/scan", response_model=ViralScanResponse)

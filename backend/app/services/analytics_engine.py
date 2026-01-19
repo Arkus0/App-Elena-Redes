@@ -43,11 +43,12 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generator, Optional, Dict, Any, List, Tuple
+from typing import Generator, Optional, Dict, Any, List, Tuple, Callable
 import warnings
 
 import cv2
 import numpy as np
+from fastapi.concurrency import run_in_threadpool
 
 # Suppress librosa warnings for cleaner output
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -681,7 +682,11 @@ class EfficientFeatureExtractor:
 
         return adjusted_energy
 
-    def extract_video_features(self, video_path: str) -> Dict[str, float]:
+    def extract_video_features(
+        self,
+        video_path: str,
+        on_progress: Optional[Callable[[float], None]] = None
+    ) -> Dict[str, float]:
         """
         Extract all video features with TEMPORAL HOOK THEORY segmentation
         and QUALITY GATE for camera instability detection.
@@ -697,6 +702,7 @@ class EfficientFeatureExtractor:
 
         Args:
             video_path: Path to video file
+            on_progress: Callback(percentage) for progress tracking
 
         Returns:
             Dict with temporal features:
@@ -718,6 +724,10 @@ class EfficientFeatureExtractor:
                 duration = gen.duration
 
                 for frame, timestamp in gen.generate_frames():
+                    if on_progress and duration > 0:
+                        progress = min((timestamp / duration) * 100, 99.0)
+                        on_progress(progress)
+
                     frames_analyzed += 1
                     is_hook = timestamp <= hook_duration
 
@@ -1114,9 +1124,13 @@ class AnalyticsEngine:
             f"TextIntelligence: {'enabled' if self._text_engine else 'disabled'}"
         )
 
-    def extract_video_features(self, video_path: str) -> Dict[str, float]:
+    def extract_video_features(
+        self,
+        video_path: str,
+        on_progress: Optional[Callable[[float], None]] = None
+    ) -> Dict[str, float]:
         """Extract only video features."""
-        return self.video_extractor.extract_video_features(video_path)
+        return self.video_extractor.extract_video_features(video_path, on_progress)
 
     def extract_audio_features(self, audio_path: str) -> Dict[str, float]:
         """Extract only audio features."""
@@ -1154,7 +1168,8 @@ class AnalyticsEngine:
         self,
         media_path: str,
         include_video: bool = True,
-        include_audio: bool = True
+        include_audio: bool = True,
+        on_progress: Optional[Callable[[float], None]] = None
     ) -> Dict[str, Any]:
         """
         Extract all DNA features from a media file (video + audio only).
@@ -1163,6 +1178,7 @@ class AnalyticsEngine:
             media_path: Path to video/audio file
             include_video: Whether to extract video features
             include_audio: Whether to extract audio features
+            on_progress: Callback(percentage) for progress tracking
 
         Returns:
             Flat JSON-serializable dict with all features
@@ -1175,7 +1191,10 @@ class AnalyticsEngine:
         try:
             # Video features (now with Hook Theory temporal features + Quality Gate)
             if include_video:
-                video_features = self.video_extractor.extract_video_features(media_path)
+                video_features = self.video_extractor.extract_video_features(
+                    media_path,
+                    on_progress=on_progress
+                )
                 result.update({
                     # Temporal Hook Theory features
                     "hook_energy": video_features.get("hook_energy", 0.0),
@@ -1217,13 +1236,37 @@ class AnalyticsEngine:
 
         return result
 
+    async def extract_complete_features_async(
+        self,
+        media_path: str,
+        caption: str = "",
+        include_video: bool = True,
+        include_audio: bool = True,
+        include_text: bool = True,
+        on_progress: Optional[Callable[[float], None]] = None
+    ) -> Dict[str, Any]:
+        """
+        Async wrapper for extract_complete_features.
+        Offloads CPU-bound analysis to a thread pool to prevent blocking the event loop.
+        """
+        return await run_in_threadpool(
+            self.extract_complete_features,
+            media_path=media_path,
+            caption=caption,
+            include_video=include_video,
+            include_audio=include_audio,
+            include_text=include_text,
+            on_progress=on_progress
+        )
+
     def extract_complete_features(
         self,
         media_path: str,
         caption: str = "",
         include_video: bool = True,
         include_audio: bool = True,
-        include_text: bool = True
+        include_text: bool = True,
+        on_progress: Optional[Callable[[float], None]] = None
     ) -> Dict[str, Any]:
         """
         Extract ALL features: Video DNA + Audio DNA + Text Intelligence.
@@ -1240,6 +1283,7 @@ class AnalyticsEngine:
             include_video: Whether to extract video features
             include_audio: Whether to extract audio features
             include_text: Whether to extract text intelligence features
+            on_progress: Callback(percentage) for progress tracking
 
         Returns:
             Flat JSON-serializable dict with all features including sem_pca_1 to sem_pca_10
@@ -1288,7 +1332,10 @@ class AnalyticsEngine:
         try:
             # Video DNA features (with Hook Theory + Quality Gate)
             if include_video:
-                video_features = self.video_extractor.extract_video_features(media_path)
+                video_features = self.video_extractor.extract_video_features(
+                    media_path,
+                    on_progress=on_progress
+                )
                 result.update({
                     # === TEMPORAL FEATURES (Hook Theory) ===
                     # Critical for algorithm - first 3 seconds determine 90% of success
