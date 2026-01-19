@@ -1,53 +1,53 @@
 # BrandPulse AI - Backend Dependencies
-# Core Framework
+
+# --- Core Framework ---
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 python-multipart==0.0.6
 
-# Database
+# --- Database ---
 sqlalchemy==2.0.25
 alembic==1.13.1
 aiosqlite==0.19.0
 
-# Authentication
+# --- Authentication ---
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+bcrypt==4.0.1  # CRÍTICO: Versión específica para evitar error de hash/72 bytes
 
-# AI & Scraping
+# --- AI & Scraping ---
 openai>=1.0.0
 apify-client==1.6.4
 
-# Utilities
+# --- Utilities ---
 pydantic==2.5.3
 pydantic-settings==2.1.0
 python-dotenv==1.0.0
 httpx==0.26.0
 tenacity==8.2.3
+email-validator>=2.1.0
 
-# Data Processing
-pandas==2.1.4
+# --- Data Processing ---
+pandas>=2.1.4  # CRÍTICO: Flexibilizado para compatibilidad con Python 3.12
 numpy==1.26.3
 
-# Machine Learning
+# --- Machine Learning ---
 scikit-learn==1.4.0
 xgboost==2.0.3
 shap>=0.45.0
 joblib==1.3.2
-river>=0.21.0  # Online/incremental learning for live model updates
+river>=0.21.0
 
-# Analytics Engine (Video/Audio Processing)
-opencv-python-headless==4.9.0.80  # Headless for server/edge (no GUI)
-librosa==0.10.1  # Audio analysis (optional - gracefully degrades if unavailable)
-av>=12.0.0 --only-binary=:all:
+# --- Analytics Engine (Video/Audio Processing) ---
+opencv-python-headless==4.9.0.80
+librosa==0.10.1
+av>=12.0.0
 
-# Text Intelligence (NLP Pipeline)
-faster-whisper  # Speech-to-text with CTranslate2 backend (efficient CPU inference)
-easyocr==1.7.1  # Optical Character Recognition for frame text detection
-sentence-transformers==2.3.1  # Semantic embeddings (all-MiniLM-L6-v2)
+# --- Text Intelligence (NLP Pipeline) ---
+faster-whisper
+easyocr==1.7.1
+sentence-transformers==2.3.1
 
-# Testing
+# --- Testing ---
 pytest==7.4.4
 pytest-asyncio==0.23.3
-httpx==0.26.0
-
-email-validator>=2.1.0
