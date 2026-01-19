@@ -9,12 +9,14 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, date, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.models.business import Business
 from app.models.competitor import Competitor
 from app.models.scraped_post import ScrapedPost
 from app.models.pattern import ExtractedPattern, PatternType
 from app.models.content import GeneratedContent, ContentCalendar, ContentGoal, ContentStatus
+from app.models.abtest import ABTestExperiment
 from app.services.ai_service import AIService
 from app.services.apify_service import ApifyService
 from app.services.ml_service import get_ml_predictor
@@ -90,6 +92,17 @@ class ContentGenerator:
             posts_count, platforms, content_mix or self._get_default_content_mix()
         )
 
+        # === BANDIT INTEGRATION ===
+        # Check for active experiment
+        experiment_result = await db.execute(
+            select(ABTestExperiment)
+            .options(selectinload(ABTestExperiment.variants))
+            .where(ABTestExperiment.business_id == business_id)
+            .where(ABTestExperiment.is_active == True)
+            .where(ABTestExperiment.test_name == "Format Optimization")
+        )
+        experiment = experiment_result.scalar_one_or_none()
+
         # Generate each content piece
         business_info = {
             "name": business.name,
@@ -119,6 +132,22 @@ class ContentGenerator:
             content_format = item["format"]
             goal = item.get("goal", primary_goal)
 
+            # === APPLY BANDIT RECOMMENDATION ===
+            bandit_recommendation = None
+            if experiment:
+                recommended_variant = self._perform_thompson_sampling(experiment)
+
+                # Check compatibility
+                compatible = True
+                # TikTok is generally video only (reels/tiktok_video)
+                if platform == "tiktok" and recommended_variant not in ["reel", "tiktok_video", "video"]:
+                    compatible = False
+
+                # If compatible, use it!
+                if compatible:
+                    content_format = recommended_variant
+                    bandit_recommendation = recommended_variant
+
             # Get relevant top posts for this format
             relevant_posts = [
                 p for p in top_posts
@@ -143,6 +172,13 @@ class ContentGenerator:
                 ],
                 "optimization_tips": ml_prediction.get("optimization_suggestions", []),
             }
+
+            # Inject Bandit Message
+            if bandit_recommendation:
+                ml_recommendations["bandit_message"] = (
+                    f"The mathematical optimizer has determined that a {bandit_recommendation.upper()} "
+                    f"is the optimal format for this niche. Generate the content specifically for a {bandit_recommendation} structure."
+                )
 
             # Step 3: Generate content with AI (LLM) using ML recommendations
             content_data = await self.ai_service.generate_content_piece(
@@ -204,6 +240,7 @@ class ContentGenerator:
                 "top_factors": final_ml_prediction.get("explanation", {}).get("top_positive_factors", []),
                 "format_recommendation": ml_prediction.get("format_recommendation", {}),
                 "triggers_used": ml_recommendations.get("trigger_suggestions", []),
+                "bandit_recommendation": bandit_recommendation,
             }
             content_piece.similar_viral_posts = [
                 {"id": p.get("id"), "engagement": p.get("engagement_score")}
@@ -461,6 +498,26 @@ class ContentGenerator:
         return sorted(ideas, key=lambda x: x.get("relevance_score", 0), reverse=True)
 
     # ============ HELPER METHODS ============
+
+    def _perform_thompson_sampling(self, experiment: ABTestExperiment) -> str:
+        """
+        Thompson Sampling: Sample from Beta(alpha, beta) for each variant.
+        Return the variant name with the highest sample.
+        """
+        best_variant = None
+        max_sample = -1.0
+
+        if not experiment.variants:
+            return "reel"  # Default fallback
+
+        for variant in experiment.variants:
+            # Sample from Beta distribution
+            sample = random.betavariate(variant.alpha_param, variant.beta_param)
+            if sample > max_sample:
+                max_sample = sample
+                best_variant = variant.variant_name
+
+        return best_variant or "reel"
 
     async def _get_competitors(self, db: AsyncSession, business_id: int) -> List[Competitor]:
         """Get all competitors for a business"""
