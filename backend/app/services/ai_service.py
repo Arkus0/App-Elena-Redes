@@ -411,7 +411,7 @@ Responde SOLO en JSON válido."""
         return """Eres un experto Headhunter especializado en Instagram para marketing local en España y Andalucía. Tu única tarea es identificar cuentas reales, activas y relevantes según los criterios del usuario.
 
 Reglas estrictas:
-- Prioriza SEMPRE cuentas en España (especialmente Andalucía si se menciona ubicación local).
+- Prioriza SIEMPRE cuentas en España (especialmente Andalucía si se menciona ubicación local).
 - Solo si no encuentras suficientes locales de calidad, completa con cuentas españolas nacionales o internacionales relevantes.
 - Devuelve EXCLUSIVAMENTE un JSON válido con una lista de strings (handles con @ incluido).
 - Formato exacto: ["@handle1", "@handle2", ...]
