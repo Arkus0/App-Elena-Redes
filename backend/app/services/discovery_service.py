@@ -68,18 +68,22 @@ class DiscoveryService:
                 post_text = (caption + " " + username).lower()
 
                 # Niche Match
+                has_niche_match = False
                 if request.niche_keywords:
                     matches = [k for k in request.niche_keywords if k.lower() in post_text]
                     if matches:
                         relevance_score += 25
                         match_reasons.append("🎯 Niche Match")
+                        has_niche_match = True
 
                 # Location Match
+                has_location_match = False
                 if request.location_keywords:
                     matches = [k for k in request.location_keywords if k.lower() in post_text]
                     if matches:
                         relevance_score += 30
                         match_reasons.append("📍 Location Match")
+                        has_location_match = True
 
                 if activity_status == "Very Active":
                     relevance_score += 15
@@ -94,9 +98,9 @@ class DiscoveryService:
 
                 # --- Bypass Logic ---
                 # If score is low but they passed size/activity filters, we KEEP them.
-                # Just warn in reasons.
-                if final_score < 30: # Arbitrary threshold for "Low"
-                    match_reasons.append("⚠️ Low Keyword Match")
+                # If no specific matches, label as General Exploration.
+                if not has_niche_match and not has_location_match:
+                     match_reasons.append("Exploración general")
 
                 # Profile pic extraction
                 profile_pic = self._extract_profile_pic(post)
@@ -107,7 +111,8 @@ class DiscoveryService:
                 # Detect platform
                 platform = "tiktok" if "authorMeta" in post else "instagram"
 
-                logger.debug(f"Perfil @{username} encontrado, Score: {final_score}, Seguidores: {followers}")
+                # Log success for visibility
+                logger.info(f"Descubierto: @{username} | Seguidores: {followers} | Score: {final_score}")
 
                 discovered[username] = DiscoveredCompetitor(
                     handle=username,
@@ -131,7 +136,9 @@ class DiscoveryService:
             post.get("ownerUsername") or
             post.get("username") or
             post.get("owner", {}).get("username") or
-            post.get("authorMeta", {}).get("name") # TikTok
+            post.get("authorMeta", {}).get("name") or # TikTok
+            post.get("authorMeta", {}).get("uniqueId") or # TikTok alternate
+            post.get("authorMeta", {}).get("nickName") # TikTok Fallback (usually display name but sometimes handle)
         )
 
     def _extract_full_name(self, post: Dict[str, Any]) -> Optional[str]:
@@ -140,7 +147,8 @@ class DiscoveryService:
             post.get("full_name") or
             post.get("owner", {}).get("full_name") or
             post.get("owner", {}).get("fullName") or
-            post.get("authorMeta", {}).get("nickName") # TikTok
+            post.get("authorMeta", {}).get("nickName") or # TikTok
+            post.get("authorMeta", {}).get("name") # TikTok fallback
         )
 
     def _extract_followers(self, post: Dict[str, Any]) -> int:
@@ -156,7 +164,7 @@ class DiscoveryService:
 
         # TikTok
         author = post.get("authorMeta", {})
-        followers = author.get("fans")
+        followers = author.get("fans") or author.get("followers") # 'fans' is standard, 'followers' is fallback
         if followers is not None: return int(followers)
 
         return 0
