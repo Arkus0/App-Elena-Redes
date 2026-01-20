@@ -81,8 +81,9 @@ try:
     EMBEDDING_FEATURE_COLUMNS = get_embedding_feature_names(EMBEDDING_DIM)
 except ImportError:
     EMBEDDINGS_AVAILABLE = False
-    EMBEDDING_DIM = 384
-    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(384)]
+    # Use 128 to match default "low" precision in extract_features
+    EMBEDDING_DIM = 128
+    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i}" for i in range(128)]
     PRECISION_TO_DIMS = {"low": 128, "medium": 256, "high": 384, "max": 384}
     DEFAULT_PRECISION = "max"
 
@@ -1205,7 +1206,13 @@ class MLPredictor:
         training_data: List of content dicts with engagement metrics
         """
         # Ensure we have loaded any existing state before retraining decisions
-        self._ensure_models_loaded()
+        try:
+            self._ensure_models_loaded()
+        except RuntimeError as e:
+            if retrain:
+                logger.warning(f"Existing model validation failed ({e}), but retrain=True. Proceeding to train new model.")
+            else:
+                raise e
 
         if self.is_trained and not retrain:
             logger.info("Models already trained. Use retrain=True to force retraining.")
@@ -1703,7 +1710,27 @@ class MLPredictor:
         # Calculate weighted RPI if kpi_weights provided
         weighted_rpi = None
         if kpi_weights:
-            weighted_rpi = self._calculate_weighted_rpi(content, kpi_weights)
+            # For PREDICTION (drafts), we must use the predicted breakdown from engagement
+            if "multi_output_breakdown" in engagement and engagement["multi_output_breakdown"]:
+                # Use predicted metrics
+                weighted_rpi = self._calculate_weighted_rpi(
+                    engagement["multi_output_breakdown"],
+                    kpi_weights,
+                    is_prediction=True
+                )
+            else:
+                # Fallback for Single Model or missing breakdown
+                # We can only assume the 'score' is the best we have.
+                # Since Single Model doesn't support re-weighting, we return the score as-is
+                # but warn implicitly by not having breakdown.
+                weighted_rpi = {
+                    "weighted_rpi": engagement["score"],
+                    "raw_weighted_sum": engagement["score"],
+                    "weights_used": kpi_weights,
+                    "metrics": {},
+                    "contribution_breakdown": {},
+                    "note": "Metrics predicted by single-output model (re-weighting unavailable)"
+                }
 
         result = {
             "engagement_prediction": engagement,
@@ -1725,7 +1752,8 @@ class MLPredictor:
     def _calculate_weighted_rpi(
         self,
         content: Dict[str, Any],
-        kpi_weights: Dict[str, float]
+        kpi_weights: Dict[str, float],
+        is_prediction: bool = False
     ) -> Dict[str, Any]:
         """
         Calculate RPI score using custom KPI weights from user_config.
@@ -1734,18 +1762,27 @@ class MLPredictor:
         frontend KPI weight changes affect RPI calculation in real-time.
 
         Args:
-            content: Content with metrics
+            content: Content with metrics (or predicted metrics dict)
             kpi_weights: Weights dict with likes, comments, shares, saves, views
+            is_prediction: Whether content is just the metrics dict (from MultiOutput)
 
         Returns:
             Dict with weighted RPI score and breakdown
         """
         # Get metrics from content
-        likes = content.get("likes_count", content.get("likes", 0)) or 0
-        comments = content.get("comments_count", content.get("comments", 0)) or 0
-        shares = content.get("shares_count", content.get("shares", 0)) or 0
-        saves = content.get("saves_count", content.get("saves", 0)) or 0
-        views = content.get("views_count", content.get("video_views", 0)) or 0
+        if is_prediction:
+            # Content is already the dictionary of predicted metrics: predicted_likes, etc.
+            likes = content.get("predicted_likes", 0) or 0
+            comments = content.get("predicted_comments", 0) or 0
+            shares = content.get("predicted_shares", 0) or 0
+            saves = content.get("predicted_saves", 0) or 0
+            views = content.get("predicted_views", 0) or 0
+        else:
+            likes = content.get("likes_count", content.get("likes", 0)) or 0
+            comments = content.get("comments_count", content.get("comments", 0)) or 0
+            shares = content.get("shares_count", content.get("shares", 0)) or 0
+            saves = content.get("saves_count", content.get("saves", 0)) or 0
+            views = content.get("views_count", content.get("video_views", 0)) or 0
 
         # Get weights with defaults
         w_likes = kpi_weights.get("likes", 1.0)
