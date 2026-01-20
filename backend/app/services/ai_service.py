@@ -321,6 +321,63 @@ Responde en JSON:
             logger.error(f"Error generating viral ideas: {e}")
             return self._get_mock_viral_ideas(keyword, business_info)
 
+    async def find_competitor_handles(
+        self,
+        topic: str,
+        location: str,
+        niche: str
+    ) -> List[str]:
+        """
+        Find relevant competitor handles using Grok
+        """
+        if not self.is_available():
+            return self._get_mock_competitor_handles(topic, location, niche)
+
+        system_prompt = self._get_competitor_finder_system_prompt()
+        user_prompt = self._build_competitor_finder_user_prompt(topic, location, niche)
+
+        try:
+            response = await self.client.chat.completions.create(
+                model="grok-4",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=600,
+                top_p=0.95
+            )
+
+            response_text = response.choices[0].message.content
+            # Extract JSON from response
+            if "```json" in response_text:
+                json_str = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                json_str = response_text.split("```")[1].split("```")[0]
+            else:
+                json_str = response_text
+
+            handles = json.loads(json_str.strip())
+
+            if not isinstance(handles, list):
+                logger.error(f"Grok returned non-list format: {handles}")
+                return []
+
+            # Clean handles
+            cleaned_handles = []
+            for h in handles:
+                if isinstance(h, str):
+                    # Remove @, spaces, and convert to lowercase
+                    clean = h.replace("@", "").strip().lower()
+                    if clean:
+                        cleaned_handles.append(clean)
+
+            return cleaned_handles
+
+        except Exception as e:
+            logger.error(f"Error finding competitor handles: {e}")
+            return []
+
     # ============ SYSTEM PROMPTS ============
 
     def _get_pattern_analysis_system_prompt(self) -> str:
@@ -349,6 +406,44 @@ Ejemplos de Anti-Patrones:
 - "Audio Desconectado": Música que no encaja con el mood del video.
 
 Responde SOLO en JSON válido."""
+
+    def _get_competitor_finder_system_prompt(self) -> str:
+        return """Eres un experto Headhunter especializado en Instagram para marketing local en España y Andalucía. Tu única tarea es identificar cuentas reales, activas y relevantes según los criterios del usuario.
+
+Reglas estrictas:
+- Prioriza SEMPRE cuentas en España (especialmente Andalucía si se menciona ubicación local).
+- Solo si no encuentras suficientes locales de calidad, completa con cuentas españolas nacionales o internacionales relevantes.
+- Devuelve EXCLUSIVAMENTE un JSON válido con una lista de strings (handles con @ incluido).
+- Formato exacto: ["@handle1", "@handle2", ...]
+- Máximo 15 handles, mínimo 5 si es posible (devuelve menos solo si no hay más relevantes).
+- Criterios de calidad: Posts recientes (últimos 3 meses), buen engagement (likes/comments altos), contenido auténtico y profesional.
+- Evita cuentas fake, inactivas, spam o con <1k followers si hay mejores opciones.
+- NUNCA añadas texto explicativo, notas, introducciones o cualquier cosa fuera del JSON puro.
+
+Ejemplos de output correcto:
+["@floristeriasevilla", "@floresandalucia", "@bouquetsevilla_real"]
+[]"""
+
+    def _build_competitor_finder_user_prompt(
+        self,
+        topic: str,
+        location: Optional[str] = None,
+        niche: Optional[str] = None
+    ) -> str:
+        """Build dynamic user prompt for competitor discovery"""
+        base = f"Busca en tiempo real (web y X/Twitter) las 10-15 cuentas de Instagram más relevantes y activas para el tema principal '{topic}'."
+
+        if niche and niche.lower() != "general":
+            base += f" Enfócate en el nicho: {niche} (ej: bodas, eventos, decoración)."
+
+        base += " Prioriza fuertemente cuentas en España, especialmente locales en Andalucía o la ubicación indicada. Solo completa con cuentas globales si faltan locales de calidad."
+
+        if location and location.lower() != "global":
+            base += f" Enfatiza cuentas en {location} (busca menciones geográficas reales como Almería, Andalucía)."
+
+        base += " Incluye solo cuentas verificables con contenido de calidad y engagement reciente. Ordena por relevancia descendente (locales primero)."
+
+        return base
 
     def _get_content_generation_system_prompt(self, platform: str) -> str:
         platform_specifics = {
@@ -585,6 +680,23 @@ Genera contenido en JSON:
 }}"""
 
     # ============ MOCK RESPONSES ============
+
+    def _get_mock_competitor_handles(self, topic: str, location: str, niche: str) -> List[str]:
+        """Return mock competitor handles for testing"""
+        # Return some generic handles based on topic to make it look realistic
+        base = topic.split(",")[0].replace(" ", "").replace("#", "").lower() if topic else "generic"
+        return [
+            f"{base}_official",
+            f"{base}_lovers",
+            f"best_{base}_{location.replace(' ', '').lower()}",
+            f"{niche.replace(' ', '').lower()}_{base}",
+            f"top_{base}_trends",
+            "cristiano", # Known working handle for testing
+            "leomessi",
+            "natgeo",
+            "nike",
+            "instagram"
+        ]
 
     def _get_mock_anti_pattern_analysis(self, business_type: str) -> List[Dict[str, Any]]:
         """Generate mock anti-pattern analysis"""
