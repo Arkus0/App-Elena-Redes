@@ -1,7 +1,9 @@
 import logging
+import asyncio
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from app.services.apify_service import ApifyService
+from app.services.ai_service import AIService
 from app.schemas.competitor import CompetitorDiscoveryRequest, DiscoveredCompetitor
 
 logger = logging.getLogger(__name__)
@@ -9,9 +11,100 @@ logger = logging.getLogger(__name__)
 class DiscoveryService:
     def __init__(self):
         self.apify_service = ApifyService()
+        self.ai_service = AIService()
 
     async def discover_competitors(self, request: CompetitorDiscoveryRequest) -> List[DiscoveredCompetitor]:
-        logger.info(f"Starting discovery for hashtags: {request.hashtags}")
+        """
+        Main discovery method.
+        Tries Semantic Discovery (Grok) first.
+        Fallbacks to Hashtag Search if Grok fails or returns no valid results.
+        """
+        # 1. Try Semantic Discovery
+        try:
+            results = await self._discover_via_semantic_search(request)
+            if results:
+                logger.info(f"Semantic discovery returned {len(results)} valid competitors.")
+                return results
+            else:
+                logger.warning("Semantic discovery returned 0 valid results. Triggering fallback.")
+        except Exception as e:
+            logger.error(f"Semantic discovery failed: {e}. Triggering fallback.")
+
+        # 2. Fallback to Hashtag Search
+        logger.info("Fallback: Executing hashtag-based discovery.")
+        return await self._discover_via_hashtags(request)
+
+    async def _discover_via_semantic_search(self, request: CompetitorDiscoveryRequest) -> List[DiscoveredCompetitor]:
+        """
+        Use Grok to find handles, then verify them with Apify.
+        """
+        # Prepare inputs for Grok
+        topic = ", ".join(request.hashtags)
+        location = ", ".join(request.location_keywords) if request.location_keywords else "Global"
+        niche = ", ".join(request.niche_keywords) if request.niche_keywords else "General"
+
+        logger.info(f"Starting Semantic Discovery: Topic='{topic}', Loc='{location}', Niche='{niche}'")
+
+        # Call Grok
+        handles = await self.ai_service.find_competitor_handles(topic, location, niche)
+        if not handles:
+            logger.warning("Grok returned no handles.")
+            return []
+
+        logger.info(f"Grok returned {len(handles)} handles: {handles}")
+
+        # Verify handles with Apify (Concurrent batching)
+        valid_competitors = []
+        batch_size = 5
+
+        for i in range(0, len(handles), batch_size):
+            batch = handles[i:i + batch_size]
+            tasks = [self.apify_service.get_profile_metadata(h, platform="instagram") for h in batch]
+
+            # Execute batch
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for handle, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error verifying handle {handle}: {result}")
+                    continue
+
+                if not result:
+                    logger.debug(f"Handle {handle} not found or private (Apify returned None).")
+                    continue
+
+                # Filter Private accounts if needed (though get_profile_metadata might return them with limited info)
+                # If 'is_private' is True, we might want to skip them if we can't analyze them later.
+                # Usually we only want public accounts.
+                if result.get("is_private"):
+                    logger.debug(f"Handle {handle} is private. Skipping.")
+                    continue
+
+                # Check follower constraints
+                followers = result.get("followers_count", 0)
+                if followers < request.min_followers or followers > request.max_followers:
+                    logger.debug(f"Handle {handle} followers ({followers}) out of range.")
+                    continue
+
+                # Create DiscoveredCompetitor
+                # Note: Semantic search implies high relevance if Grok did its job.
+                # We assign a high base relevance score.
+                valid_competitors.append(DiscoveredCompetitor(
+                    handle=handle,
+                    full_name=result.get("full_name"),
+                    platform="instagram",
+                    followers=followers,
+                    relevance_score=95, # High confidence from AI
+                    activity_status="Unknown", # Lightweight endpoint doesn't give activity stats usually
+                    last_post_date=None,
+                    match_reasons=["🤖 AI Recommended", "✅ Verified Public"],
+                    profile_pic_url=result.get("profile_pic_url")
+                ))
+
+        return valid_competitors
+
+    async def _discover_via_hashtags(self, request: CompetitorDiscoveryRequest) -> List[DiscoveredCompetitor]:
+        logger.info(f"Starting hashtag discovery for: {request.hashtags}")
         discovered = {}
         now = datetime.utcnow()
 
