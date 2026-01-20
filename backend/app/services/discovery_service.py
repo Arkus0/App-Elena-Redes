@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from app.services.apify_service import ApifyService
 from app.services.ai_service import AIService
 from app.schemas.competitor import CompetitorDiscoveryRequest, DiscoveredCompetitor
@@ -13,18 +13,21 @@ class DiscoveryService:
         self.apify_service = ApifyService()
         self.ai_service = AIService()
 
-    async def discover_competitors(self, request: CompetitorDiscoveryRequest) -> List[DiscoveredCompetitor]:
+    async def discover_competitors(self, request: CompetitorDiscoveryRequest) -> Tuple[List[DiscoveredCompetitor], List[str]]:
         """
         Main discovery method.
-        Tries Semantic Discovery (Grok) first.
-        Fallbacks to Hashtag Search if Grok fails or returns no valid results.
+        Returns:
+            Tuple containing:
+            1. List of validated DiscoveredCompetitor objects
+            2. List of raw handles returned by AI (or empty if fallback used)
         """
         # 1. Try Semantic Discovery
+        raw_handles = []
         try:
-            results = await self._discover_via_semantic_search(request)
+            results, raw_handles = await self._discover_via_semantic_search(request)
             if results:
                 logger.info(f"Semantic discovery returned {len(results)} valid competitors.")
-                return results
+                return results, raw_handles
             else:
                 logger.warning("Semantic discovery returned 0 valid results. Triggering fallback.")
         except Exception as e:
@@ -32,11 +35,13 @@ class DiscoveryService:
 
         # 2. Fallback to Hashtag Search
         logger.info("Fallback: Executing hashtag-based discovery.")
-        return await self._discover_via_hashtags(request)
+        fallback_results = await self._discover_via_hashtags(request)
+        return fallback_results, raw_handles
 
-    async def _discover_via_semantic_search(self, request: CompetitorDiscoveryRequest) -> List[DiscoveredCompetitor]:
+    async def _discover_via_semantic_search(self, request: CompetitorDiscoveryRequest) -> Tuple[List[DiscoveredCompetitor], List[str]]:
         """
         Use Grok to find handles, then verify them with Apify.
+        Returns: (valid_competitors, raw_grok_handles)
         """
         # Prepare inputs for Grok
         topic = ", ".join(request.hashtags)
@@ -49,7 +54,7 @@ class DiscoveryService:
         handles = await self.ai_service.find_competitor_handles(topic, location, niche)
         if not handles:
             logger.warning("Grok returned no handles.")
-            return []
+            return [], []
 
         logger.info(f"Grok returned {len(handles)} handles: {handles}")
 
@@ -101,7 +106,7 @@ class DiscoveryService:
                     profile_pic_url=result.get("profile_pic_url")
                 ))
 
-        return valid_competitors
+        return valid_competitors, handles
 
     async def _discover_via_hashtags(self, request: CompetitorDiscoveryRequest) -> List[DiscoveredCompetitor]:
         logger.info(f"Starting hashtag discovery for: {request.hashtags}")

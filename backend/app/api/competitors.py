@@ -3,7 +3,7 @@ Competitors API Routes
 Competitor management and analysis
 """
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -33,16 +33,28 @@ router = APIRouter()
 @router.post("/discover", response_model=List[DiscoveredCompetitor])
 async def discover_competitors(
     request: CompetitorDiscoveryRequest,
+    response: Response,
     current_user: User = Depends(get_current_user)
 ):
     """
     Discover competitors based on hashtags, location, and niche.
     Includes activity filtering.
+
+    Returns:
+        List[DiscoveredCompetitor] in body.
+        X-Grok-Candidates header containing raw JSON list of handles found by AI.
     """
+    import json
     from app.services.discovery_service import DiscoveryService
     service = DiscoveryService()
 
-    return await service.discover_competitors(request)
+    competitors, raw_handles = await service.discover_competitors(request)
+
+    # Expose raw handles in header for frontend download
+    if raw_handles:
+        response.headers["X-Grok-Candidates"] = json.dumps(raw_handles)
+
+    return competitors
 
 
 @router.post("/preview", response_model=CompetitorPreviewResponse)
