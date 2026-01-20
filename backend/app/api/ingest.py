@@ -31,11 +31,13 @@ import uuid
 import hashlib
 import math
 import time
+import copy
 
 # Import ML service for feedback loop
 from app.services.ml_service import get_ml_predictor, FeatureExtractor
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.privacy import privacy_provider
 from app.services.user_config_service import user_config_service, get_default_pipeline_config
 from app.schemas.user_config import PipelineConfig
 
@@ -324,6 +326,18 @@ def _process_multimodal_light(
         processor = get_light_processor(light_mode=light_mode, config=config)
 
         # Process with light mode
+        # NOTE: media_url here is potentially hashed in the calling context,
+        # but the background task should ensure it passes raw URLs if called for processing.
+        # If media_url is hashed, requests will fail.
+        # We assume the caller handles this by NOT hashing URLs before multimodal processing.
+
+        # Security check: If media_url is a hash (64 hex chars), warn and skip
+        if media_url and len(media_url) == 64 and all(c in '0123456789abcdef' for c in media_url):
+             logger.warning("Attempted multimodal processing on hashed URL. Skipping to prevent errors.")
+             result["skipped"] = True
+             result["skip_reason"] = "Hashed URL detected"
+             return result
+
         light_result = processor.process(
             media_url=media_url,
             thumbnail_url=thumbnail_url,
@@ -485,41 +499,39 @@ async def process_content_data(
     """
     Background task to process individual content (post, reel, video).
 
+    BLIND IDENTITY PROTOCOL:
+    ========================
+    This task receives 'content' with RAW URLs to allow multimodal processing (downloading).
+    However, it must IMMEDIATELY sanitize logs and ensure only HASHED data is passed to
+    persistent storage or ML feedback queues.
+
     USER CONFIG SYNC:
     =================
     If user_config is provided:
     - Uses multimodal_mode from config (not light_mode param)
-    - Uses own_instagram_username to auto-detect own profile
+    - Uses own_instagram_username to auto-detect own profile (secure comparison)
     - Uses embedding_precision for feature extraction
     - Logs: "User config loaded: precision {X}, multimodal {Y}, own @{Z}"
-
-    Human-in-the-Loop:
-    When is_own_profile=True OR username matches config.own_instagram_username,
-    registers real performance metrics for ML feedback loop.
-
-    Light Mode:
-    When multimodal_mode="light" (from user_config), uses optimized processing.
     """
+    # Sanitize user info in logs
+    masked_own_user = privacy_provider.hash_pii(user_config.own_instagram_username) if user_config and user_config.own_instagram_username else 'N/A'
+
     # CRITICAL LOG: User config loaded
     if user_config:
         logger.info(
             f"[Task {task_id}] User config loaded: "
             f"precision={user_config.embedding_precision} ({user_config.embedding_dims} dims), "
             f"multimodal={user_config.multimodal_mode}, "
-            f"own=@{user_config.own_instagram_username or 'N/A'}"
+            f"own_hash={masked_own_user[:8]}..."
         )
         # Override light_mode with user config
         light_mode = user_config.light_mode_enabled
-        # Auto-detect own profile if not explicitly set
-        if not is_own_profile:
-            is_own_profile = user_config.is_own_profile(
-                content.author.username, content.platform
-            )
-            if is_own_profile:
-                logger.info(
-                    f"[Task {task_id}] AUTO-DETECTED own profile: @{content.author.username} "
-                    f"matches config.own_instagram_username"
-                )
+        # Auto-detect own profile if not explicitly set (using secure comparison)
+        if not is_own_profile and user_config.own_instagram_username:
+            hashed_author = privacy_provider.hash_pii(content.author.username)
+            if privacy_provider.compare_pii(user_config.own_instagram_username, hashed_author):
+                is_own_profile = True
+                logger.info(f"[Task {task_id}] AUTO-DETECTED own profile via secure hash comparison")
 
     logger.info(
         f"[Task {task_id}] Processing {content.contentType} from {content.platform} "
@@ -527,10 +539,16 @@ async def process_content_data(
     )
 
     try:
-        # Log content details
+        # Log content details (SANITIZED)
+        # We assume content.author.username is already hashed by caller (ingest_raw_data)
+        # But if it's not (legacy or direct call), we hash it for logging.
+        # Actually, we will trust ingestion to pass hashed identities where possible,
+        # but for multimodal we might need raw data? No, multimodal doesn't need username.
+        # So username in `content` should be hashed.
+
         logger.info(
             f"[Task {task_id}] Content ID: {content.contentId}, "
-            f"Author: @{content.author.username}"
+            f"Author Hash: {content.author.username[:16]}..."
         )
 
         # Log engagement metrics
@@ -543,7 +561,7 @@ async def process_content_data(
 
         # Log hashtags
         if content.hashtags:
-            logger.info(f"[Task {task_id}] Hashtags: {', '.join(content.hashtags[:10])}")
+            logger.info(privacy_provider.sanitize_log(f"[Task {task_id}] Hashtags: {', '.join(content.hashtags[:10])}"))
 
         # Log media info
         media_count = len(content.media)
@@ -554,7 +572,7 @@ async def process_content_data(
         # Log audio info for reels/videos
         if content.audio and content.audio.title:
             logger.info(
-                f"[Task {task_id}] Audio: '{content.audio.title}' by {content.audio.artist or 'Unknown'}"
+                privacy_provider.sanitize_log(f"[Task {task_id}] Audio: '{content.audio.title}' by {content.audio.artist or 'Unknown'}")
             )
 
         # =====================================================================
@@ -567,7 +585,9 @@ async def process_content_data(
                 f"({'light' if light_mode else 'full'} mode) "
                 f"[config: {'user_config' if user_config else 'global'}]"
             )
-            # USER CONFIG SYNC: Pass user_config to use configured settings
+            # Content URLs here must be RAW for this to work.
+            # We assume ingestion passed the object with raw URLs.
+            # We will ANONYMIZE them after processing.
             multimodal_result = _process_multimodal_light(
                 content, light_mode=light_mode, user_config=user_config
             )
@@ -587,21 +607,31 @@ async def process_content_data(
                     f"(saved {multimodal_result.get('time_saved_percent', 0):.0f}%)"
                 )
 
-            # Log extracted content
-            if multimodal_result.get("transcription"):
-                word_count = len(multimodal_result["transcription"].split())
-                logger.info(f"[Task {task_id}] Transcription: {word_count} words (hook)")
-
-            if multimodal_result.get("ocr_text"):
-                logger.info(
-                    f"[Task {task_id}] OCR text: {len(multimodal_result['ocr_text'])} chars, "
-                    f"density: {multimodal_result.get('text_density', 0):.2f}%"
-                )
-
             if multimodal_result.get("hook_score", 0) > 0:
                 logger.info(
                     f"[Task {task_id}] Hook score: {multimodal_result['hook_score']:.2f}"
                 )
+
+        # =====================================================================
+        # ANONYMIZE CONTENT BEFORE PERSISTENCE/ML
+        # =====================================================================
+        # Now that we're done with processing that requires raw URLs (multimodal),
+        # we strictly anonymize all URLs and PII in the content object.
+
+        # Clone content to avoid side effects if reused (unlikely but safe)
+        safe_content = copy.deepcopy(content)
+
+        # Hash URLs
+        safe_content.contentUrl = privacy_provider.hash_pii(safe_content.contentUrl) or ""
+        safe_content.author.profilePicUrl = privacy_provider.hash_pii(safe_content.author.profilePicUrl)
+        safe_content.sourceUrl = privacy_provider.hash_pii(safe_content.sourceUrl) or ""
+
+        for m in safe_content.media:
+            m.url = privacy_provider.hash_pii(m.url)
+            m.thumbnailUrl = privacy_provider.hash_pii(m.thumbnailUrl)
+
+        if safe_content.audio:
+            safe_content.audio.audioUrl = privacy_provider.hash_pii(safe_content.audio.audioUrl)
 
         # =====================================================================
         # HUMAN-IN-THE-LOOP: Register ML Feedback for Own Profile Content
@@ -612,14 +642,14 @@ async def process_content_data(
             )
 
             try:
-                # Generate unique content hash
-                content_hash = _generate_content_hash(content)
+                # Generate unique content hash (using already hashed username in safe_content)
+                content_hash = _generate_content_hash(safe_content)
 
                 # Calculate real targets from metrics
-                real_targets = _calculate_real_targets(content)
+                real_targets = _calculate_real_targets(safe_content)
 
                 # Convert content to features dict for ML
-                content_dict = _content_to_features_dict(content)
+                content_dict = _content_to_features_dict(safe_content)
 
                 # Get ML predictor instance
                 ml_predictor = get_ml_predictor()
@@ -682,8 +712,12 @@ async def process_profile_data(
     Human-in-the-Loop:
     When is_own_profile=True, registers all recent posts for ML feedback loop.
     This is useful for bulk sync of the client's own content metrics.
+
+    BLIND IDENTITY: All PII must be hashed before logging or processing.
     """
-    logger.info(f"[Task {task_id}] Processing {profile.platform} profile: @{profile.username}")
+    # Hash profile identifier for logs
+    hashed_username = privacy_provider.hash_pii(profile.username)
+    logger.info(f"[Task {task_id}] Processing {profile.platform} profile: {hashed_username[:16]}...")
 
     try:
         # Log profile stats
@@ -722,8 +756,8 @@ async def process_profile_data(
                 high_priority_count = 0
 
                 for post in posts:
-                    # Generate unique hash for this post
-                    unique_str = f"{profile.platform}:{post.id}:{profile.username}"
+                    # Generate unique hash for this post (using hashed username)
+                    unique_str = f"{profile.platform}:{post.id}:{hashed_username}"
                     post_hash = hashlib.sha256(unique_str.encode()).hexdigest()[:16]
 
                     # Calculate real targets
@@ -821,23 +855,23 @@ async def ingest_raw_data(
     """
     Ingest raw data from Elena Bridge Chrome extension.
 
+    BLIND IDENTITY PROTOCOL:
+    ========================
+    - All PII (usernames, URLs) is hashed immediately upon receipt using PrivacyProvider.
+    - Comparison for 'isOwnProfile' is done using on-the-fly hashing logic.
+    - No cleartext PII is logged or passed to persistent storage/ML.
+
     USER CONFIG SYNC:
     =================
     If businessId/userId are provided in payload:
     - Loads user_config from database
-    - Uses own_instagram_username to auto-detect own profile
+    - Uses own_instagram_username to auto-detect own profile (secure comparison)
     - Uses multimodal_mode from config (overrides lightMode param)
     - Config affects processing in real-time (no placebo!)
-
-    Supports two types of data:
-    - **content**: Individual posts, reels, or videos selected by the user
-    - **profile**: Full profile analysis with recent posts
-
-    The extraction is "stealth" - it only reads what's visible in the DOM,
-    no API calls are made to the social networks.
     """
+    sanitized_source = privacy_provider.sanitize_log(f"{payload.source} v{x_elena_bridge_version or 'unknown'}")
     logger.info(
-        f"Received ingest request from extension v{x_elena_bridge_version or 'unknown'} "
+        f"Received ingest request from {sanitized_source} "
         f"(type: {payload.type or x_content_type or 'unknown'})"
     )
 
@@ -853,10 +887,12 @@ async def ingest_raw_data(
             user_config = await user_config_service.get_pipeline_config(
                 db, payload.userId, payload.businessId
             )
+            # Log config load (sanitized own username)
+            masked_own = privacy_provider.hash_pii(user_config.own_instagram_username) if user_config.own_instagram_username else 'N/A'
             logger.info(
                 f"[{task_id}] USER CONFIG LOADED: precision={user_config.embedding_precision}, "
                 f"multimodal={user_config.multimodal_mode}, "
-                f"own=@{user_config.own_instagram_username or 'N/A'}"
+                f"own_hash={masked_own[:8]}..."
             )
         except Exception as e:
             logger.warning(f"[{task_id}] Could not load user config: {e}. Using defaults.")
@@ -867,23 +903,43 @@ async def ingest_raw_data(
         content = payload.content
         is_own = payload.isOwnProfile
 
+        # Hash username immediately for secure comparison and logging
+        # Note: We keep content.author.username RAW in the object we pass to background task
+        # because we don't know if downstream systems might rely on it for transient processing
+        # (though likely not). However, we MUST NOT log it.
+        # Wait, if we pass it raw, `process_content_data` must hash it.
+        # But `process_content_data` already assumes it might receive raw for Multimodal.
+        # Actually, `process_content_data` needs to handle the hashing before ML.
+
+        hashed_username = privacy_provider.hash_pii(content.author.username)
+
         # USER CONFIG SYNC: Override light_mode and detect own profile
         light_mode = payload.lightMode
         if user_config:
             light_mode = user_config.light_mode_enabled
-            # Auto-detect own profile
-            if not is_own:
-                is_own = user_config.is_own_profile(
-                    content.author.username, content.platform
-                )
+            # Auto-detect own profile SECURELY
+            if not is_own and user_config.own_instagram_username:
+                if privacy_provider.compare_pii(user_config.own_instagram_username, hashed_username):
+                    is_own = True
+                    logger.info(f"[{task_id}] Auto-detected own profile via secure hash comparison")
 
         logger.info(
-            f"[{task_id}] Ingesting {content.contentType} from @{content.author.username} "
+            f"[{task_id}] Ingesting {content.contentType} from {hashed_username[:16]}... "
             f"({content.platform}, method: {content.extractionMethod})"
             f"{' [PERFIL PROPIO - Feedback Loop]' if is_own else ''}"
             f" [{'LIGHT' if light_mode else 'FULL'} mode]"
             f" [config: {'user_config' if user_config else 'default'}]"
         )
+
+        # PRE-HASH PII IN PAYLOAD for Persistence/Logs (But keep URLs for Multimodal)
+        # We will modify the content object IN PLACE for the background task?
+        # No, `process_content_data` expects RAW URLs for multimodal.
+        # So we pass it as is, but we ensure `process_content_data` handles anonymization internally.
+        # However, we should hash the username here and now to be safe?
+        # If we hash the username here, `process_content_data` will see hashed username.
+        # Does `_process_multimodal_light` need raw username? No.
+        # So we CAN hash the username here.
+        content.author.username = hashed_username
 
         # Queue background processing with user_config
         background_tasks.add_task(
@@ -896,13 +952,13 @@ async def ingest_raw_data(
 
         return IngestResponse(
             success=True,
-            message=f"{content.contentType.capitalize()} from @{content.author.username} queued for processing"
+            message=f"{content.contentType.capitalize()} from {hashed_username[:8]}... queued for processing"
                     + (" (feedback loop activado)" if is_own else "")
                     + (f" [modo {'ligero' if light_mode else 'completo'}]")
                     + config_msg,
             task_id=task_id,
             data_type=content.contentType,
-            identifier=content.contentId,
+            identifier=hashed_username, # Return hashed ID
             items_count=len(content.media)
         )
 
@@ -911,16 +967,27 @@ async def ingest_raw_data(
         profile = payload.profile
         is_own = payload.isOwnProfile
 
-        # USER CONFIG SYNC: Auto-detect own profile
-        if user_config and not is_own:
-            is_own = user_config.is_own_profile(profile.username, profile.platform)
+        hashed_username = privacy_provider.hash_pii(profile.username)
+
+        # USER CONFIG SYNC: Auto-detect own profile SECURELY
+        if user_config and not is_own and user_config.own_instagram_username:
+            if privacy_provider.compare_pii(user_config.own_instagram_username, hashed_username):
+                is_own = True
 
         logger.info(
-            f"[{task_id}] Ingesting profile @{profile.username} from {profile.platform} "
+            f"[{task_id}] Ingesting profile {hashed_username[:16]}... from {profile.platform} "
             f"(method: {profile.extractionMethod})"
             f"{' [PERFIL PROPIO - Bulk Feedback Loop]' if is_own else ''}"
             f" [config: {'user_config' if user_config else 'default'}]"
         )
+
+        # Anonymize profile PII before passing to background task
+        # Profile processing doesn't do multimodal download (usually), so we can hash securely
+        profile.username = hashed_username
+        profile.displayName = privacy_provider.hash_pii(profile.displayName)
+        profile.bio = privacy_provider.hash_pii(profile.bio) # Optional: hash bio or keep it? Blind identity says zero PII.
+        profile.profilePicUrl = privacy_provider.hash_pii(profile.profilePicUrl)
+        profile.sourceUrl = privacy_provider.hash_pii(profile.sourceUrl)
 
         # Queue background processing with own profile flag
         background_tasks.add_task(
@@ -929,11 +996,11 @@ async def ingest_raw_data(
 
         return IngestResponse(
             success=True,
-            message=f"Profile @{profile.username} queued for processing"
+            message=f"Profile {hashed_username[:8]}... queued for processing"
                     + (f" ({len(payload.recentPosts)} posts para feedback)" if is_own else ""),
             task_id=task_id,
             data_type="profile",
-            identifier=profile.username,
+            identifier=hashed_username,
             items_count=len(payload.recentPosts)
         )
 
@@ -955,5 +1022,6 @@ async def ingest_status():
         "endpoint": "/api/ingest/raw",
         "supported_platforms": ["instagram", "tiktok"],
         "supported_content_types": ["post", "reel", "video", "carousel", "profile"],
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "privacy_mode": "blind_identity_v1"
     }

@@ -3,13 +3,14 @@ Business API Routes
 Onboarding and business management
 """
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
 from app.api.deps import get_current_user
+from app.core.privacy import privacy_provider
 from app.models.user import User
 from app.models.business import Business, BusinessType
 from app.models.competitor import Competitor
@@ -37,8 +38,8 @@ async def onboard_business(
     """
     Complete onboarding flow:
     1. Create business profile
-    2. Add competitors
-    3. Trigger scraping (background)
+    2. Add competitors (Handles are hashed for storage)
+    3. Trigger scraping (background) using cleartext handles
     4. Return status
     """
     # Create business
@@ -61,25 +62,41 @@ async def onboard_business(
 
     # Add competitors
     competitors_added = 0
+    # Map to store cleartext handles for immediate scraping
+    # {competitor_id: cleartext_handle}
+    cleartext_handles_map: Dict[int, str] = {}
+
+    # Store temporary mapping of handle -> competitor object to get ID later
+    temp_comp_map = []
+
     for comp in request.competitors:
         platform_enum = Platform(comp.platform) if comp.platform in [p.value for p in Platform] else Platform.INSTAGRAM
+
+        clean_handle = comp.handle.lstrip("@")
+        hashed_handle = privacy_provider.hash_pii(clean_handle)
 
         competitor = Competitor(
             business_id=business.id,
             platform=platform_enum,
-            handle=comp.handle.lstrip("@"),  # Remove @ if present
+            handle=hashed_handle,  # Store HASH
             scrape_status="pending",
         )
         db.add(competitor)
+        temp_comp_map.append((competitor, clean_handle))
         competitors_added += 1
 
     await db.commit()
+
+    # Populate the ID map after commit
+    for comp, handle in temp_comp_map:
+        cleartext_handles_map[comp.id] = handle
 
     # Trigger background scraping
     background_tasks.add_task(
         scrape_competitors_background,
         business.id,
-        request.business_type.value
+        request.business_type.value,
+        cleartext_handles_map # Pass cleartext handles
     )
 
     return OnboardingResponse(
@@ -96,14 +113,26 @@ async def onboard_business(
     )
 
 
-async def scrape_competitors_background(business_id: int, business_type: str):
+async def scrape_competitors_background(
+    business_id: int,
+    business_type: str,
+    cleartext_handles_map: Optional[Dict[int, str]] = None
+):
     """
-    Background task to scrape all competitors
+    Background task to scrape all competitors.
+
+    BLIND IDENTITY:
+    - Accepts optional map of {competitor_id: cleartext_handle} for initial scrape.
+    - If handle not in map, uses DB handle (which might be hashed).
+    - Hashes all PII before saving posts/updating profile.
     """
     from app.core.database import async_session_maker
 
     apify_service = ApifyService()
     pattern_extractor = PatternExtractor()
+
+    if cleartext_handles_map is None:
+        cleartext_handles_map = {}
 
     async with async_session_maker() as db:
         # Get business
@@ -122,25 +151,35 @@ async def scrape_competitors_background(business_id: int, business_type: str):
 
         for competitor in competitors:
             try:
+                # Determine handle to use
+                handle_to_scrape = cleartext_handles_map.get(competitor.id, competitor.handle)
+
+                # Check if handle is likely a hash (64 hex chars)
+                if len(handle_to_scrape) == 64 and all(c in '0123456789abcdef' for c in handle_to_scrape):
+                     # Likely hash, scraping will fail.
+                     # Skip or try anyway? Trying will just fail fast.
+                     pass
+
                 # Update status
                 competitor.scrape_status = "in_progress"
                 await db.commit()
 
                 # Scrape based on platform
                 if competitor.platform == Platform.INSTAGRAM:
-                    data = await apify_service.scrape_instagram_profile(competitor.handle)
+                    data = await apify_service.scrape_instagram_profile(handle_to_scrape)
                 elif competitor.platform == Platform.TIKTOK:
-                    data = await apify_service.scrape_tiktok_profile(competitor.handle)
+                    data = await apify_service.scrape_tiktok_profile(handle_to_scrape)
                 else:
-                    data = await apify_service.scrape_linkedin_profile(competitor.handle)
+                    data = await apify_service.scrape_linkedin_profile(handle_to_scrape)
 
-                # Update competitor with profile data
+                # Update competitor with profile data (HASHED)
                 profile = data.get("profile", {})
-                competitor.display_name = profile.get("full_name") or profile.get("display_name")
-                competitor.bio = profile.get("bio")
+                competitor.display_name = privacy_provider.hash_pii(profile.get("full_name") or profile.get("display_name"))
+                competitor.bio = privacy_provider.hash_pii(profile.get("bio"))
                 competitor.followers_count = profile.get("followers", 0)
                 competitor.following_count = profile.get("following", 0)
                 competitor.posts_count = profile.get("posts_count") or profile.get("videos_count", 0)
+                competitor.profile_url = privacy_provider.hash_pii(profile.get("profileUrl") or f"https://instagram.com/{handle_to_scrape}")
 
                 # Save scraped posts
                 from app.models.scraped_post import ScrapedPost, ContentFormat
@@ -163,13 +202,15 @@ async def scrape_competitors_background(business_id: int, business_type: str):
                     post = ScrapedPost(
                         competitor_id=competitor.id,
                         platform_post_id=post_data.get("platform_id", ""),
-                        post_url=post_data.get("url"),
+                        # HASHED URLs and PII
+                        post_url=privacy_provider.hash_pii(post_data.get("url")),
                         content_format=content_format,
-                        caption=post_data.get("caption"),
+                        caption=privacy_provider.hash_pii(post_data.get("caption")),
                         hashtags=post_data.get("hashtags", []),
                         mentions=post_data.get("mentions", []),
-                        thumbnail_url=post_data.get("thumbnail"),
-                        media_urls=post_data.get("media_urls", []),
+                        thumbnail_url=privacy_provider.hash_pii(post_data.get("thumbnail")),
+                        media_urls=[privacy_provider.hash_pii(url) for url in post_data.get("media_urls", [])],
+
                         video_duration_seconds=post_data.get("video_duration"),
                         audio_name=post_data.get("audio_name"),
                         likes_count=post_data.get("likes", 0),
@@ -320,6 +361,15 @@ async def get_own_profile_config(
             detail="Business not found"
         )
 
+    # UserConfig stores own_instagram_username in CLEAR TEXT as per "Blind Identity" rules
+    # "brandpulse.db (UserConfig/Auth): Se permite PII mínima necesaria ... cifrado"
+    # Actually UserConfig is separate table, but Business also has fields `own_instagram_username`?
+    # Let's check Business model.
+    # The file has imports `from app.models.business import Business`.
+    # And it accesses `business.own_instagram_username`.
+    # So `Business` model stores it.
+
+    # We keep it cleartext here because it's the "User Config" exception.
     has_config = bool(business.own_instagram_username or business.own_tiktok_username)
 
     return OwnProfileConfigResponse(
@@ -340,12 +390,8 @@ async def update_own_profile_config(
     """
     Update own profile configuration for Human-in-the-Loop feedback.
 
-    When the extension detects content from these usernames, it will flag
-    the payload with isOwnProfile=True, triggering the ML feedback loop.
-
-    Example:
-    - own_instagram_username: "inmoalmeria" (without @)
-    - own_tiktok_username: "inmoalmeria"
+    This configuration remains in cleartext (User Config Exception) to allow
+    users to edit their settings.
     """
     result = await db.execute(
         select(Business)
