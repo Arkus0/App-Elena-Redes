@@ -9,6 +9,7 @@ from app.models.content import GeneratedContent, ContentCalendar
 from app.models.user import User
 from app.models.abtest import ABTestLog, PredictionLog, ABTestExperiment, ABTestVariant
 from app.models.kpi_weights import UserKPIWeights, MultiOutputModelMetrics
+from app.models.ml_training_queue import MLTrainingSample
 from app.models.user_config import (
     UserConfig,
     EmbeddingPrecision,
@@ -31,6 +32,7 @@ __all__ = [
     "ABTestVariant",
     "UserKPIWeights",
     "MultiOutputModelMetrics",
+    "MLTrainingSample",
     # Unified User Config
     "UserConfig",
     "EmbeddingPrecision",

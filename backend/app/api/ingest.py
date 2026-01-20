@@ -774,11 +774,12 @@ async def process_content_data(
 
                 # Register feedback with ML service
                 # Note: We use content_hash as ID since this is external content
-                feedback = ml_predictor.register_performance_feedback(
+                feedback = await ml_predictor.register_performance_feedback(
                     content_id=int(content_hash, 16) % (10**9),  # Convert hash to numeric ID
                     metrics=real_targets,
                     original_content=content_dict,
-                    predicted_score=None  # Will use default; actual vs predicted tracked over time
+                    predicted_score=None,  # Will use default; actual vs predicted tracked over time
+                    db=db
                 )
 
                 logger.info(
@@ -873,63 +874,65 @@ async def process_profile_data(
                 feedback_count = 0
                 high_priority_count = 0
 
-                for post in posts:
-                    # Generate unique hash for this post (using hashed username)
-                    unique_str = f"{profile.platform}:{post.id}:{hashed_username}"
-                    post_hash = hashlib.sha256(unique_str.encode()).hexdigest()[:16]
+                async with async_session_maker() as db:
+                    for post in posts:
+                        # Generate unique hash for this post (using hashed username)
+                        unique_str = f"{profile.platform}:{post.id}:{hashed_username}"
+                        post_hash = hashlib.sha256(unique_str.encode()).hexdigest()[:16]
 
-                    # Calculate real targets
-                    likes = post.likes or 0
-                    comments = post.comments or 0
-                    shares = post.shares or 0
-                    views = post.views or 0
+                        # Calculate real targets
+                        likes = post.likes or 0
+                        comments = post.comments or 0
+                        shares = post.shares or 0
+                        views = post.views or 0
 
-                    real_targets = {
-                        "likes": likes,
-                        "comments": comments,
-                        "shares": shares,
-                        "saves": 0,  # Not available in grid view
-                        "views": views,
-                        "log_likes": math.log1p(likes),
-                        "log_comments": math.log1p(comments),
-                        "log_shares": math.log1p(shares),
-                        "log_saves": 0,
-                        "log_views": math.log1p(views),
-                    }
+                        real_targets = {
+                            "likes": likes,
+                            "comments": comments,
+                            "shares": shares,
+                            "saves": 0,  # Not available in grid view
+                            "views": views,
+                            "log_likes": math.log1p(likes),
+                            "log_comments": math.log1p(comments),
+                            "log_shares": math.log1p(shares),
+                            "log_saves": 0,
+                            "log_views": math.log1p(views),
+                        }
 
-                    # Calculate engagement rate
-                    if views > 0:
-                        weighted_engagement = likes + (comments * 2) + (shares * 4)
-                        real_targets["engagement_rate"] = (weighted_engagement / views) * 100
-                    else:
-                        real_targets["engagement_rate"] = min(100, (likes + comments * 2 + shares * 4) / 10)
+                        # Calculate engagement rate
+                        if views > 0:
+                            weighted_engagement = likes + (comments * 2) + (shares * 4)
+                            real_targets["engagement_rate"] = (weighted_engagement / views) * 100
+                        else:
+                            real_targets["engagement_rate"] = min(100, (likes + comments * 2 + shares * 4) / 10)
 
-                    # Create minimal content dict
-                    content_dict = {
-                        "caption": post.caption or "",
-                        "content_format": post.type if post.type in ["reel", "carousel"] else "static",
-                        "type": post.type,
-                        "posted_at": post.timestamp,
-                        "likes": likes,
-                        "comments": comments,
-                        "shares": shares,
-                        "views": views,
-                        "business_type": "otros",
-                    }
+                        # Create minimal content dict
+                        content_dict = {
+                            "caption": post.caption or "",
+                            "content_format": post.type if post.type in ["reel", "carousel"] else "static",
+                            "type": post.type,
+                            "posted_at": post.timestamp,
+                            "likes": likes,
+                            "comments": comments,
+                            "shares": shares,
+                            "views": views,
+                            "business_type": "otros",
+                        }
 
-                    # Register feedback
-                    try:
-                        feedback = ml_predictor.register_performance_feedback(
-                            content_id=int(post_hash, 16) % (10**9),
-                            metrics=real_targets,
-                            original_content=content_dict,
-                            predicted_score=None
-                        )
-                        feedback_count += 1
-                        if feedback.is_high_priority:
-                            high_priority_count += 1
-                    except Exception as e:
-                        logger.warning(f"[Task {task_id}] Error registering feedback for post {post.id}: {e}")
+                        # Register feedback
+                        try:
+                            feedback = await ml_predictor.register_performance_feedback(
+                                content_id=int(post_hash, 16) % (10**9),
+                                metrics=real_targets,
+                                original_content=content_dict,
+                                predicted_score=None,
+                                db=db
+                            )
+                            feedback_count += 1
+                            if feedback.is_high_priority:
+                                high_priority_count += 1
+                        except Exception as e:
+                            logger.warning(f"[Task {task_id}] Error registering feedback for post {post.id}: {e}")
 
                 logger.info(
                     f"[Task {task_id}] ✅ Feedback registrado para {feedback_count}/{posts_count} posts, "
