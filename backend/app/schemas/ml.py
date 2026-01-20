@@ -65,6 +65,9 @@ class MLPredictionRequest(BaseModel):
     video_duration_seconds: int = 0
     audio_name: str = ""
     posted_at: Optional[str] = None
+    whisper_transcript: Optional[str] = None
+    easyocr_text: Optional[str] = None
+    visual_description: Optional[str] = None
 
 
 class MLFullPrediction(BaseModel):

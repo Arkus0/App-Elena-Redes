@@ -9,9 +9,12 @@ from pathlib import Path
 import logging
 import json
 
+from sqlalchemy import select
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
+from app.models.business import Business
+from app.services.user_config_service import user_config_service
 from app.schemas.ml import (
     MLPredictionRequest,
     MLFullPrediction,
@@ -82,7 +85,8 @@ async def train_model(
 @router.post("/predict", response_model=MLFullPrediction)
 async def get_full_prediction(
     request: MLPredictionRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Get complete ML prediction for content
@@ -96,6 +100,18 @@ async def get_full_prediction(
         logger.info("Model not trained, training with synthetic data...")
         train_initial_model()
 
+    # Get user business for config
+    result = await db.execute(select(Business.id).where(Business.user_id == current_user.id))
+    business_id = result.scalars().first()
+
+    # Load user config
+    config = None
+    if business_id:
+        config = await user_config_service.get_pipeline_config(db, current_user.id, business_id)
+
+    embedding_precision = config.embedding_precision if config else "low"
+    kpi_weights = config.kpi_weights if config else None
+
     # Convert request to content dict
     content = {
         "caption": request.caption,
@@ -106,10 +122,17 @@ async def get_full_prediction(
         "video_duration_seconds": request.video_duration_seconds,
         "audio_name": request.audio_name,
         "posted_at": request.posted_at,
+        "whisper_transcript": request.whisper_transcript,
+        "easyocr_text": request.easyocr_text,
+        "visual_description": request.visual_description,
     }
 
     # Get full prediction
-    prediction = predictor.get_full_prediction(content)
+    prediction = predictor.get_full_prediction(
+        content,
+        embedding_precision=embedding_precision,
+        kpi_weights=kpi_weights
+    )
 
     return prediction
 
@@ -117,7 +140,8 @@ async def get_full_prediction(
 @router.post("/predict/engagement", response_model=EngagementPredictionML)
 async def predict_engagement(
     request: MLPredictionRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Get only engagement score prediction"""
     predictor = get_ml_predictor()
@@ -125,14 +149,33 @@ async def predict_engagement(
     if not predictor.is_trained:
         train_initial_model()
 
+    # Get user business for config
+    result = await db.execute(select(Business.id).where(Business.user_id == current_user.id))
+    business_id = result.scalars().first()
+
+    # Load user config
+    config = None
+    if business_id:
+        config = await user_config_service.get_pipeline_config(db, current_user.id, business_id)
+
+    embedding_precision = config.embedding_precision if config else "low"
+    kpi_weights = config.kpi_weights if config else None
+
     content = {
         "caption": request.caption,
         "hashtags": request.hashtags,
         "content_format": request.content_format,
         "business_type": request.business_type,
+        "whisper_transcript": request.whisper_transcript,
+        "easyocr_text": request.easyocr_text,
+        "visual_description": request.visual_description,
     }
 
-    return predictor.predict_engagement(content)
+    return predictor.predict_engagement(
+        content,
+        embedding_precision=embedding_precision,
+        kpi_weights=kpi_weights
+    )
 
 
 @router.post("/predict/format", response_model=FormatRecommendation)

@@ -53,6 +53,11 @@ from sklearn.metrics import mean_squared_error, accuracy_score, r2_score, mean_a
 import xgboost as xgb
 import shap
 import joblib
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.core.database import async_session_maker
+from app.models.ml_training_queue import MLTrainingSample
+from app.services.multi_output_predictor import get_multi_output_predictor
 
 logger = logging.getLogger(__name__)
 
@@ -1301,6 +1306,134 @@ class MLPredictor:
         if niche not in self.BUSINESS_NICHES:
             niche = "otros"
 
+        # 1. Try Multi-Output Model (Superior Architecture)
+        try:
+            multi_predictor = get_multi_output_predictor(niche)
+            if multi_predictor.is_trained:
+                logger.info(f"Using Multi-Output Predictor for niche: {niche}")
+
+                # Format weights for multi-output predictor
+                # kpi_weights from config are simple dict {likes: 1.0, ...}
+                # multi-output expects {likes_weight: 1.0, ...}
+                mo_weights = None
+                if kpi_weights:
+                    mo_weights = {
+                        f"{k}_weight": v
+                        for k, v in kpi_weights.items()
+                    }
+
+                # Predict
+                result = multi_predictor.predict(
+                    features,
+                    weights=mo_weights,
+                    compute_shap=True
+                )
+
+                # Aggregate SHAP values using KPI weights
+                # GlobalSHAP_i = sum(Weight_m * SHAP_i,m) / sum(Weight_m)
+                aggregated_shap_pos = []
+                aggregated_shap_neg = []
+
+                # We need to combine the top factors from each metric
+                # This is complex because SHAP values are feature-specific.
+                # Simplified approach: Use the SHAP values from the dominant metric (highest weight)
+                # OR actually aggregate them if possible.
+                # Since result provides pre-computed top factors per metric, we can try to merge them.
+
+                # Let's generate a consolidated explanation text
+                # Find the metric that contributes most to the score
+                # This is roughly proportional to weight * value, but we can look at weights
+
+                # Use "weighted_rpi" as score
+                score = result.weighted_rpi
+
+                # Construct combined explanation
+                # We'll collect all top positive/negative factors from all metrics, weighted by metric weight
+
+                # Since we don't have raw SHAP matrices here, only top factors from result,
+                # we will trust the multi-output result's internal SHAP or just report the breakdown.
+
+                # Let's use the SHAP from 'shares' or 'saves' as they are usually high weight/value
+                # Or better: Provide a specialized explanation
+
+                explanation_text = f"Score RPI ({score:.1f}) basado en pesos personalizados."
+                if result.shap_shares:
+                     top_share = list(result.shap_shares.keys())[0]
+                     explanation_text += f" Shares impulsados por: {top_share}."
+
+                # Construct feature importance list for API
+                # We'll merge top factors from all metrics
+                feature_importance = []
+                seen_features = set()
+
+                # Collect top factors from all metrics
+                all_factors = []
+                metrics_to_check = ["shares", "saves", "comments", "likes", "views"]
+
+                current_weights = result.weights_used
+
+                for metric in metrics_to_check:
+                    shap_dict = getattr(result, f"shap_{metric}")
+                    if shap_dict:
+                         weight = current_weights.get(f"{metric}_weight", 1.0)
+                         for feat, impact in shap_dict.items():
+                             all_factors.append({
+                                 "feature": feat,
+                                 "impact": abs(impact) * weight, # Weight by metric importance
+                                 "raw_impact": impact,
+                                 "metric": metric
+                             })
+
+                # Sort by weighted impact
+                all_factors.sort(key=lambda x: x["impact"], reverse=True)
+
+                # Deduplicate
+                final_factors = []
+                top_positive = []
+                top_negative = []
+
+                for f in all_factors:
+                    if f["feature"] not in seen_features:
+                        seen_features.add(f["feature"])
+                        final_factors.append({
+                            "feature": f["feature"],
+                            "impact": f["impact"] # This is weighted magnitude
+                        })
+
+                        item = {"feature": f["feature"], "impact": f["raw_impact"]}
+                        if f["raw_impact"] > 0:
+                            top_positive.append(item)
+                        else:
+                            top_negative.append(item)
+
+                        if len(final_factors) >= 10:
+                            break
+
+                return {
+                    "score": round(score, 1),
+                    "confidence": 85.0, # Higher confidence for multi-output
+                    "explanation": {
+                        "top_positive_factors": top_positive[:5],
+                        "top_negative_factors": top_negative[:5],
+                        "explanation_text": explanation_text
+                    },
+                    "feature_importance": final_factors,
+                    "model_source": f"multi_output_{niche}",
+                    "niche": niche,
+                    "cold_start": False,
+                    "multi_output_breakdown": {
+                        "predicted_likes": result.predicted_likes,
+                        "predicted_comments": result.predicted_comments,
+                        "predicted_shares": result.predicted_shares,
+                        "predicted_saves": result.predicted_saves,
+                        "predicted_views": result.predicted_views
+                    }
+                }
+
+        except Exception as e:
+            logger.warning(f"Multi-output prediction failed (falling back): {e}")
+
+        # 2. Fallback to Legacy/Single-Target Model
         # Get appropriate model for this niche
         model, model_source = self._get_model_for_niche(niche)
         self.active_model_source = model_source
@@ -1893,18 +2026,13 @@ class MLPredictor:
     # FEEDBACK LOOP - Human-in-the-Loop Reinforcement Learning
     # =========================================================================
 
-    def __init_feedback_queue(self):
-        """Initialize the training queue if not exists."""
-        if not hasattr(self, '_training_queue'):
-            self._training_queue: List[TrainingQueueItem] = []
-            self._feedback_history: List[PerformanceFeedback] = []
-
-    def register_performance_feedback(
+    async def register_performance_feedback(
         self,
         content_id: int,
         metrics: Dict[str, Any],
         original_content: Optional[Dict[str, Any]] = None,
-        predicted_score: Optional[float] = None
+        predicted_score: Optional[float] = None,
+        db: Optional[AsyncSession] = None
     ) -> PerformanceFeedback:
         """
         Register actual performance metrics for a published content piece.
@@ -1917,7 +2045,7 @@ class MLPredictor:
         1. Calculate actual engagement score from metrics
         2. Compare with predicted score
         3. If delta > 20%, flag as HIGH_PRIORITY training sample
-        4. Add to training queue for next retraining cycle
+        4. Add to training queue for next retraining cycle (Persisted to DB)
 
         Args:
             content_id: ID of the GeneratedContent record
@@ -1927,6 +2055,7 @@ class MLPredictor:
             original_content: Optional content dict (for feature extraction)
             predicted_score: Optional predicted score (if not provided,
                             will try to look up from content)
+            db: Async database session
 
         Returns:
             PerformanceFeedback with analysis results
@@ -1934,8 +2063,6 @@ class MLPredictor:
         Raises:
             ValueError: If metrics are invalid or insufficient
         """
-        self.__init_feedback_queue()
-
         # Validate metrics
         required_metrics = ["likes", "comments"]
         if not all(k in metrics for k in required_metrics):
@@ -1946,8 +2073,6 @@ class MLPredictor:
 
         # Get predicted score
         if predicted_score is None:
-            # In a real implementation, this would query the database
-            # For now, use a placeholder or the score from original_content
             if original_content and "engagement_score" in original_content:
                 predicted_score = original_content.get("engagement_score", 50.0)
             else:
@@ -1978,7 +2103,7 @@ class MLPredictor:
             metrics=metrics
         )
 
-        # Create feedback object
+        # Create feedback object for return
         feedback = PerformanceFeedback(
             content_id=content_id,
             predicted_score=predicted_score,
@@ -1991,21 +2116,31 @@ class MLPredictor:
             analysis_notes=analysis_notes
         )
 
-        # Store in history
-        self._feedback_history.append(feedback)
-
-        # If we have original content, add to training queue
+        # Persist to Database if original content is available
         if original_content is not None:
             features = FeatureExtractor.extract_features(original_content)
-            queue_item = TrainingQueueItem(
-                content_id=content_id,
-                features=features,
-                actual_engagement=actual_score,
-                priority=training_priority,
-                added_at=datetime.utcnow(),
-                feedback=feedback
-            )
-            self._training_queue.append(queue_item)
+
+            # Helper to perform DB insert
+            async def _persist(session: AsyncSession):
+                sample = MLTrainingSample(
+                    content_id=str(content_id),
+                    features=features,
+                    actual_metrics=metrics,
+                    delta_score=delta_percent,
+                    priority=training_priority,
+                    is_high_priority=is_high_priority,
+                    created_at=datetime.utcnow()
+                )
+                session.add(sample)
+                await session.commit()
+                logger.info(f"Persisted ML training sample {content_id} to DB")
+
+            # Use provided DB or create new session
+            if db:
+                await _persist(db)
+            else:
+                async with async_session_maker() as session:
+                    await _persist(session)
 
             if is_high_priority:
                 logger.info(
@@ -2140,26 +2275,47 @@ class MLPredictor:
 
         return "; ".join(notes)
 
-    def get_training_queue(self, min_priority: float = 0.0) -> List[Dict[str, Any]]:
+    async def get_training_queue(self, min_priority: float = 0.0, db: Optional[AsyncSession] = None) -> List[Dict[str, Any]]:
         """
         Get queued training samples above minimum priority.
 
         Args:
             min_priority: Minimum priority score (0-1)
+            db: Async database session
 
         Returns:
             List of training samples ready for the next training cycle
         """
-        self.__init_feedback_queue()
+        async def _query(session: AsyncSession):
+            result = await session.execute(
+                select(MLTrainingSample)
+                .where(MLTrainingSample.priority >= min_priority)
+                .order_by(MLTrainingSample.priority.desc())
+            )
+            return result.scalars().all()
 
-        samples = [
-            item.to_training_sample()
-            for item in self._training_queue
-            if item.priority >= min_priority
-        ]
+        if db:
+            rows = await _query(db)
+        else:
+            async with async_session_maker() as session:
+                rows = await _query(session)
 
-        # Sort by priority (highest first)
-        samples.sort(key=lambda x: x.get("_priority", 0), reverse=True)
+        samples = []
+        for row in rows:
+            # Reconstruct training sample format
+            sample = dict(row.features)
+
+            # Calculate engagement score from stored metrics if not in features?
+            # Or assume features contained everything needed?
+            # In register_feedback, we stored features extracted from original_content.
+            # We also stored actual_metrics.
+            # We need to compute `engagement_score` (target) from actual_metrics.
+
+            actual_score = self._calculate_engagement_score(row.actual_metrics)
+            sample["engagement_score"] = actual_score
+            sample["_priority"] = row.priority
+            sample["_source"] = "feedback_loop"
+            samples.append(sample)
 
         return samples
 
