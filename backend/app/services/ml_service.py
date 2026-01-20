@@ -81,8 +81,9 @@ try:
     EMBEDDING_FEATURE_COLUMNS = get_embedding_feature_names(EMBEDDING_DIM)
 except ImportError:
     EMBEDDINGS_AVAILABLE = False
-    EMBEDDING_DIM = 384
-    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i+1}" for i in range(384)]
+    # Use 128 to match default "low" precision in extract_features
+    EMBEDDING_DIM = 128
+    EMBEDDING_FEATURE_COLUMNS = [f"embedding_{i}" for i in range(128)]
     PRECISION_TO_DIMS = {"low": 128, "medium": 256, "high": 384, "max": 384}
     DEFAULT_PRECISION = "max"
 
@@ -720,6 +721,68 @@ class MLPredictor:
         # to prevent memory duplication in multi-worker environments (Gunicorn).
         pass
 
+    def _validate_model_features(self, model: Any, model_name: str):
+        """
+        Strictly validate that the loaded model's features match the current code configuration.
+
+        This prevents silent failures where the model expects different features (e.g., 128 dims)
+        than what the current environment produces (e.g., 384 dims).
+
+        Args:
+            model: The loaded XGBoost/sklearn model
+            model_name: Name of the model for logging
+
+        Raises:
+            RuntimeError: If feature names or counts do not match exactly.
+        """
+        try:
+            # Try to get feature names from XGBoost booster
+            if hasattr(model, "get_booster"):
+                model_features = model.get_booster().feature_names
+            # Try sklearn feature_names_in_
+            elif hasattr(model, "feature_names_in_"):
+                model_features = model.feature_names_in_.tolist()
+            else:
+                # If model doesn't store feature names, we can only check count if inputs are provided
+                # But here we are validating the model object itself.
+                # If we can't extract features, we warn but proceed (backward compatibility)
+                logger.warning(f"Could not extract feature names from {model_name} for validation.")
+                return
+
+            if not model_features:
+                return
+
+            # Compare with current FEATURE_COLUMNS
+            current_features = self.FEATURE_COLUMNS
+
+            # Check length first
+            if len(model_features) != len(current_features):
+                error_msg = (
+                    f"🛑 Model Validation Failed: {model_name} expects {len(model_features)} features, "
+                    f"but current configuration produces {len(current_features)} features. "
+                    f"Mismatch likely due to embedding_precision change (Model vs Env). "
+                    f"ACTION REQUIRED: Retrain model or revert embedding_precision."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+            # Check content (optional strictness, but recommended)
+            # We check the first few to catch offset issues
+            if model_features[:5] != current_features[:5]:
+                error_msg = (
+                    f"🛑 Model Feature Mismatch: {model_name} feature order does not match current configuration. "
+                    f"Model: {model_features[:5]}... vs Current: {current_features[:5]}..."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+            logger.info(f"✅ Model {model_name} validated successfully ({len(model_features)} features).")
+
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise e
+            logger.warning(f"Validation warning for {model_name}: {e}")
+
     def _ensure_models_loaded(self):
         """
         Lazy load models if not already loaded.
@@ -752,7 +815,12 @@ class MLPredictor:
 
             if all(p.exists() for p in [engagement_path, format_path, encoder_path]):
                 # USE mmap_mode='r' FOR MEMORY SHARING ACROSS WORKERS
-                self.engagement_model = joblib.load(engagement_path, mmap_mode='r')
+                engagement_model = joblib.load(engagement_path, mmap_mode='r')
+
+                # STRICT VALIDATION
+                self._validate_model_features(engagement_model, "engagement_model")
+
+                self.engagement_model = engagement_model
                 self.format_model = joblib.load(format_path, mmap_mode='r')
 
                 if trigger_path.exists():
@@ -768,6 +836,11 @@ class MLPredictor:
                 # Initialize SHAP explainers
                 self._init_shap_explainers()
 
+        except RuntimeError as e:
+            # Critical validation error - propagate up!
+            logger.critical(f"Failed to load models due to validation error: {e}")
+            self.is_trained = False
+            raise e
         except Exception as e:
             logger.warning(f"Could not load models: {e}")
             self.is_trained = False
@@ -1133,7 +1206,13 @@ class MLPredictor:
         training_data: List of content dicts with engagement metrics
         """
         # Ensure we have loaded any existing state before retraining decisions
-        self._ensure_models_loaded()
+        try:
+            self._ensure_models_loaded()
+        except RuntimeError as e:
+            if retrain:
+                logger.warning(f"Existing model validation failed ({e}), but retrain=True. Proceeding to train new model.")
+            else:
+                raise e
 
         if self.is_trained and not retrain:
             logger.info("Models already trained. Use retrain=True to force retraining.")
@@ -1260,7 +1339,8 @@ class MLPredictor:
         self,
         content: Dict[str, Any],
         embedding_precision: str = "low",
-        kpi_weights: Optional[Dict[str, float]] = None
+        kpi_weights: Optional[Dict[str, float]] = None,
+        business_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Predict engagement score for content with cold start handling.
@@ -1274,6 +1354,7 @@ class MLPredictor:
             content: Content dict with caption, hashtags, etc.
             embedding_precision: From user_config (default: "low")
             kpi_weights: From user_config for RPI calculation (optional)
+            business_id: ID of the business for auditing (optional)
 
         Uses niche-specific model if available, falls back to base model
         for cold start scenarios, and uses heuristics as last resort.
@@ -1290,21 +1371,19 @@ class MLPredictor:
         # Ensure models are loaded before prediction
         self._ensure_models_loaded()
 
-        # CRITICAL LOG: User config being used
-        logger.info(
-            f"Prediction with user config: precision={embedding_precision}, "
-            f"kpi_weights={'custom' if kpi_weights else 'default'}"
-        )
-
-        # Extract features with user-configured precision
-        features = FeatureExtractor.extract_features(content, embedding_precision=embedding_precision)
-        df = pd.DataFrame([features])
-        X = self._prepare_features(df)
+        # AUDIT LOG: Validated user config usage
+        model_source_audit = "unknown"
+        weights_log = json.dumps(kpi_weights) if kpi_weights else "default"
 
         # Determine niche from content
         niche = content.get("business_type", "otros")
         if niche not in self.BUSINESS_NICHES:
             niche = "otros"
+
+        # Extract features with user-configured precision
+        features = FeatureExtractor.extract_features(content, embedding_precision=embedding_precision)
+        df = pd.DataFrame([features])
+        X = self._prepare_features(df)
 
         # 1. Try Multi-Output Model (Superior Architecture)
         try:
@@ -1409,6 +1488,12 @@ class MLPredictor:
                         if len(final_factors) >= 10:
                             break
 
+                # AUDIT LOG
+                logger.info(
+                    f"Prediction audit | business_id: {business_id} | precision: {embedding_precision} | "
+                    f"kpi_weights: {weights_log} | model_source: multi_output_{niche}"
+                )
+
                 return {
                     "score": round(score, 1),
                     "confidence": 85.0, # Higher confidence for multi-output
@@ -1440,66 +1525,63 @@ class MLPredictor:
 
         # If no model available, use heuristics
         if model is None:
+            # Only mock if strictly necessary (no model available at all)
+            # But per requirements, if validation failed we should have raised already.
+            # If we are here, it means we passed validation or we are in true cold start with no models.
             return self._mock_engagement_prediction(content)
 
         # Make prediction
-        try:
-            # Check dimensionality (Anti-Overfitting Warning)
-            if X.shape[1] > 200:
-                logger.warning(
-                    f"⚠️ High dimensionality detected ({X.shape[1]} features) during prediction. "
-                    f"Ensure model matches configuration."
-                )
+        # Strict Error Handling: No catch-all mock fallback for mismatches
 
-            score = float(model.predict(X)[0])
-            score = max(0, min(100, score))  # Clip to 0-100
+        # Check dimensionality (Anti-Overfitting Warning)
+        if X.shape[1] > 200:
+            logger.warning(
+                f"⚠️ High dimensionality detected ({X.shape[1]} features) during prediction. "
+                f"Ensure model matches configuration."
+            )
 
-            # Calculate confidence based on model source
-            base_confidence = self._calculate_confidence(X)
-            if model_source == "base":
-                # Lower confidence for base model (cold start)
-                confidence = base_confidence * 0.8
-                logger.info(f"Predicción con modelo base (cold start) - Niche: {niche}, Score: {score:.1f}")
-            elif model_source.startswith("niche_"):
-                # Higher confidence for niche-specific model
-                confidence = min(base_confidence * 1.1, 98)
-                logger.info(f"Predicción con modelo niche - {model_source}, Score: {score:.1f}")
-            else:
-                confidence = base_confidence
+        score = float(model.predict(X)[0])
+        score = max(0, min(100, score))  # Clip to 0-100
 
-            # SHAP explanation (only for main trained model with explainer)
-            if model_source == "trained" and self.shap_explainer_engagement is not None:
-                explanation = self._get_shap_explanation(X, "engagement")
-            else:
-                explanation = {
-                    "note": f"Predicción usando {model_source} modelo",
-                    "explanation_text": self._generate_model_source_explanation(model_source, niche)
-                }
+        # Calculate confidence based on model source
+        base_confidence = self._calculate_confidence(X)
+        if model_source == "base":
+            # Lower confidence for base model (cold start)
+            confidence = base_confidence * 0.8
+            logger.info(f"Predicción con modelo base (cold start) - Niche: {niche}, Score: {score:.1f}")
+        elif model_source.startswith("niche_"):
+            # Higher confidence for niche-specific model
+            confidence = min(base_confidence * 1.1, 98)
+            logger.info(f"Predicción con modelo niche - {model_source}, Score: {score:.1f}")
+        else:
+            confidence = base_confidence
 
-            return {
-                "score": round(score, 1),
-                "confidence": round(confidence, 1),
-                "explanation": explanation,
-                "feature_importance": self._get_feature_importance("engagement"),
-                "model_source": model_source,
-                "niche": niche,
-                "cold_start": model_source == "base",
+        # SHAP explanation (only for main trained model with explainer)
+        if model_source == "trained" and self.shap_explainer_engagement is not None:
+            explanation = self._get_shap_explanation(X, "engagement")
+        else:
+            explanation = {
+                "top_positive_factors": [],
+                "top_negative_factors": [],
+                "note": f"Predicción usando {model_source} modelo",
+                "explanation_text": self._generate_model_source_explanation(model_source, niche)
             }
 
-        except Exception as e:
-            # Catch shape mismatch errors explicitly
-            error_str = str(e)
-            if "feature_names mismatch" in error_str or "feature mismatch" in error_str or "shape mismatch" in error_str:
-                logger.error(
-                    f"🛑 Model signature mismatch (likely due to dimensionality reduction changes). "
-                    f"The model expects different features than provided. "
-                    f"ACTION REQUIRED: Retrain the model using the training script. "
-                    f"Error details: {e}"
-                )
-            else:
-                logger.error(f"Prediction error with {model_source} model: {e}")
+        # AUDIT LOG
+        logger.info(
+            f"Prediction audit | business_id: {business_id} | precision: {embedding_precision} | "
+            f"kpi_weights: {weights_log} | model_source: {model_source}"
+        )
 
-            return self._mock_engagement_prediction(content)
+        return {
+            "score": round(score, 1),
+            "confidence": round(confidence, 1),
+            "explanation": explanation,
+            "feature_importance": self._get_feature_importance("engagement"),
+            "model_source": model_source,
+            "niche": niche,
+            "cold_start": model_source == "base",
+        }
 
     def _generate_model_source_explanation(self, model_source: str, niche: str) -> str:
         """Generate human-readable explanation based on model source."""
@@ -1595,7 +1677,8 @@ class MLPredictor:
         self,
         content: Dict[str, Any],
         embedding_precision: str = "low",
-        kpi_weights: Optional[Dict[str, float]] = None
+        kpi_weights: Optional[Dict[str, float]] = None,
+        business_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Get complete ML prediction with all components
@@ -1610,17 +1693,13 @@ class MLPredictor:
             content: Content dict with caption, hashtags, etc.
             embedding_precision: From user_config (default: "low")
             kpi_weights: From user_config for RPI calculation
+            business_id: ID of the business for auditing
         """
-        # CRITICAL LOG: Config being used
-        logger.info(
-            f"Full prediction with config: precision={embedding_precision}, "
-            f"kpi_weights={'custom' if kpi_weights else 'default'}"
-        )
-
         engagement = self.predict_engagement(
             content,
             embedding_precision=embedding_precision,
-            kpi_weights=kpi_weights
+            kpi_weights=kpi_weights,
+            business_id=business_id
         )
         format_rec = self.recommend_format(content)
         triggers = self.suggest_triggers(content)
@@ -1631,7 +1710,27 @@ class MLPredictor:
         # Calculate weighted RPI if kpi_weights provided
         weighted_rpi = None
         if kpi_weights:
-            weighted_rpi = self._calculate_weighted_rpi(content, kpi_weights)
+            # For PREDICTION (drafts), we must use the predicted breakdown from engagement
+            if "multi_output_breakdown" in engagement and engagement["multi_output_breakdown"]:
+                # Use predicted metrics
+                weighted_rpi = self._calculate_weighted_rpi(
+                    engagement["multi_output_breakdown"],
+                    kpi_weights,
+                    is_prediction=True
+                )
+            else:
+                # Fallback for Single Model or missing breakdown
+                # We can only assume the 'score' is the best we have.
+                # Since Single Model doesn't support re-weighting, we return the score as-is
+                # but warn implicitly by not having breakdown.
+                weighted_rpi = {
+                    "weighted_rpi": engagement["score"],
+                    "raw_weighted_sum": engagement["score"],
+                    "weights_used": kpi_weights,
+                    "metrics": {},
+                    "contribution_breakdown": {},
+                    "note": "Metrics predicted by single-output model (re-weighting unavailable)"
+                }
 
         result = {
             "engagement_prediction": engagement,
@@ -1653,7 +1752,8 @@ class MLPredictor:
     def _calculate_weighted_rpi(
         self,
         content: Dict[str, Any],
-        kpi_weights: Dict[str, float]
+        kpi_weights: Dict[str, float],
+        is_prediction: bool = False
     ) -> Dict[str, Any]:
         """
         Calculate RPI score using custom KPI weights from user_config.
@@ -1662,18 +1762,27 @@ class MLPredictor:
         frontend KPI weight changes affect RPI calculation in real-time.
 
         Args:
-            content: Content with metrics
+            content: Content with metrics (or predicted metrics dict)
             kpi_weights: Weights dict with likes, comments, shares, saves, views
+            is_prediction: Whether content is just the metrics dict (from MultiOutput)
 
         Returns:
             Dict with weighted RPI score and breakdown
         """
         # Get metrics from content
-        likes = content.get("likes_count", content.get("likes", 0)) or 0
-        comments = content.get("comments_count", content.get("comments", 0)) or 0
-        shares = content.get("shares_count", content.get("shares", 0)) or 0
-        saves = content.get("saves_count", content.get("saves", 0)) or 0
-        views = content.get("views_count", content.get("video_views", 0)) or 0
+        if is_prediction:
+            # Content is already the dictionary of predicted metrics: predicted_likes, etc.
+            likes = content.get("predicted_likes", 0) or 0
+            comments = content.get("predicted_comments", 0) or 0
+            shares = content.get("predicted_shares", 0) or 0
+            saves = content.get("predicted_saves", 0) or 0
+            views = content.get("predicted_views", 0) or 0
+        else:
+            likes = content.get("likes_count", content.get("likes", 0)) or 0
+            comments = content.get("comments_count", content.get("comments", 0)) or 0
+            shares = content.get("shares_count", content.get("shares", 0)) or 0
+            saves = content.get("saves_count", content.get("saves", 0)) or 0
+            views = content.get("views_count", content.get("video_views", 0)) or 0
 
         # Get weights with defaults
         w_likes = kpi_weights.get("likes", 1.0)
@@ -1757,7 +1866,12 @@ class MLPredictor:
         except Exception as e:
             logger.warning(f"SHAP explanation error: {e}")
 
-        return {"note": "Explanation not available"}
+        return {
+            "top_positive_factors": [],
+            "top_negative_factors": [],
+            "explanation_text": "Explicación no disponible debido a un error de cálculo.",
+            "note": "SHAP calculation failed"
+        }
 
     def _shap_to_text(self, positive: List[Dict], negative: List[Dict]) -> str:
         """

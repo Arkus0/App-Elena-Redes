@@ -25,6 +25,7 @@ class EngagementPredictionML(BaseModel):
     confidence: float = Field(..., ge=0, le=100, description="Prediction confidence")
     explanation: ShapExplanation
     feature_importance: List[FeatureImpact] = []
+    multi_output_breakdown: Optional[Dict[str, float]] = None
 
 
 class FormatAlternative(BaseModel):
@@ -77,6 +78,7 @@ class MLFullPrediction(BaseModel):
     trigger_suggestions: TriggerSuggestions
     optimization_suggestions: List[str] = []
     ml_summary: str = ""
+    weighted_rpi: Optional[Dict[str, Any]] = None
 
 
 class HybridContentRequest(BaseModel):

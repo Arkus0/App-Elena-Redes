@@ -131,7 +131,8 @@ async def get_full_prediction(
     prediction = predictor.get_full_prediction(
         content,
         embedding_precision=embedding_precision,
-        kpi_weights=kpi_weights
+        kpi_weights=kpi_weights,
+        business_id=business_id
     )
 
     return prediction
@@ -174,7 +175,8 @@ async def predict_engagement(
     return predictor.predict_engagement(
         content,
         embedding_precision=embedding_precision,
-        kpi_weights=kpi_weights
+        kpi_weights=kpi_weights,
+        business_id=business_id
     )
 
 
