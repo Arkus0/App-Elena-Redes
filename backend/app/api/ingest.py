@@ -14,18 +14,17 @@ USER CONFIG INTEGRATION (REAL SYNC):
 - Uses multimodal_mode and light_mode_config from user_config (not global settings)
 - Logs: "User config loaded: precision {X}, multimodal {Y}, own @{Z}"
 
-Light Mode Multimodal Processing:
-When multimodal_mode="light" (from user_config), uses optimized Whisper/EasyOCR processing:
-- Whisper: 'tiny' model, first 3 seconds only (hook analysis)
-- EasyOCR: First 5 frames or thumbnail only
-- Cache: Hash-based deduplication to skip already processed media
-- Skip: Non-video content skips multimodal processing entirely
+Dual Mode Processing:
+- Light Mode: Optimized Whisper/EasyOCR (Hooks only).
+- Full Mode: Deep analysis with ContentProcessorService (Frames, Colors, Audio).
+Traffic controlled by user_config.light_mode_enabled.
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Header, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal, Any, Dict
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 import logging
 import uuid
 import hashlib
@@ -36,10 +35,16 @@ import copy
 # Import ML service for feedback loop
 from app.services.ml_service import get_ml_predictor, FeatureExtractor
 from app.core.config import get_settings
-from app.core.database import get_db
+from app.core.database import get_db, async_session_maker
 from app.core.privacy import privacy_provider
 from app.services.user_config_service import user_config_service, get_default_pipeline_config
 from app.schemas.user_config import PipelineConfig
+
+# Dual Mode Services
+from app.services.content_processor import get_content_processor
+from app.models.scraped_post import ScrapedPost, ContentFormat
+from app.models.competitor import Competitor
+from app.models.business import Platform
 
 logger = logging.getLogger(__name__)
 
@@ -494,7 +499,8 @@ async def process_content_data(
     content: ContentData,
     is_own_profile: bool = False,
     light_mode: bool = True,
-    user_config: Optional[PipelineConfig] = None
+    user_config: Optional[PipelineConfig] = None,
+    business_id: Optional[int] = None
 ):
     """
     Background task to process individual content (post, reel, video).
@@ -505,13 +511,11 @@ async def process_content_data(
     However, it must IMMEDIATELY sanitize logs and ensure only HASHED data is passed to
     persistent storage or ML feedback queues.
 
-    USER CONFIG SYNC:
-    =================
-    If user_config is provided:
-    - Uses multimodal_mode from config (not light_mode param)
-    - Uses own_instagram_username to auto-detect own profile (secure comparison)
-    - Uses embedding_precision for feature extraction
-    - Logs: "User config loaded: precision {X}, multimodal {Y}, own @{Z}"
+    DUAL MODE STRATEGY:
+    ===================
+    - Light Mode (True): Uses optimized Whisper/EasyOCR pipeline (hooks only).
+    - Full Mode (False): Uses deep AnalyticsEngine (frames, colors, deep metrics).
+    Traffic controller logic routes based on `light_mode` flag.
     """
     # Sanitize user info in logs
     masked_own_user = privacy_provider.hash_pii(user_config.own_instagram_username) if user_config and user_config.own_instagram_username else 'N/A'
@@ -540,12 +544,6 @@ async def process_content_data(
 
     try:
         # Log content details (SANITIZED)
-        # We assume content.author.username is already hashed by caller (ingest_raw_data)
-        # But if it's not (legacy or direct call), we hash it for logging.
-        # Actually, we will trust ingestion to pass hashed identities where possible,
-        # but for multimodal we might need raw data? No, multimodal doesn't need username.
-        # So username in `content` should be hashed.
-
         logger.info(
             f"[Task {task_id}] Content ID: {content.contentId}, "
             f"Author Hash: {content.author.username[:16]}..."
@@ -559,57 +557,47 @@ async def process_content_data(
             f"Shares: {metrics.shares}, Saves: {metrics.saves}"
         )
 
-        # Log hashtags
-        if content.hashtags:
-            logger.info(privacy_provider.sanitize_log(f"[Task {task_id}] Hashtags: {', '.join(content.hashtags[:10])}"))
-
-        # Log media info
-        media_count = len(content.media)
-        if media_count > 0:
-            media_types = [m.type for m in content.media]
-            logger.info(f"[Task {task_id}] Media items: {media_count} ({', '.join(media_types)})")
-
-        # Log audio info for reels/videos
-        if content.audio and content.audio.title:
-            logger.info(
-                privacy_provider.sanitize_log(f"[Task {task_id}] Audio: '{content.audio.title}' by {content.audio.artist or 'Unknown'}")
-            )
-
         # =====================================================================
-        # LIGHT MODE MULTIMODAL PROCESSING (uses user_config if available)
+        # DUAL MODE MULTIMODAL PROCESSING
         # =====================================================================
         multimodal_result = {}
-        if content.contentType in ("reel", "video") or any(m.type == "video" for m in content.media):
-            logger.info(
-                f"[Task {task_id}] Processing multimodal content "
-                f"({'light' if light_mode else 'full'} mode) "
-                f"[config: {'user_config' if user_config else 'global'}]"
-            )
-            # Content URLs here must be RAW for this to work.
-            # We assume ingestion passed the object with raw URLs.
-            # We will ANONYMIZE them after processing.
-            multimodal_result = _process_multimodal_light(
-                content, light_mode=light_mode, user_config=user_config
-            )
+        should_process_multimodal = (
+            content.contentType in ("reel", "video") or
+            any(m.type == "video" for m in content.media)
+        )
 
-            if multimodal_result.get("cached"):
-                logger.info(
-                    f"[Task {task_id}] Multimodal CACHED - instant retrieval"
-                )
-            elif multimodal_result.get("skipped"):
-                logger.info(
-                    f"[Task {task_id}] Multimodal SKIPPED: {multimodal_result.get('skip_reason')}"
+        if should_process_multimodal:
+            if light_mode:
+                logger.info(f"[Task {task_id}] Using LIGHT pipeline (Hooks only)")
+                multimodal_result = _process_multimodal_light(
+                    content, light_mode=True, user_config=user_config
                 )
             else:
-                logger.info(
-                    f"[Task {task_id}] Multimodal processed in "
-                    f"{multimodal_result.get('processing_time_seconds', 0):.2f}s "
-                    f"(saved {multimodal_result.get('time_saved_percent', 0):.0f}%)"
-                )
+                logger.info(f"[Task {task_id}] Using FULL pipeline (Deep Analysis)")
+                # Extract Raw Media URL
+                media_url = None
+                for media in content.media:
+                    if media.type == "video" and media.url:
+                        media_url = media.url
+                        break
 
-            if multimodal_result.get("hook_score", 0) > 0:
+                if media_url:
+                    processor = get_content_processor()
+                    # Run full processing (async)
+                    multimodal_result = await processor.process_full(
+                        media_url=media_url,
+                        caption=content.caption or ""
+                    )
+                else:
+                    logger.warning(f"[Task {task_id}] No video URL found for FULL processing")
+
+            # Log Result Summary
+            if multimodal_result.get("status") == "failed":
+                logger.error(f"[Task {task_id}] Multimodal processing failed: {multimodal_result.get('error')}")
+            else:
                 logger.info(
-                    f"[Task {task_id}] Hook score: {multimodal_result['hook_score']:.2f}"
+                    f"[Task {task_id}] Multimodal finished ({multimodal_result.get('processing_time_seconds', 0):.2f}s). "
+                    f"Hook Score: {multimodal_result.get('hook_score', 0):.2f}"
                 )
 
         # =====================================================================
@@ -634,6 +622,128 @@ async def process_content_data(
             safe_content.audio.audioUrl = privacy_provider.hash_pii(safe_content.audio.audioUrl)
 
         # =====================================================================
+        # PERSISTENCE: Save Rich Data to ScrapedPost
+        # =====================================================================
+        # We save this regardless of whether it's own profile or competitor
+        if business_id:
+            try:
+                async with async_session_maker() as db:
+                    # 1. Ensure Competitor Exists
+                    # We use the hashed username which was passed in content.author.username
+                    hashed_handle = safe_content.author.username # Already hashed by ingest_raw_data
+
+                    result = await db.execute(
+                        select(Competitor)
+                        .where(Competitor.business_id == business_id)
+                        .where(Competitor.handle == hashed_handle)
+                    )
+                    competitor = result.scalar_one_or_none()
+
+                    if not competitor:
+                        # Auto-create competitor if missing (e.g. browsing random profiles)
+                        # We use safe defaults
+                        competitor = Competitor(
+                            business_id=business_id,
+                            platform=Platform(safe_content.platform) if safe_content.platform in ["instagram", "tiktok"] else Platform.INSTAGRAM,
+                            handle=hashed_handle,
+                            display_name=privacy_provider.hash_pii(safe_content.author.displayName),
+                            profile_url=privacy_provider.hash_pii(f"https://instagram.com/{hashed_handle}"), # Pseudo-url hashed
+                            scrape_status="completed" # It's not scraped by Apify but ingested via extension
+                        )
+                        db.add(competitor)
+                        await db.commit()
+                        await db.refresh(competitor)
+                        logger.info(f"[Task {task_id}] Auto-created Competitor {hashed_handle[:8]}...")
+
+                    # 2. Create or Update ScrapedPost
+                    # Check if post exists
+                    post_result = await db.execute(
+                        select(ScrapedPost)
+                        .where(ScrapedPost.competitor_id == competitor.id)
+                        .where(ScrapedPost.platform_post_id == safe_content.contentId)
+                    )
+                    scraped_post = post_result.scalar_one_or_none()
+
+                    # Prepare Data
+                    transcript = multimodal_result.get("transcription")
+                    ocr_text = multimodal_result.get("ocr_text")
+                    visual_features = multimodal_result.get("visual_features", {})
+
+                    # Parse timestamp
+                    posted_at = None
+                    try:
+                        if safe_content.postedAt:
+                            posted_at = datetime.fromisoformat(safe_content.postedAt.replace("Z", "+00:00"))
+                    except:
+                        pass
+
+                    format_map = {
+                        "reel": ContentFormat.REEL,
+                        "video": ContentFormat.TIKTOK_VIDEO,
+                        "carousel": ContentFormat.CAROUSEL,
+                        "post": ContentFormat.STATIC_IMAGE
+                    }
+                    content_fmt = format_map.get(safe_content.contentType, ContentFormat.STATIC_IMAGE)
+
+                    if scraped_post:
+                        # Update rich fields
+                        scraped_post.transcript = transcript
+                        scraped_post.ocr_text = ocr_text
+                        scraped_post.visual_features = visual_features
+                        # Update metrics
+                        scraped_post.likes_count = safe_content.metrics.likes
+                        scraped_post.comments_count = safe_content.metrics.comments
+                        scraped_post.shares_count = safe_content.metrics.shares
+                        scraped_post.saves_count = safe_content.metrics.saves
+                        scraped_post.views_count = safe_content.metrics.views or safe_content.metrics.plays
+
+                        logger.info(f"[Task {task_id}] Updated existing ScrapedPost {scraped_post.id} with rich data")
+                    else:
+                        # Create new
+                        scraped_post = ScrapedPost(
+                            competitor_id=competitor.id,
+                            platform_post_id=safe_content.contentId,
+                            post_url=safe_content.contentUrl, # Hashed
+                            content_format=content_fmt,
+                            caption=privacy_provider.hash_pii(safe_content.caption), # Hashed caption?
+                            # Wait, usually we want analyzed text. But we must hash PII.
+                            # If we store transcript/ocr_text, is that PII?
+                            # Transcript contains speech. OCR contains overlay.
+                            # "Cancelamos la política de Blind Identity estricta para el contenido multimedia"
+                            # The prompt says: "NO HASHEES la URL inmediatamente... Actualiza el modelo ScrapedPost para guardar estos datos enriquecidos: transcript, ocr_text"
+                            # This implies we store Transcript/OCR in cleartext?
+                            # "Cancelamos la política... para el contenido multimedia."
+                            # But URLs are PII? The user said "Guardala si es necesario... o hasheala SOLO despues".
+                            # I interpreted that for processing.
+                            # For persistence: "Actualiza el modelo ScrapedPost para guardar estos datos enriquecidos".
+                            # Storing full transcript in DB is definitely not "Blind Identity".
+                            # But the prompt says "Cancelamos la política... estricta".
+                            # So I will save transcript/ocr in cleartext.
+                            # But username/handle MUST remain hashed.
+
+                            transcript=transcript,
+                            ocr_text=ocr_text,
+                            visual_features=visual_features,
+
+                            thumbnail_url=safe_content.media[0].thumbnailUrl if safe_content.media else None, # Hashed
+
+                            likes_count=safe_content.metrics.likes,
+                            comments_count=safe_content.metrics.comments,
+                            shares_count=safe_content.metrics.shares,
+                            saves_count=safe_content.metrics.saves,
+                            views_count=safe_content.metrics.views or safe_content.metrics.plays,
+
+                            posted_at=posted_at
+                        )
+                        db.add(scraped_post)
+                        logger.info(f"[Task {task_id}] Created new ScrapedPost with rich data")
+
+                    await db.commit()
+
+            except Exception as e:
+                logger.error(f"[Task {task_id}] Persistence failed: {e}")
+
+        # =====================================================================
         # HUMAN-IN-THE-LOOP: Register ML Feedback for Own Profile Content
         # =====================================================================
         if is_own_profile:
@@ -650,6 +760,14 @@ async def process_content_data(
 
                 # Convert content to features dict for ML
                 content_dict = _content_to_features_dict(safe_content)
+
+                # ENRICH ML FEATURES with multimodal data!
+                if multimodal_result:
+                    content_dict["whisper_transcript"] = multimodal_result.get("transcription", "")
+                    content_dict["easyocr_text"] = multimodal_result.get("ocr_text", "")
+                    # Add hook score if available
+                    if "hook_score" in multimodal_result:
+                        content_dict["semantic_hook_score"] = multimodal_result["hook_score"]
 
                 # Get ML predictor instance
                 ml_predictor = get_ml_predictor()
@@ -691,7 +809,7 @@ async def process_content_data(
         else:
             # Competitor content - ingest for baseline training
             logger.info(
-                f"[Task {task_id}] Contenido de competidor - almacenado para baseline training"
+                f"[Task {task_id}] Contenido de competidor - procesado y guardado."
             )
 
         logger.info(f"[Task {task_id}] Content processing completed successfully")
@@ -941,9 +1059,15 @@ async def ingest_raw_data(
         # So we CAN hash the username here.
         content.author.username = hashed_username
 
-        # Queue background processing with user_config
+        # Queue background processing with user_config and business_id
         background_tasks.add_task(
-            process_content_data, task_id, content, is_own, light_mode, user_config
+            process_content_data,
+            task_id,
+            content,
+            is_own,
+            light_mode,
+            user_config,
+            payload.businessId # Pass business_id for persistence
         )
 
         config_msg = ""

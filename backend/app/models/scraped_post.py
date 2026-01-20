@@ -56,6 +56,11 @@ class ScrapedPost(Base):
     audio_name = Column(String(255), nullable=True)  # For Reels/TikTok
     audio_original = Column(String(10), default="unknown")  # original, trending, custom
 
+    # === MULTIMODAL DATA (Rich Analysis) ===
+    transcript = Column(Text, nullable=True)
+    ocr_text = Column(Text, nullable=True)
+    visual_features = Column(JSON, default={})  # Stores dominant_colors, brightness, etc.
+
     # Engagement metrics (the gold!)
     likes_count = Column(Integer, default=0)
     comments_count = Column(Integer, default=0)
