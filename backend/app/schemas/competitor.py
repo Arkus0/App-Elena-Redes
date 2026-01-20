@@ -40,6 +40,7 @@ class CompetitorDiscoveryRequest(BaseModel):
 
 class DiscoveredCompetitor(BaseModel):
     handle: str
+    full_name: Optional[str] = None
     platform: str
     followers: int
     relevance_score: int
