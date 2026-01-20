@@ -36,7 +36,9 @@ class DiscoveryService:
 
     async def _discover_via_semantic_search(self, request: CompetitorDiscoveryRequest) -> List[DiscoveredCompetitor]:
         """
-        Use Grok to find handles, then verify them with Apify.
+        Use Grok to find handles.
+        PASSIVE DISCOVERY: Do not verify with Apify to save costs.
+        Trust "Elena Bridge" extension for later ingestion.
         """
         # Prepare inputs for Grok
         topic = ", ".join(request.hashtags)
@@ -53,54 +55,25 @@ class DiscoveryService:
 
         logger.info(f"Grok returned {len(handles)} handles: {handles}")
 
-        # Verify handles with Apify (Concurrent batching)
+        # Passive Construction - No Apify Calls
         valid_competitors = []
-        batch_size = 5
 
-        for i in range(0, len(handles), batch_size):
-            batch = handles[i:i + batch_size]
-            tasks = [self.apify_service.get_profile_metadata(h, platform="instagram") for h in batch]
+        for handle in handles:
+            # Lightweight object construction
+            competitor = DiscoveredCompetitor(
+                handle=handle,
+                full_name=None,
+                platform="instagram",
+                followers=0,  # Pending data
+                relevance_score=95,  # High confidence from AI
+                activity_status="Unknown",
+                last_post_date=None,
+                match_reasons=["🤖 Sugerencia IA", "Pendiente de Bridge"],
+                profile_pic_url=f"https://ui-avatars.com/api/?name={handle}&background=random"
+            )
+            valid_competitors.append(competitor)
 
-            # Execute batch
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for handle, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error verifying handle {handle}: {result}")
-                    continue
-
-                if not result:
-                    logger.debug(f"Handle {handle} not found or private (Apify returned None).")
-                    continue
-
-                # Filter Private accounts if needed (though get_profile_metadata might return them with limited info)
-                # If 'is_private' is True, we might want to skip them if we can't analyze them later.
-                # Usually we only want public accounts.
-                if result.get("is_private"):
-                    logger.debug(f"Handle {handle} is private. Skipping.")
-                    continue
-
-                # Check follower constraints
-                followers = result.get("followers_count", 0)
-                if followers < request.min_followers or followers > request.max_followers:
-                    logger.debug(f"Handle {handle} followers ({followers}) out of range.")
-                    continue
-
-                # Create DiscoveredCompetitor
-                # Note: Semantic search implies high relevance if Grok did its job.
-                # We assign a high base relevance score.
-                valid_competitors.append(DiscoveredCompetitor(
-                    handle=handle,
-                    full_name=result.get("full_name"),
-                    platform="instagram",
-                    followers=followers,
-                    relevance_score=95, # High confidence from AI
-                    activity_status="Unknown", # Lightweight endpoint doesn't give activity stats usually
-                    last_post_date=None,
-                    match_reasons=["🤖 AI Recommended", "✅ Verified Public"],
-                    profile_pic_url=result.get("profile_pic_url")
-                ))
-
+        logger.info(f"Passive discovery created {len(valid_competitors)} candidates.")
         return valid_competitors
 
     async def _discover_via_hashtags(self, request: CompetitorDiscoveryRequest) -> List[DiscoveredCompetitor]:

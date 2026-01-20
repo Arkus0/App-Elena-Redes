@@ -2,8 +2,9 @@
 Competitors API Routes
 Competitor management and analysis
 """
+import json
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -33,6 +34,7 @@ router = APIRouter()
 @router.post("/discover", response_model=List[DiscoveredCompetitor])
 async def discover_competitors(
     request: CompetitorDiscoveryRequest,
+    response: Response,
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -42,7 +44,17 @@ async def discover_competitors(
     from app.services.discovery_service import DiscoveryService
     service = DiscoveryService()
 
-    return await service.discover_competitors(request)
+    results = await service.discover_competitors(request)
+
+    # Populate X-Grok-Candidates header for frontend download
+    # Only include candidates that came from AI (Passive Discovery)
+    ai_candidates = [
+        c.handle for c in results
+        if any("🤖" in r or "AI" in r or "Grok" in r for r in c.match_reasons)
+    ]
+    response.headers["X-Grok-Candidates"] = json.dumps(ai_candidates)
+
+    return results
 
 
 @router.post("/preview", response_model=CompetitorPreviewResponse)

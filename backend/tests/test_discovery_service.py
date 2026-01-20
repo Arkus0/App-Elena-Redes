@@ -6,9 +6,12 @@ from app.schemas.competitor import CompetitorDiscoveryRequest
 
 @pytest.mark.asyncio
 async def test_discovery_service_filtering():
-    # Mock ApifyService
-    with patch("app.services.discovery_service.ApifyService") as MockApifyService:
+    # Mock ApifyService and AIService (to force fallback)
+    with patch("app.services.discovery_service.ApifyService") as MockApifyService, \
+         patch("app.services.discovery_service.AIService") as MockAIService:
         mock_apify = MockApifyService.return_value
+        mock_ai = MockAIService.return_value
+        mock_ai.find_competitor_handles = AsyncMock(return_value=[])  # Force fallback to hashtags
 
         # Setup mock data
         now = datetime.utcnow()
