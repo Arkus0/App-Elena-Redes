@@ -19,7 +19,7 @@ Dual Mode Processing:
 - Full Mode: Deep analysis with ContentProcessorService (Frames, Colors, Audio).
 Traffic controlled by user_config.light_mode_enabled.
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Header, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Header, Depends, status
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal, Any, Dict
 from datetime import datetime
@@ -45,6 +45,7 @@ from app.services.content_processor import get_content_processor
 from app.models.scraped_post import ScrapedPost, ContentFormat
 from app.models.competitor import Competitor
 from app.models.business import Platform
+from app.api.extension import get_business_by_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -971,6 +972,7 @@ async def ingest_raw_data(
     x_elena_bridge_version: Optional[str] = Header(None),
     x_extension_id: Optional[str] = Header(None),
     x_content_type: Optional[str] = Header(None),
+    x_extension_api_key: Optional[str] = Header(None, alias="X-Extension-API-Key"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -998,6 +1000,23 @@ async def ingest_raw_data(
 
     # Generate task ID for tracking
     task_id = str(uuid.uuid4())[:8]
+
+    # SECURITY: Verify API Key if businessId is provided
+    if payload.businessId:
+        if not x_extension_api_key:
+            logger.warning(f"[{task_id}] Rejected ingest request with businessId={payload.businessId} but no API key")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API Key required when businessId is provided"
+            )
+
+        business = await get_business_by_api_key(db, x_extension_api_key)
+        if not business or business.id != payload.businessId:
+            logger.warning(f"[{task_id}] Rejected ingest request: API Key does not match businessId={payload.businessId}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API Key for this business"
+            )
 
     # =========================================================================
     # USER CONFIG SYNC: Load config from database if IDs provided
