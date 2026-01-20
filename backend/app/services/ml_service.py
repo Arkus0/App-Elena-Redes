@@ -1779,7 +1779,7 @@ class MLPredictor:
 
                 sorted_idx = np.argsort(importances)[::-1][:10]
                 return [
-                    {"feature": feature_names[i], "importance": float(importances[i])}
+                    {"feature": feature_names[i], "impact": float(importances[i])}
                     for i in sorted_idx
                 ]
         except:
