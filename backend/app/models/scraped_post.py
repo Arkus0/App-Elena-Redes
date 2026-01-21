@@ -93,7 +93,8 @@ class ScrapedPost(Base):
     # === END SURVIVOR BIAS FIX ===
 
     # Timing
-    posted_at = Column(DateTime, nullable=True)
+    # Bolt Optimization: Added index=True to posted_at for faster time-based filtering and trend analysis
+    posted_at = Column(DateTime, nullable=True, index=True)
     day_of_week = Column(String(20), nullable=True)
     hour_of_day = Column(Integer, nullable=True)
 
