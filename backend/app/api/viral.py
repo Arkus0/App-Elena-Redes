@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import os
 import logging
+import asyncio
 from pathlib import Path
 from typing import List
 from datetime import datetime
@@ -108,19 +109,26 @@ async def scan_viral_opportunities(
 
     velocity_checker = get_trend_velocity_checker(apify_service)
 
-    # Build response
-    opportunities = []
+    # Check velocity in parallel
+    velocity_tasks = []
     for idea in ideas:
         trend_name = idea.get("idea_title", "")
         # Use keyword or trend name for velocity check
         trend_identifier = request.keyword if request.keyword and len(request.keyword) > 3 else trend_name
 
-        # Check velocity
-        velocity_result = await velocity_checker.check_trend_velocity(
+        velocity_tasks.append(velocity_checker.check_trend_velocity(
             trend_type=TrendType.HASHTAG,
             trend_identifier=trend_identifier,
             platform=request.platform
-        )
+        ))
+
+    # Run checks concurrently (Batch Optimization)
+    velocity_results = await asyncio.gather(*velocity_tasks)
+
+    # Build response
+    opportunities = []
+    for idea, velocity_result in zip(ideas, velocity_results):
+        trend_name = idea.get("idea_title", "")
 
         # Filter out STALE trends for new opportunities
         if velocity_result.is_stale:
@@ -259,15 +267,20 @@ async def get_trending_in_niche(
 
     velocity_checker = get_trend_velocity_checker(apify_service)
 
-    # Enrich trending data with velocity metrics
-    enriched_trending = []
+    # Enrich trending data with velocity metrics - Parallel Execution
+    velocity_tasks = []
     for item in trending_data["trending_now"]:
-        velocity_result = await velocity_checker.check_trend_velocity(
+        velocity_tasks.append(velocity_checker.check_trend_velocity(
             trend_type=TrendType.HASHTAG,
             trend_identifier=item["trend"],
             platform=platform
-        )
+        ))
 
+    # Run concurrently
+    velocity_results = await asyncio.gather(*velocity_tasks)
+
+    enriched_trending = []
+    for item, velocity_result in zip(trending_data["trending_now"], velocity_results):
         # Add velocity metrics
         item["velocity_score"] = velocity_result.velocity_score
         item["momentum_status"] = velocity_result.status.value
