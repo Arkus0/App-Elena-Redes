@@ -20,11 +20,13 @@ Author: BrandPulse AI
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 import logging
 
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
+from app.models.business import Business
 from app.schemas.user_config import (
     UserConfigCreate, UserConfigUpdate, UserConfigResponse,
     UserConfigInfoResponse, PipelineConfig
@@ -37,22 +39,31 @@ router = APIRouter()
 
 
 # =============================================================================
-# Helper to get current user (mock if auth not fully implemented)
+# Auth & Security Helpers
 # =============================================================================
 
-async def get_current_user_id(
-    user_id: Optional[int] = Query(None, description="User ID (for testing)")
-) -> int:
+async def verify_business_access(db: AsyncSession, user_id: int, business_id: int):
     """
-    Obtiene el user_id actual.
+    Verifica que el usuario sea dueño del negocio.
+    """
+    result = await db.execute(
+        select(Business).where(Business.id == business_id)
+    )
+    business = result.scalar_one_or_none()
 
-    En produccion, esto vendria del JWT token.
-    Para desarrollo/testing, acepta query param.
-    """
-    if user_id is not None:
-        return user_id
-    # Default for testing
-    return 1
+    if not business:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Negocio no encontrado"
+        )
+
+    if business.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para acceder a este negocio"
+        )
+
+    return business
 
 
 # =============================================================================
@@ -78,7 +89,7 @@ async def get_config_info():
 @router.get("/config", response_model=UserConfigResponse)
 async def get_user_config(
     business_id: int = Query(..., description="Business ID"),
-    user_id: int = Depends(get_current_user_id),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -95,10 +106,12 @@ async def get_user_config(
     - growth_prediction_engine.py: embeddings dims, kpi weights
     - train.py: embedding precision para features
     """
-    config = await user_config_service.get_or_create_config(db, user_id, business_id)
+    await verify_business_access(db, current_user.id, business_id)
+
+    config = await user_config_service.get_or_create_config(db, current_user.id, business_id)
 
     logger.info(
-        f"Config retrieved: user={user_id}, business={business_id}, "
+        f"Config retrieved: user={current_user.id}, business={business_id}, "
         f"precision={config.embedding_precision.value}, "
         f"multimodal={config.multimodal_mode.value}"
     )
@@ -110,7 +123,7 @@ async def get_user_config(
 async def save_user_config(
     config_data: UserConfigUpdate,
     business_id: int = Query(..., description="Business ID"),
-    user_id: int = Depends(get_current_user_id),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -132,12 +145,14 @@ async def save_user_config(
     - own_instagram_username: para feedback loop (sin @)
     - own_tiktok_username: para feedback loop (sin @)
     """
+    await verify_business_access(db, current_user.id, business_id)
+
     config = await user_config_service.update_config(
-        db, user_id, business_id, config_data
+        db, current_user.id, business_id, config_data
     )
 
     logger.info(
-        f"Config saved: user={user_id}, business={business_id}, "
+        f"Config saved: user={current_user.id}, business={business_id}, "
         f"precision={config.embedding_precision.value} ({config.get_embedding_dims()} dims), "
         f"multimodal={config.multimodal_mode.value}, "
         f"own=@{config.own_instagram_username or 'N/A'}"
@@ -149,7 +164,7 @@ async def save_user_config(
 @router.get("/config/pipeline", response_model=PipelineConfig)
 async def get_pipeline_config(
     business_id: int = Query(..., description="Business ID"),
-    user_id: int = Depends(get_current_user_id),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -163,10 +178,12 @@ async def get_pipeline_config(
     - own_username para feedback
     - helper methods (is_own_profile, get_weighted_rpi)
     """
-    config = await user_config_service.get_pipeline_config(db, user_id, business_id)
+    await verify_business_access(db, current_user.id, business_id)
+
+    config = await user_config_service.get_pipeline_config(db, current_user.id, business_id)
 
     logger.info(
-        f"Pipeline config loaded: user={user_id}, business={business_id}, "
+        f"Pipeline config loaded: user={current_user.id}, business={business_id}, "
         f"precision={config.embedding_precision} ({config.embedding_dims} dims), "
         f"multimodal={config.multimodal_mode}, "
         f"own=@{config.own_instagram_username or 'N/A'}"
@@ -238,7 +255,7 @@ async def validate_config(
 @router.delete("/config")
 async def reset_config(
     business_id: int = Query(..., description="Business ID"),
-    user_id: int = Depends(get_current_user_id),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -251,6 +268,8 @@ async def reset_config(
     """
     from app.schemas.user_config import UserConfigCreate, EmbeddingPrecision, MultimodalMode
 
+    await verify_business_access(db, current_user.id, business_id)
+
     # Create fresh default config
     default_data = UserConfigCreate(
         embedding_precision=EmbeddingPrecision.LOW,
@@ -258,10 +277,10 @@ async def reset_config(
     )
 
     config = await user_config_service.create_config(
-        db, user_id, business_id, default_data
+        db, current_user.id, business_id, default_data
     )
 
-    logger.info(f"Config reset to defaults: user={user_id}, business={business_id}")
+    logger.info(f"Config reset to defaults: user={current_user.id}, business={business_id}")
 
     return {
         "success": True,
