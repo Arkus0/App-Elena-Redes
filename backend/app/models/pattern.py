@@ -26,7 +26,8 @@ class ExtractedPattern(Base):
     __tablename__ = "extracted_patterns"
 
     id = Column(Integer, primary_key=True, index=True)
-    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False)
+    # Bolt Optimization: Added index=True to business_id for faster filtering by business
+    business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False, index=True)
 
     # Pattern identification
     pattern_type = Column(Enum(PatternType), nullable=False)
