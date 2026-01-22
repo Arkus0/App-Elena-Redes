@@ -1044,14 +1044,12 @@ async def ingest_raw_data(
         is_own = payload.isOwnProfile
 
         # Hash username immediately for secure comparison and logging
-        # Note: We keep content.author.username RAW in the object we pass to background task
-        # because we don't know if downstream systems might rely on it for transient processing
-        # (though likely not). However, we MUST NOT log it.
-        # Wait, if we pass it raw, `process_content_data` must hash it.
-        # But `process_content_data` already assumes it might receive raw for Multimodal.
-        # Actually, `process_content_data` needs to handle the hashing before ML.
-
         hashed_username = privacy_provider.hash_pii(content.author.username)
+
+        # SECURITY: If no businessId (anonymous), disable risky operations
+        if not payload.businessId:
+            is_own = False  # Prevent ML poisoning from anonymous users
+            logger.info(f"[{task_id}] Anonymous request: Disabling own profile detection and ML feedback")
 
         # USER CONFIG SYNC: Override light_mode and detect own profile
         light_mode = payload.lightMode
@@ -1071,26 +1069,25 @@ async def ingest_raw_data(
             f" [config: {'user_config' if user_config else 'default'}]"
         )
 
-        # PRE-HASH PII IN PAYLOAD for Persistence/Logs (But keep URLs for Multimodal)
-        # We will modify the content object IN PLACE for the background task?
-        # No, `process_content_data` expects RAW URLs for multimodal.
-        # So we pass it as is, but we ensure `process_content_data` handles anonymization internally.
-        # However, we should hash the username here and now to be safe?
-        # If we hash the username here, `process_content_data` will see hashed username.
-        # Does `_process_multimodal_light` need raw username? No.
-        # So we CAN hash the username here.
+        # PRE-HASH PII IN PAYLOAD for Persistence/Logs
         content.author.username = hashed_username
 
-        # Queue background processing with user_config and business_id
-        background_tasks.add_task(
-            process_content_data,
-            task_id,
-            content,
-            is_own,
-            light_mode,
-            user_config,
-            payload.businessId # Pass business_id for persistence
-        )
+        # SECURITY: Prevent DoS by skipping heavy background processing for anonymous users
+        if payload.businessId:
+            # Queue background processing with user_config and business_id
+            background_tasks.add_task(
+                process_content_data,
+                task_id,
+                content,
+                is_own,
+                light_mode,
+                user_config,
+                payload.businessId # Pass business_id for persistence
+            )
+            msg = f"{content.contentType.capitalize()} from {hashed_username[:8]}... queued for processing"
+        else:
+            logger.info(f"[{task_id}] Anonymous request: Skipping background processing to save resources")
+            msg = f"{content.contentType.capitalize()} received (anonymous mode - processing skipped)"
 
         config_msg = ""
         if user_config:
@@ -1098,8 +1095,7 @@ async def ingest_raw_data(
 
         return IngestResponse(
             success=True,
-            message=f"{content.contentType.capitalize()} from {hashed_username[:8]}... queued for processing"
-                    + (" (feedback loop activado)" if is_own else "")
+            message=msg + (" (feedback loop activado)" if is_own else "")
                     + (f" [modo {'ligero' if light_mode else 'completo'}]")
                     + config_msg,
             task_id=task_id,
@@ -1115,6 +1111,11 @@ async def ingest_raw_data(
 
         hashed_username = privacy_provider.hash_pii(profile.username)
 
+        # SECURITY: If no businessId (anonymous), disable risky operations
+        if not payload.businessId:
+            is_own = False  # Prevent ML poisoning
+            logger.info(f"[{task_id}] Anonymous request: Disabling ML feedback for profile")
+
         # USER CONFIG SYNC: Auto-detect own profile SECURELY
         if user_config and not is_own and user_config.own_instagram_username:
             if privacy_provider.compare_pii(user_config.own_instagram_username, hashed_username):
@@ -1128,22 +1129,26 @@ async def ingest_raw_data(
         )
 
         # Anonymize profile PII before passing to background task
-        # Profile processing doesn't do multimodal download (usually), so we can hash securely
         profile.username = hashed_username
         profile.displayName = privacy_provider.hash_pii(profile.displayName)
-        profile.bio = privacy_provider.hash_pii(profile.bio) # Optional: hash bio or keep it? Blind identity says zero PII.
+        profile.bio = privacy_provider.hash_pii(profile.bio)
         profile.profilePicUrl = privacy_provider.hash_pii(profile.profilePicUrl)
         profile.sourceUrl = privacy_provider.hash_pii(profile.sourceUrl)
 
-        # Queue background processing with own profile flag
-        background_tasks.add_task(
-            process_profile_data, task_id, profile, payload.recentPosts, is_own
-        )
+        # SECURITY: Prevent ML poisoning by skipping background task for anonymous users
+        if payload.businessId:
+            # Queue background processing with own profile flag
+            background_tasks.add_task(
+                process_profile_data, task_id, profile, payload.recentPosts, is_own
+            )
+            msg = f"Profile {hashed_username[:8]}... queued for processing"
+        else:
+            logger.info(f"[{task_id}] Anonymous request: Skipping background profile processing")
+            msg = f"Profile {hashed_username[:8]}... received (anonymous mode)"
 
         return IngestResponse(
             success=True,
-            message=f"Profile {hashed_username[:8]}... queued for processing"
-                    + (f" ({len(payload.recentPosts)} posts para feedback)" if is_own else ""),
+            message=msg + (f" ({len(payload.recentPosts)} posts para feedback)" if is_own else ""),
             task_id=task_id,
             data_type="profile",
             identifier=hashed_username,

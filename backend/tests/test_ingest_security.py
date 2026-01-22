@@ -121,7 +121,7 @@ def test_ingest_invalid_key(client):
         assert "Invalid API Key" in response.json()["detail"]
 
 def test_ingest_success(client):
-    """Test that requests with valid API key are accepted"""
+    """Test that requests with valid API key are accepted AND trigger background processing"""
     payload = {
         "source": "valid_user",
         "businessId": 123,
@@ -145,16 +145,22 @@ def test_ingest_success(client):
         mock_biz.id = 123 # Match
         mock_get_biz.return_value = mock_biz
 
-        response = client.post(
-            "/api/ingest/raw",
-            json=payload,
-            headers={"X-Extension-API-Key": "valid_key"}
-        )
-        assert response.status_code == 200
-        assert response.json()["success"] is True
+        # Mock BackgroundTasks.add_task to verify it IS called
+        with patch("fastapi.BackgroundTasks.add_task") as mock_add_task:
+            response = client.post(
+                "/api/ingest/raw",
+                json=payload,
+                headers={"X-Extension-API-Key": "valid_key"}
+            )
+            assert response.status_code == 200
+            assert response.json()["success"] is True
+            assert "queued for processing" in response.json()["message"]
 
-def test_ingest_anonymous(client):
-    """Test that requests WITHOUT businessId are allowed (anonymous)"""
+            # Should have added a background task
+            mock_add_task.assert_called_once()
+
+def test_ingest_anonymous_skipped_processing(client):
+    """Test that anonymous requests are allowed BUT do NOT trigger background tasks (DoS protection)"""
     payload = {
         "source": "anonymous",
         # No businessId
@@ -171,9 +177,16 @@ def test_ingest_anonymous(client):
         }
     }
 
-    response = client.post("/api/ingest/raw", json=payload)
-    assert response.status_code == 200
-    assert response.json()["success"] is True
+    # Mock BackgroundTasks.add_task to verify it is NOT called
+    with patch("fastapi.BackgroundTasks.add_task") as mock_add_task:
+        response = client.post("/api/ingest/raw", json=payload)
+
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        assert "processing skipped" in response.json()["message"]
+
+        # Should NOT have added a background task
+        mock_add_task.assert_not_called()
 
 if __name__ == "__main__":
     # Allow running as script
