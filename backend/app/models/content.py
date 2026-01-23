@@ -141,7 +141,8 @@ class GeneratedContent(Base):
     cta_type = Column(String(100), nullable=True)
 
     # A/B Variations
-    variation_of = Column(Integer, ForeignKey("generated_content.id"), nullable=True)
+    # Bolt Optimization: Added index=True for faster variant lookups
+    variation_of = Column(Integer, ForeignKey("generated_content.id"), nullable=True, index=True)
     variation_label = Column(String(50), nullable=True)  # A, B, C
 
     # Scheduling
