@@ -11,8 +11,12 @@ from sqlalchemy import select
 from app.core.database import get_db
 from app.core.security import verify_password, get_password_hash, create_access_token
 from app.core.config import settings
+from app.core.limiter import RateLimiter
 from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse, Token, UserLogin
+
+# Rate limiter: 5 requests per minute
+login_limiter = RateLimiter(requests=5, window=60)
 
 router = APIRouter()
 
@@ -48,7 +52,7 @@ async def register(
     return user
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=Token, dependencies=[Depends(login_limiter)])
 async def login(
     user_in: UserLogin,
     db: AsyncSession = Depends(get_db)
@@ -84,7 +88,7 @@ async def login(
     return Token(access_token=access_token)
 
 
-@router.post("/token", response_model=Token)
+@router.post("/token", response_model=Token, dependencies=[Depends(login_limiter)])
 async def login_for_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db)
