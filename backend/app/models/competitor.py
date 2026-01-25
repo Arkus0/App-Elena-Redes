@@ -17,7 +17,8 @@ class Competitor(Base):
 
     # Account info
     platform = Column(Enum(Platform), nullable=False)
-    handle = Column(String(100), nullable=False)  # @username without @
+    # Bolt Optimization: Added index=True to handle for faster lookups
+    handle = Column(String(100), nullable=False, index=True)  # @username without @
     profile_url = Column(String(500), nullable=True)
     display_name = Column(String(255), nullable=True)
     bio = Column(String(1000), nullable=True)

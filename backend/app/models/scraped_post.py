@@ -40,7 +40,8 @@ class ScrapedPost(Base):
     competitor_id = Column(Integer, ForeignKey("competitors.id"), nullable=False, index=True)
 
     # Post identification
-    platform_post_id = Column(String(100), nullable=False)  # Original ID from platform
+    # Bolt Optimization: Added index=True to platform_post_id for faster deduplication
+    platform_post_id = Column(String(100), nullable=False, index=True)  # Original ID from platform
     post_url = Column(String(500), nullable=True)
     content_format = Column(Enum(ContentFormat), nullable=False)
 
