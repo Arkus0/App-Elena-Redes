@@ -12,3 +12,8 @@
 **Vulnerability:** The `user_config.py` endpoints used a custom `get_current_user_id` dependency that defaulted to ID 1 or accepted a `user_id` query parameter for "testing purposes". This allowed full authentication bypass and IDOR.
 **Learning:** Convenience functions for testing/development (like "mock auth") must strictly separate from production code or be gated behind explicit `DEBUG` flags. Leaving them as default dependencies opens critical backdoors.
 **Prevention:** Use standard `get_current_user` dependencies everywhere. If testing mocks are needed, use `app.dependency_overrides` in the test suite, not in the application code.
+
+## 2025-05-15 - [CRITICAL] Insecure Default Configuration Startup
+**Vulnerability:** The application was configured to start successfully even if `DEBUG=False` (production mode) was set while retaining known insecure default secrets (`SECRET_KEY`, `DYNAMIC_SALT`). This creates a risk of production deployments using compromised keys.
+**Learning:** Pydantic `BaseSettings` handles environment variable loading, but does not inherently enforce semantic security rules (like "don't use the default string"). Explicit validation logic is required to prevent "silent insecurity".
+**Prevention:** Implement `model_validator` in `config.py` to assert that critical security variables deviate from their defaults when `DEBUG=False`. Fail fast at startup.
