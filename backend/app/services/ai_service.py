@@ -144,7 +144,9 @@ class AIService:
         content_format: str,
         goal: str,
         similar_top_posts: List[Dict[str, Any]] = None,
-        ml_recommendations: Dict[str, Any] = None
+        ml_recommendations: Dict[str, Any] = None,
+        effort_level: str = "medium",
+        current_mood: str = "on_camera"
     ) -> Dict[str, Any]:
         """
         Generate a single high-engagement content piece
@@ -157,7 +159,7 @@ class AIService:
         system_prompt = self._get_content_generation_system_prompt(platform)
         user_prompt = self._build_content_generation_prompt(
             business_info, patterns, platform, content_format, goal, similar_top_posts,
-            ml_recommendations
+            ml_recommendations, effort_level, current_mood
         )
 
         try:
@@ -612,7 +614,9 @@ Responde en JSON (lista de 3 objetos):
         content_format: str,
         goal: str,
         similar_posts: List[Dict[str, Any]] = None,
-        ml_recommendations: Dict[str, Any] = None
+        ml_recommendations: Dict[str, Any] = None,
+        effort_level: str = "medium",
+        current_mood: str = "on_camera"
     ) -> str:
         # Build ML recommendations section if available
         ml_section = ""
@@ -627,6 +631,20 @@ ML RECOMMENDATIONS (MUST INCORPORATE):
 IMPORTANT: The ML model has analyzed thousands of high-engagement posts.
 Incorporate these recommendations to maximize engagement score.
 """
+
+        # Build Constraints section
+        constraints_section = "PRODUCTION CONSTRAINTS (ADAPTIVE DIFFICULTY):\n"
+        if effort_level == "low":
+            constraints_section += "- FORBIDDEN: Transitions, changing locations, complex B-roll.\n- MUST BE: Continuous shot or simple talking head. Maximum 5 minutes to film.\n"
+        elif effort_level == "medium":
+            constraints_section += "- ALLOWED: Simple cuts, basic text overlays, simple B-roll.\n- AVOID: Complex transitions or multiple locations.\n"
+        elif effort_level == "pro":
+            constraints_section += "- ALLOWED: Full production, transitions, B-Roll, voiceovers, trending audio sync.\n"
+
+        if current_mood == "camera_shy":
+            constraints_section += "- MOOD: Camera Shy. Focus on showing the product/service/environment with voiceover. Do not require the user's face to be the main focus.\n"
+        elif current_mood == "on_camera":
+            constraints_section += "- MOOD: On Camera. Encourage talking head or direct address to camera to build personal brand.\n"
 
         return f"""Genera contenido de ALTO ENGAGEMENT para:
 
@@ -648,6 +666,8 @@ PATRONES PROBADOS A USAR:
 {json.dumps(similar_posts[:3], ensure_ascii=False, indent=2) if similar_posts else ""}
 
 {ml_section}
+
+{constraints_section}
 
 Genera contenido en JSON:
 {{

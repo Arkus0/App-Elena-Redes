@@ -37,6 +37,10 @@ class ContentGenerationRequest(BaseModel):
     content_mix: Optional[dict] = None
     # {"reels": 60, "carousels": 20, "static": 10, "stories": 10}
 
+    # Production Constraints (Adaptive Difficulty)
+    effort_level: str = "medium"  # low, medium, pro
+    current_mood: str = "on_camera"  # camera_shy, on_camera
+
     # Specific requests
     include_trends: bool = True
     refresh_competitor_data: bool = True

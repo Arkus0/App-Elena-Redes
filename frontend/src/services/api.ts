@@ -205,6 +205,8 @@ export const contentApi = {
       platforms?: string[]
       content_mix?: Record<string, number>
       refresh_competitor_data?: boolean
+      effort_level?: string
+      current_mood?: string
     }
   ) => {
     const { data: response } = await api.post<ContentCalendar>(
