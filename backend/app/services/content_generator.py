@@ -225,6 +225,9 @@ class ContentGenerator:
                 "content_format": content_format,
                 "business_type": business.business_type.value,
                 "video_duration_seconds": 30 if content_format in ["reel", "tiktok_video"] else 0,
+                # Map generated content to multimodal fields
+                "whisper_transcript": content_piece.video_script,
+                "visual_description": content_piece.filming_guide,
             })
 
             content_piece.engagement_score = final_ml_prediction.get("score", 0)
@@ -241,6 +244,7 @@ class ContentGenerator:
                 "format_recommendation": ml_prediction.get("format_recommendation", {}),
                 "triggers_used": ml_recommendations.get("trigger_suggestions", []),
                 "bandit_recommendation": bandit_recommendation,
+                "multi_output_breakdown": final_ml_prediction.get("multi_output_breakdown"),
             }
             content_piece.similar_viral_posts = [
                 {"id": p.get("id"), "engagement": p.get("engagement_score")}
