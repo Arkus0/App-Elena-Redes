@@ -4,6 +4,7 @@ Core settings for the application
 """
 from functools import lru_cache
 from typing import Optional
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -100,6 +101,32 @@ class Settings(BaseSettings):
 
     # Skip multimodal for non-video content
     LIGHT_SKIP_NON_VIDEO: bool = True
+
+    @model_validator(mode='after')
+    def validate_security_settings(self) -> 'Settings':
+        if not self.DEBUG:
+            # Critical security checks for production
+            insecure_secret = "your-secret-key-change-in-production-min-32-chars"
+            insecure_salt = "dev-dynamic-salt-change-in-prod-v1"
+
+            if self.SECRET_KEY == insecure_secret:
+                raise ValueError(
+                    "CRITICAL SECURITY ERROR: You are running in production mode (DEBUG=False) "
+                    "but using the default insecure SECRET_KEY. "
+                    "Please set SECRET_KEY environment variable."
+                )
+
+            if self.DYNAMIC_SALT == insecure_salt:
+                raise ValueError(
+                    "CRITICAL SECURITY ERROR: You are running in production mode (DEBUG=False) "
+                    "but using the default insecure DYNAMIC_SALT. "
+                    "Please set DYNAMIC_SALT environment variable."
+                )
+
+            if len(self.SECRET_KEY) < 32:
+                raise ValueError("SECRET_KEY is too short (min 32 chars required in production)")
+
+        return self
 
     class Config:
         env_file = ".env"
