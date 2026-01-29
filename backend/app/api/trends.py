@@ -7,6 +7,7 @@ Endpoints para verificar la frescura de audios y hashtags antes de usarlos:
 - POST /validate-recipe: Valida y filtra elementos de una receta viral
 - GET /status/{status}: Descripción de un estado de tendencia
 """
+import asyncio
 import logging
 from typing import List
 
@@ -159,17 +160,24 @@ async def check_trends_batch(request: BatchTrendCheckRequest) -> BatchTrendCheck
         ]
 
         # Procesar en paralelo por tipo
+        # Bolt Optimization: Use asyncio.gather for concurrent execution
+        tasks = []
+        for trend_req in request.trends:
+            tasks.append(
+                checker.check_trend_velocity(
+                    trend_type=_convert_trend_type(trend_req.trend_type),
+                    trend_identifier=trend_req.trend_identifier,
+                    platform=trend_req.platform,
+                    sample_size=trend_req.sample_size
+                )
+            )
+
+        results = await asyncio.gather(*tasks)
+
         all_fresh = []
         all_stale = []
 
-        for trend_req in request.trends:
-            result = await checker.check_trend_velocity(
-                trend_type=_convert_trend_type(trend_req.trend_type),
-                trend_identifier=trend_req.trend_identifier,
-                platform=trend_req.platform,
-                sample_size=trend_req.sample_size
-            )
-
+        for result, trend_req in zip(results, request.trends):
             response_item = TrendVelocityResponse(
                 trend_type=trend_req.trend_type,
                 trend_identifier=result.trend_identifier,
