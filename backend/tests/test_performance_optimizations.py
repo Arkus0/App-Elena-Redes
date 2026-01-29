@@ -394,6 +394,71 @@ class TestOpticalFlowToggle:
 
 
 # =============================================================================
+# D) TREND VELOCITY PARALLELIZATION TESTS
+# =============================================================================
+
+class TestTrendVelocityParallelization:
+    """Tests for parallel execution of trend checks."""
+
+    @pytest.mark.asyncio
+    async def test_batch_check_performance(self):
+        """Verify batch trend checks run concurrently."""
+        from app.api.trends import check_trends_batch
+        from app.schemas.trend_velocity import BatchTrendCheckRequest, TrendCheckRequest, TrendTypeEnum
+        from app.services.trend_velocity import TrendVelocityResult, TrendStatus, TrendType
+
+        # Mock the checker
+        mock_checker = AsyncMock()
+
+        # Simulate a slow check (0.1s)
+        async def slow_check(*args, **kwargs):
+            await asyncio.sleep(0.1)
+            return TrendVelocityResult(
+                trend_type=kwargs.get('trend_type', TrendType.HASHTAG),
+                trend_identifier=kwargs.get('trend_identifier', 'test'),
+                status=TrendStatus.STABLE,
+                is_fresh=True,
+                is_stale=False,
+                samples_analyzed=50,
+                samples_last_48h=10,
+                samples_last_week=20,
+                samples_older_2weeks=20,
+                pct_last_48h=0.2,
+                pct_last_week=0.4,
+                pct_older_2weeks=0.4,
+                velocity_score=0.1,
+                acceleration=0.0,
+                avg_engagement=100.0,
+                peak_date=None,
+                recommendation="Test"
+            )
+
+        mock_checker.check_trend_velocity.side_effect = slow_check
+
+        # Patch the _get_checker function in app.api.trends
+        with patch('app.api.trends._get_checker', return_value=mock_checker):
+            # Create a request with 5 items
+            request = BatchTrendCheckRequest(
+                trends=[
+                    TrendCheckRequest(trend_type=TrendTypeEnum.HASHTAG, trend_identifier=f"test{i}", platform="instagram")
+                    for i in range(5)
+                ]
+            )
+
+            start_time = time.time()
+            await check_trends_batch(request)
+            end_time = time.time()
+
+            duration = end_time - start_time
+            print(f"Duration: {duration:.4f}s")
+
+            # We expect concurrent execution to take roughly 0.1s + overhead
+            # So verifying it is < 0.25s confirms it is running in parallel
+            # (Sequential would be > 0.5s)
+            assert duration < 0.25, f"Expected concurrent execution (< 0.25s), but took {duration:.4f}s"
+
+
+# =============================================================================
 # INTEGRATION TESTS
 # =============================================================================
 
