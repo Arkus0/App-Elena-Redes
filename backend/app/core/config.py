@@ -4,6 +4,7 @@ Core settings for the application
 """
 from functools import lru_cache
 from typing import Optional
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -100,6 +101,25 @@ class Settings(BaseSettings):
 
     # Skip multimodal for non-video content
     LIGHT_SKIP_NON_VIDEO: bool = True
+
+    @model_validator(mode='after')
+    def check_production_security(self) -> 'Settings':
+        """
+        Validates that critical secrets are changed in production (DEBUG=False).
+        """
+        if self.DEBUG:
+            return self
+
+        insecure_secret = "your-secret-key-change-in-production-min-32-chars"
+        insecure_salt = "dev-dynamic-salt-change-in-prod-v1"
+
+        if self.SECRET_KEY == insecure_secret:
+            raise ValueError("CRITICAL SECURITY ERROR: SECRET_KEY must be changed in production!")
+
+        if self.DYNAMIC_SALT == insecure_salt:
+            raise ValueError("CRITICAL SECURITY ERROR: DYNAMIC_SALT must be changed in production!")
+
+        return self
 
     class Config:
         env_file = ".env"
