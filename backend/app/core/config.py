@@ -4,7 +4,11 @@ Core settings for the application
 """
 from functools import lru_cache
 from typing import Optional
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
+
+DEFAULT_SECRET_KEY = "your-secret-key-change-in-production-min-32-chars"
+DEFAULT_DYNAMIC_SALT = "dev-dynamic-salt-change-in-prod-v1"
 
 
 class Settings(BaseSettings):
@@ -14,7 +18,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # Security
-    SECRET_KEY: str = "your-secret-key-change-in-production-min-32-chars"
+    SECRET_KEY: str = DEFAULT_SECRET_KEY
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
@@ -24,7 +28,7 @@ class Settings(BaseSettings):
     # Blind Identity settings for PII anonymization
     PRIVACY_MODE_ENABLED: bool = True
     # Salt for SHA-256 hashing. CHANGE THIS IN PRODUCTION!
-    DYNAMIC_SALT: str = "dev-dynamic-salt-change-in-prod-v1"
+    DYNAMIC_SALT: str = DEFAULT_DYNAMIC_SALT
 
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./brandpulse.db"
@@ -104,6 +108,21 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+
+    @model_validator(mode='after')
+    def validate_security_settings(self):
+        """
+        Validate that security settings are safe for production.
+        If DEBUG is False, we MUST have changed the default secrets.
+        """
+        if not self.DEBUG:
+            if self.SECRET_KEY == DEFAULT_SECRET_KEY:
+                raise ValueError("Production configuration error: SECRET_KEY is set to the default insecure value.")
+
+            if self.DYNAMIC_SALT == DEFAULT_DYNAMIC_SALT:
+                raise ValueError("Production configuration error: DYNAMIC_SALT is set to the default insecure value.")
+
+        return self
 
 
 @lru_cache()
