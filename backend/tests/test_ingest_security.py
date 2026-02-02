@@ -188,6 +188,32 @@ def test_ingest_anonymous_skipped_processing(client):
         # Should NOT have added a background task
         mock_add_task.assert_not_called()
 
+def test_anonymous_no_db_session(client):
+    """Test that anonymous requests do NOT create a database session (lazy loading fix)"""
+    payload = {
+        "source": "anonymous",
+        # No businessId
+        "content": {
+            "platform": "instagram",
+            "contentType": "post",
+            "contentId": "anon_db_test",
+            "contentUrl": "http://example.com/post",
+            "author": { "username": "anon_user" },
+            "metrics": { "likes": 100 },
+            "extractedAt": "2024-01-01T00:00:00",
+            "sourceUrl": "http://example.com",
+            "extractionMethod": "dom_scraping"
+        }
+    }
+
+    # Patch async_session_maker in app.api.ingest to verify it's NOT called
+    with patch("app.api.ingest.async_session_maker") as mock_session_maker:
+        response = client.post("/api/ingest/raw", json=payload)
+
+        assert response.status_code == 200
+        # Assert session maker was NOT called
+        mock_session_maker.assert_not_called()
+
 if __name__ == "__main__":
     # Allow running as script
     pytest.main([__file__])

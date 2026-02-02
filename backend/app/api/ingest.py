@@ -973,7 +973,6 @@ async def ingest_raw_data(
     x_extension_id: Optional[str] = Header(None),
     x_content_type: Optional[str] = Header(None),
     x_extension_api_key: Optional[str] = Header(None, alias="X-Extension-API-Key"),
-    db: AsyncSession = Depends(get_db),
 ):
     """
     Ingest raw data from Elena Bridge Chrome extension.
@@ -1001,42 +1000,46 @@ async def ingest_raw_data(
     # Generate task ID for tracking
     task_id = str(uuid.uuid4())[:8]
 
-    # SECURITY: Verify API Key if businessId is provided
-    if payload.businessId:
-        if not x_extension_api_key:
-            logger.warning(f"[{task_id}] Rejected ingest request with businessId={payload.businessId} but no API key")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="API Key required when businessId is provided"
-            )
-
-        business = await get_business_by_api_key(db, x_extension_api_key)
-        if not business or business.id != payload.businessId:
-            logger.warning(f"[{task_id}] Rejected ingest request: API Key does not match businessId={payload.businessId}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API Key for this business"
-            )
-
-    # =========================================================================
-    # USER CONFIG SYNC: Load config from database if IDs provided
-    # =========================================================================
+    # Initialize user_config outside the session block
     user_config: Optional[PipelineConfig] = None
-    if payload.businessId and payload.userId:
-        try:
-            user_config = await user_config_service.get_pipeline_config(
-                db, payload.userId, payload.businessId
-            )
-            # Log config load (sanitized own username)
-            masked_own = privacy_provider.hash_pii(user_config.own_instagram_username) if user_config.own_instagram_username else 'N/A'
-            logger.info(
-                f"[{task_id}] USER CONFIG LOADED: precision={user_config.embedding_precision}, "
-                f"multimodal={user_config.multimodal_mode}, "
-                f"own_hash={masked_own[:8]}..."
-            )
-        except Exception as e:
-            logger.warning(f"[{task_id}] Could not load user config: {e}. Using defaults.")
-            user_config = get_default_pipeline_config(payload.userId, payload.businessId)
+
+    # SECURITY: Verify API Key if businessId is provided
+    # Lazy-load DB session only if authenticated to prevent DoS from anonymous users
+    if payload.businessId:
+        async with async_session_maker() as db:
+            if not x_extension_api_key:
+                logger.warning(f"[{task_id}] Rejected ingest request with businessId={payload.businessId} but no API key")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="API Key required when businessId is provided"
+                )
+
+            business = await get_business_by_api_key(db, x_extension_api_key)
+            if not business or business.id != payload.businessId:
+                logger.warning(f"[{task_id}] Rejected ingest request: API Key does not match businessId={payload.businessId}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API Key for this business"
+                )
+
+            # =========================================================================
+            # USER CONFIG SYNC: Load config from database if IDs provided
+            # =========================================================================
+            if payload.userId:
+                try:
+                    user_config = await user_config_service.get_pipeline_config(
+                        db, payload.userId, payload.businessId
+                    )
+                    # Log config load (sanitized own username)
+                    masked_own = privacy_provider.hash_pii(user_config.own_instagram_username) if user_config.own_instagram_username else 'N/A'
+                    logger.info(
+                        f"[{task_id}] USER CONFIG LOADED: precision={user_config.embedding_precision}, "
+                        f"multimodal={user_config.multimodal_mode}, "
+                        f"own_hash={masked_own[:8]}..."
+                    )
+                except Exception as e:
+                    logger.warning(f"[{task_id}] Could not load user config: {e}. Using defaults.")
+                    user_config = get_default_pipeline_config(payload.userId, payload.businessId)
 
     # Handle individual content (posts, reels, videos)
     if payload.content:
