@@ -9,7 +9,7 @@ Added fields for balanced sampling to collect both viral posts AND flops:
 - performance_percentile: Position in engagement ranking
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Text, Float, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Text, Float, Boolean, Index
 from sqlalchemy.orm import relationship
 import enum
 from app.core.database import Base
@@ -34,6 +34,10 @@ class PerformanceTier(str, enum.Enum):
 
 class ScrapedPost(Base):
     __tablename__ = "scraped_posts"
+    __table_args__ = (
+        Index('ix_scraped_posts_competitor_engagement', 'competitor_id', 'engagement_score'),
+        Index('ix_scraped_posts_competitor_platform_id', 'competitor_id', 'platform_post_id'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     # Bolt Optimization: Added index=True to competitor_id for faster filtering by competitor
